@@ -356,14 +356,7 @@ B32_THUNK(_AudioFileReadBytes) {
 }
 
 // --- run loops: audio callbacks may be delivered on a guest thread's run loop ------------------
-
-// SInt32 CFRunLoopRunInMode(CFStringRef mode, CFTimeInterval seconds, Boolean returnAfterSourceHandled)
-B32_THUNK(_CFRunLoopRunInMode) {
-    CFStringRef mode = (CFStringRef)c.rt.bridge().toHost(c.args.ptr());
-    double seconds = c.args.f64();
-    Boolean returnAfterSource = Boolean(c.args.u32());
-    c.ret(uint32_t(CFRunLoopRunInMode(mode, seconds, returnAfterSource)));
-}
+// (CFRunLoopRunInMode is in core/uikit/eventloop.mm, which also dispatches input.)
 
 B32_THUNK(_CFRunLoopStop) { CFRunLoopStop((CFRunLoopRef)c.rt.bridge().toHost(c.args.ptr())); }
 
