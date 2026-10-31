@@ -409,9 +409,9 @@ B32_THUNK(_dlopen) {
 B32_THUNK(_dlsym) {
     c.args.ptr();  // handle: every library shares the one thunk table
     std::string name = std::string("_") + c.mem.cstr(c.args.ptr());
-    bool known = ThunkRegistry::all().count(name) != 0;
-    log("dlsym(%s) -> %s", name.c_str(), known ? "thunk" : "not found");
-    c.ret(known ? c.rt.thunks().stubFor(name) : 0);
+    GuestAddr addr = c.rt.lookUp(name);
+    log("dlsym(%s) -> 0x%08x", name.c_str(), addr);
+    c.ret(addr);
 }
 
 B32_THUNK(_dlclose) { c.ret(0); }
