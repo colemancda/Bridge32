@@ -113,4 +113,7 @@ private:
     std::unordered_map<std::string, uint32_t> byName_;
 };
 
+// Stores the host's errno in the calling guest thread's errno (libsystem.cpp).
+void setGuestErrno(Call &c, int value);
+
 }  // namespace b32
