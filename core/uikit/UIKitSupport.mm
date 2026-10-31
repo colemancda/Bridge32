@@ -25,16 +25,12 @@ using namespace b32::objc;
 namespace {
 
 constexpr CGFloat kStatusBarHeight = 20;
-CGFloat screenWidth() { return device::current().screenWidth; }
-CGFloat screenHeight() { return device::current().screenHeight; }
 
 UIWindowScene *guestScene = nil;
 
-// How far the guest's portrait screen is turned on the Mac: games of the era
-// draw landscape into a portrait framebuffer and expect the device turned.
-// B32Orientation in Info.plist (set by make-app.sh) or the guest's own
-// UIInterfaceOrientation chooses it.
-CGFloat guestRotation() {
+// How far the device is turned from portrait: B32Orientation in Info.plist
+// (set by make-app.sh) or the guest's own UIInterfaceOrientation.
+CGFloat deviceRotation() {
     static CGFloat rotation = [] {
         NSBundle *bundle = [NSBundle mainBundle];
         NSString *orientation = [bundle objectForInfoDictionaryKey:@"B32Orientation"]
@@ -45,6 +41,23 @@ CGFloat guestRotation() {
     }();
     return rotation;
 }
+
+// From iOS 8 the screen's bounds follow the interface orientation, and apps
+// built with that SDK draw upright into a landscape window. Older ones see a
+// portrait screen and draw turned, expecting the device turned.
+bool boundsFollowOrientation() {
+    static bool follow = [[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32GuestSDKVersion"] doubleValue] >= 8;
+    return follow;
+}
+
+// How far the guest's window is turned on the Mac.
+CGFloat guestRotation() { return boundsFollowOrientation() ? 0 : deviceRotation(); }
+
+// The screen the guest sees: portrait, or landscape for a landscape game
+// built for iOS 8 and later.
+bool screenSwapped() { return boundsFollowOrientation() && deviceRotation() != 0; }
+CGFloat screenWidth() { return screenSwapped() ? device::current().screenHeight : device::current().screenWidth; }
+CGFloat screenHeight() { return screenSwapped() ? device::current().screenWidth : device::current().screenHeight; }
 
 CGSize sceneSize() {
     return guestRotation() != 0 ? CGSizeMake(screenHeight(), screenWidth()) : CGSizeMake(screenWidth(), screenHeight());
@@ -233,6 +246,8 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 }
 
 @end
+
+CGFloat b32::uikit::windowRotation() { return guestRotation(); }
 
 UIWindow *b32::uikit::guestKeyWindow() {
     UIWindow *front = nil;
