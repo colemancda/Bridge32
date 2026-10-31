@@ -8,6 +8,7 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <CoreFoundation/CoreFoundation.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <mach/mach.h>
@@ -762,8 +763,41 @@ B32_THUNK(_utime) {
 }
 
 // bool __availability_version_check(uint32_t count, dyld_build_version_t versions[]):
-// behind @available, which the guest's OS versions always satisfy.
-B32_THUNK(__availability_version_check) { c.ret(1); }
+// behind @available. Each { platform, version } is checked against the iOS
+// the guest was built for (B32GuestSDKVersion): code needing anything newer
+// was compiled out of it, so taking those branches would only reach
+// half-built paths (SDL then names controllers in a way its own mapping
+// database doesn't know). Without the key, everything is available.
+namespace {
+uint32_t guestIOSVersion() {
+    static uint32_t version = [] {
+        CFStringRef value = static_cast<CFStringRef>(
+            CFBundleGetValueForInfoDictionaryKey(CFBundleGetMainBundle(), CFSTR("B32GuestSDKVersion")));
+        char text[32] = {};
+        if (!value || CFGetTypeID(value) != CFStringGetTypeID() ||
+            !CFStringGetCString(value, text, sizeof text, kCFStringEncodingUTF8))
+            return UINT32_MAX;
+        unsigned major = 0, minor = 0, patch = 0;
+        std::sscanf(text, "%u.%u.%u", &major, &minor, &patch);
+        return (major << 16) | (minor << 8) | patch;  // dyld's packed xxxx.yy.zz
+    }();
+    return version;
+}
+constexpr uint32_t kPlatformIOS = 2;
+}  // namespace
+
+B32_THUNK(__availability_version_check) {
+    uint32_t count = c.args.u32();
+    GuestAddr versions = c.args.ptr();
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t platform = c.mem.read<uint32_t>(versions + i * 8), version = c.mem.read<uint32_t>(versions + i * 8 + 4);
+        if (platform == kPlatformIOS && version > guestIOSVersion()) {
+            c.ret(0);
+            return;
+        }
+    }
+    c.ret(1);
+}
 
 // --- more files ----------------------------------------------------------------------------------
 
