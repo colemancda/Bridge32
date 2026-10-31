@@ -50,3 +50,21 @@ B32_DOUBLE_CONSTANT(kCLLocationAccuracyHundredMeters)
 B32_DOUBLE_CONSTANT(kCLLocationAccuracyKilometer)
 B32_DOUBLE_CONSTANT(kCLLocationAccuracyThreeKilometers)
 B32_DOUBLE_CONSTANT(kCLDistanceFilterNone)
+
+B32_DATA(_UIEdgeInsetsZero, 16) {}
+
+// void UIGraphicsBeginImageContext(CGSize size)
+B32_THUNK(_UIGraphicsBeginImageContext) {
+    float width = c.args.f32();
+    UIGraphicsBeginImageContext(CGSizeMake(width, c.args.f32()));
+}
+// void UIGraphicsBeginImageContextWithOptions(CGSize size, BOOL opaque, CGFloat scale)
+B32_THUNK(_UIGraphicsBeginImageContextWithOptions) {
+    float width = c.args.f32(), height = c.args.f32();
+    BOOL opaque = c.args.u32() != 0;
+    UIGraphicsBeginImageContextWithOptions(CGSizeMake(width, height), opaque, c.args.f32());
+}
+B32_THUNK(_UIGraphicsGetImageFromCurrentImageContext) {
+    c.ret(c.rt.bridge().toGuest(UIGraphicsGetImageFromCurrentImageContext()));
+}
+B32_THUNK(_UIGraphicsEndImageContext) { UIGraphicsEndImageContext(); }
