@@ -238,6 +238,16 @@ B32_THUNK(_class_getInstanceVariable) {
     const GuestIvar *ivar = cls && name ? findIvar(cls, c.mem.cstr(name)) : nullptr;
     c.ret(ivar ? ivar->entry : 0);
 }
+// const char **objc_copyImageNames(unsigned int *outCount): the app's own
+// executable, the image SDKs search for their classes.
+B32_THUNK(_objc_copyImageNames) {
+    GuestAddr outCount = c.args.ptr();
+    GuestAddr list = c.heap.calloc(2, 4);
+    c.mem.write<uint32_t>(list, c.rt.internString(c.rt.image().path));
+    if (outCount) c.mem.write<uint32_t>(outCount, 1);
+    c.ret(list);
+}
+
 // Ivar *class_copyIvarList(Class, unsigned int *outCount): the class's own
 // ivars (not its superclasses'), as their ivar_t entries; none for host classes.
 B32_THUNK(_class_copyIvarList) {
