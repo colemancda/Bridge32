@@ -41,6 +41,12 @@ def main():
     # The shell's UIDeviceFamily wins for the Mac; keep the guest's (iPhone,
     # iPad or both) for choosing the device the guest sees.
     merged["B32GuestDeviceFamily"] = guest.get("UIDeviceFamily", [1])
+    # The SDK the guest was built with (or, failing that, the oldest iOS it
+    # runs on): from iOS 8 the screen's bounds follow the orientation.
+    sdk = guest.get("DTPlatformVersion") or guest.get("DTSDKName", "").replace("iphoneos", "") \
+        or guest.get("MinimumOSVersion")
+    if sdk:
+        merged["B32GuestSDKVersion"] = str(sdk)
     # The guest bundle's directory name, recreated next to Documents/ in the
     # container the way iOS lays out an app's sandbox.
     if bundle_name:
