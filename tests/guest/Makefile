@@ -7,7 +7,7 @@ CC      := xcrun clang
 # -marm: Xcode 27's linker writes an even LC_MAIN entry offset for Thumb code.
 CFLAGS  := -arch armv7 -isysroot $(SDK) -miphoneos-version-min=9.0 -marm -O1 -Wall
 
-TESTS   := hello
+TESTS   := hello cxx
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
@@ -15,6 +15,12 @@ all: $(addprefix $(OUT)/,$(TESTS))
 $(OUT)/hello: hello/hello.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -o $@ $<
+
+# No C++ standard library headers: the test only needs the runtime (libc++abi,
+# re-exported by libc++) and links the libgcc helpers from libSystem.
+$(OUT)/cxx: cxx/cxx.cpp
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -std=c++17 -o $@ $< -lc++
 
 clean:
 	rm -rf $(OUT)

@@ -26,6 +26,8 @@ add_library(b32core OBJECT
     core/mem/GuestMemory.cpp
     core/thunks/Format.cpp
     core/thunks/Thunks.cpp
+    core/thunks/compiler_rt.cpp
+    core/thunks/cxxabi.cpp
     core/thunks/libc.cpp
 )
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -52,4 +54,7 @@ if(B32_HAVE_DYNARMIC)
     add_test(NAME run-hello COMMAND b32-run "${B32_GUEST_DIR}/hello")
     set_tests_properties(run-hello PROPERTIES PASS_REGULAR_EXPRESSION
         "hello from armv7, argc=1.*guest heap len=10.*fib\\(20\\)=6765.*double=6\\.283")
+    add_test(NAME run-cxx COMMAND b32-run "${B32_GUEST_DIR}/cxx")
+    set_tests_properties(run-cxx PROPERTIES PASS_REGULAR_EXPRESSION
+        "area=42.*array\\[3\\]=9.*static init ran.*counter=2.*try=42.*div=-3 mod=-2 udiv=3 ldiv=-3333333333.*fadd=3\\.75 fdiv=0\\.25 flt=1 fix=-3 dmul=-6\\.0")
 endif()
