@@ -168,11 +168,21 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
     CGSize size = sceneSize();
     CGSize minimum = CGSizeMake(size.width + insets.left + insets.right, size.height + insets.top + insets.bottom);
     CGSize current = scene.sizeRestrictions.minimumSize;
-    if (minimum.width > current.width || minimum.height > current.height) {
+    // The window starts at that smallest size: the guest's screen at 1:1
+    // under the title bar. Afterwards it only grows to keep the guest whole,
+    // leaving the player's own resizing alone.
+    static bool sizedForLaunch = false;
+    bool launch = !sizedForLaunch && insets.top > 0;
+    if (launch || minimum.width > current.width || minimum.height > current.height) {
         scene.sizeRestrictions.minimumSize = minimum;
         CGRect frame = scene.effectiveGeometry.systemFrame;
-        frame.size.width = std::max(frame.size.width, minimum.width);
-        frame.size.height = std::max(frame.size.height, minimum.height);
+        if (launch) {
+            sizedForLaunch = true;
+            frame.size = minimum;
+        } else {
+            frame.size.width = std::max(frame.size.width, minimum.width);
+            frame.size.height = std::max(frame.size.height, minimum.height);
+        }
         [scene requestGeometryUpdateWithPreferences:[[[UIWindowSceneGeometryPreferencesMac alloc] initWithSystemFrame:frame] autorelease]
                                        errorHandler:nil];
     }
