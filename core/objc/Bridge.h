@@ -97,6 +97,10 @@ public:
     // Makes a guest address that isn't a bridged object (a framework's global,
     // like _dispatch_main_q) stand for a host object, both ways.
     void aliasObject(GuestAddr guest, id host);
+    bool isAlias(GuestAddr guest);
+    // A protocol by name as a guest protocol_t: the app's own, or one standing
+    // for the host's; 0 if neither has it.
+    GuestAddr protocolNamed(const std::string &name);
 
     // Reflection (class_getInstanceMethod, method_exchangeImplementations...).
     // A Method is a guest method_t { SEL, types, IMP }: a guest class's own,
@@ -227,6 +231,15 @@ private:
     std::unordered_map<std::string, GuestAddr> guestProtocolByName_;
     Protocol *hostProtocol(const std::string &name);
     std::recursive_mutex initLock_;
+    bool running_ = false;     // guest code has started (runLoadMethods)
+    bool settingUp_ = false;   // inside setupImage
+    struct DeferredTrampoline {
+        Class target;
+        GuestAddr sel;
+        GuestMethod method;
+        ClassInfo *owner;
+    };
+    std::vector<DeferredTrampoline> deferredResolvers_;
     std::unordered_map<std::string, GuestAddr> hostConstants_;
     struct MutableBuffer {
         GuestAddr guest;
