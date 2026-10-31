@@ -65,6 +65,10 @@ public:
     // Called by exit() and friends: unwinds back out of run().
     [[noreturn]] void exit(int status);
 
+    // dlsym: a symbol as the loader would bind it (the app's own, a guest
+    // library's, a data symbol, ObjC data, a host constant or a thunk), or 0.
+    GuestAddr lookUp(const std::string &symbol);
+
     // Guest address of an imported data symbol (___stderrp etc.), or 0.
     GuestAddr dataSymbol(const std::string &symbol);
     // Copies a host string into guest memory that lives as long as the process.
