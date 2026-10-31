@@ -135,6 +135,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             seg.vmaddr += slide;
             segments.push_back(seg);
             image.end = std::max(image.end, seg.vmaddr + seg.vmsize);
+            if (fixedName(seg.segname, 16) == "__TEXT") image.base = seg.vmaddr;
             if (seg.vmsize && seg.initprot) {
                 mem_.map(seg.vmaddr, seg.vmsize);
                 if (seg.filesize) mem_.copyIn(seg.vmaddr, slice + seg.fileoff, seg.filesize);
