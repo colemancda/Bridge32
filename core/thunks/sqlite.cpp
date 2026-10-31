@@ -10,6 +10,8 @@
 #include <dlfcn.h>
 #include <sqlite3.h>
 
+#include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -121,6 +123,101 @@ B32_THUNK(_sqlite3_bind_text) {
     if (destructor && destructor != 0xffffffff) c.cpu.call(destructor, {text});
     c.ret(uint32_t(rc));
 }
+
+// const void *sqlite3_column_blob(sqlite3_stmt *, int): copied like text.
+B32_THUNK(_sqlite3_column_blob) {
+    sqlite3_stmt *stmt = object<sqlite3_stmt>(c.args.u32());
+    int column = c.args.i32();
+    const void *blob = sqlite3_column_blob(stmt, column);
+    if (!blob) {
+        c.ret(0);
+        return;
+    }
+    int length = sqlite3_column_bytes(stmt, column);
+    GuestAddr copy = c.heap.alloc(uint32_t(std::max(length, 1)));
+    c.mem.copyIn(copy, blob, uint32_t(length));
+    {
+        std::lock_guard guard(lock);
+        columnText[stmt].push_back(copy);
+    }
+    c.ret(copy);
+}
+
+B32_THUNK(_sqlite3_column_int64) {
+    sqlite3_stmt *stmt = object<sqlite3_stmt>(c.args.u32());
+    c.ret64(uint64_t(sqlite3_column_int64(stmt, c.args.i32())));
+}
+
+// int sqlite3_bind_int64(sqlite3_stmt *, int, sqlite3_int64)
+B32_THUNK(_sqlite3_bind_int64) {
+    sqlite3_stmt *stmt = object<sqlite3_stmt>(c.args.u32());
+    int index = c.args.i32();
+    c.ret(uint32_t(sqlite3_bind_int64(stmt, index, int64_t(c.args.u64()))));
+}
+
+// int sqlite3_bind_blob(sqlite3_stmt *, int, const void *, int n, void (*destructor)(void *))
+B32_THUNK(_sqlite3_bind_blob) {
+    sqlite3_stmt *stmt = object<sqlite3_stmt>(c.args.u32());
+    int index = c.args.i32();
+    GuestAddr blob = c.args.ptr();
+    int length = c.args.i32();
+    GuestAddr destructor = c.args.ptr();
+    int rc = sqlite3_bind_blob(stmt, index, blob ? c.mem.ptr<void>(blob) : nullptr, length, SQLITE_TRANSIENT);
+    if (destructor && destructor != 0xffffffff) c.cpu.call(destructor, {blob});
+    c.ret(uint32_t(rc));
+}
+
+// int sqlite3_exec(sqlite3 *, const char *sql, int (*callback)(void *, int, char **, char **),
+//                  void *arg, char **errmsg): each row's strings are copied into
+// guest memory for the guest callback.
+B32_THUNK(_sqlite3_exec) {
+    sqlite3 *db = object<sqlite3>(c.args.u32());
+    const char *sql = c.mem.cstr(c.args.ptr());
+    struct Exec {
+        Call *c;
+        GuestAddr callback, arg;
+    } exec{&c, c.args.ptr(), c.args.ptr()};
+    GuestAddr errmsgOut = c.args.ptr();
+    auto row = [](void *data, int count, char **values, char **names) -> int {
+        auto *e = static_cast<Exec *>(data);
+        if (!e->callback) return 0;
+        Call &c = *e->c;
+        std::vector<GuestAddr> copies;
+        auto copy = [&](const char *s) {
+            if (!s) return GuestAddr(0);
+            GuestAddr g = c.heap.alloc(uint32_t(std::strlen(s) + 1));
+            c.mem.copyIn(g, s, std::strlen(s) + 1);
+            copies.push_back(g);
+            return g;
+        };
+        GuestAddr guestValues = c.heap.calloc(uint32_t(std::max(count, 1)), 4);
+        GuestAddr guestNames = c.heap.calloc(uint32_t(std::max(count, 1)), 4);
+        for (int i = 0; i < count; i++) {
+            c.mem.write<uint32_t>(guestValues + uint32_t(i) * 4, copy(values[i]));
+            c.mem.write<uint32_t>(guestNames + uint32_t(i) * 4, copy(names[i]));
+        }
+        auto result = int32_t(c.cpu.call(e->callback, {e->arg, uint32_t(count), guestValues, guestNames}));
+        for (GuestAddr g : copies) c.heap.free(g);
+        c.heap.free(guestValues);
+        c.heap.free(guestNames);
+        return result;
+    };
+    char *errmsg = nullptr;
+    int rc = sqlite3_exec(db, sql, row, &exec, errmsgOut ? &errmsg : nullptr);
+    if (errmsgOut) {
+        // Freed by the guest with sqlite3_free, which frees guest heap memory.
+        GuestAddr copy = 0;
+        if (errmsg) {
+            copy = c.heap.alloc(uint32_t(std::strlen(errmsg) + 1));
+            c.mem.copyIn(copy, errmsg, std::strlen(errmsg) + 1);
+            sqlite3_free(errmsg);
+        }
+        c.mem.write<uint32_t>(errmsgOut, copy);
+    }
+    c.ret(uint32_t(rc));
+}
+
+B32_THUNK(_sqlite3_free) { c.heap.free(c.args.ptr()); }
 
 B32_THUNK(_sqlite3_errmsg) {
     sqlite3 *db = object<sqlite3>(c.args.u32());
