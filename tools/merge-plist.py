@@ -78,6 +78,24 @@ def main():
     for key in ("NSLocationWhenInUseUsageDescription", "NSLocationAlwaysUsageDescription"):
         if not merged.get(key):
             merged[key] = "This app uses your location to show what's nearby."
+    # The other privacy-gated APIs old games touch: macOS ends an app that asks
+    # without a reason in its Info.plist (Smash Hit reads the music library),
+    # and apps built before iOS 10 weren't required to give one.
+    reasons = {
+        "NSAppleMusicUsageDescription": "This app can play music from your library.",
+        "NSMicrophoneUsageDescription": "This app uses the microphone for voice and recording features.",
+        "NSCameraUsageDescription": "This app uses the camera for photo features.",
+        "NSPhotoLibraryUsageDescription": "This app can save and open photos.",
+        "NSPhotoLibraryAddUsageDescription": "This app can save screenshots to your photos.",
+        "NSContactsUsageDescription": "This app can invite friends from your contacts.",
+        "NSCalendarsUsageDescription": "This app can add events to your calendar.",
+        "NSRemindersUsageDescription": "This app can add reminders.",
+        "NSMotionUsageDescription": "This app uses motion data for controls.",
+        "NSSpeechRecognitionUsageDescription": "This app uses speech recognition for voice controls.",
+    }
+    for key, reason in reasons.items():
+        if not merged.get(key):
+            merged[key] = reason
     # A distinct identifier, so the wrapped game gets its own sandbox
     # container and never collides with an installed iOS app of the same id.
     merged["CFBundleIdentifier"] = guest.get("CFBundleIdentifier", "unknown") + ".bridge32"
