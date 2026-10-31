@@ -16,6 +16,8 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/file.h>
 #include <sys/uio.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -761,3 +763,84 @@ B32_THUNK(_utime) {
 // bool __availability_version_check(uint32_t count, dyld_build_version_t versions[]):
 // behind @available, which the guest's OS versions always satisfy.
 B32_THUNK(__availability_version_check) { c.ret(1); }
+
+// --- more files ----------------------------------------------------------------------------------
+
+// ssize_t pread(int, void *, size_t, off_t) and pwrite: off_t is 64-bit.
+B32_THUNK(_pread) {
+    int fd = c.args.i32();
+    GuestAddr buf = c.args.ptr();
+    uint32_t size = c.args.u32();
+    off_t offset = off_t(c.args.u64());
+    c.ret(uint32_t(::pread(fd, c.mem.ptr<void>(buf), size, offset)));
+}
+B32_THUNK(_pwrite) {
+    int fd = c.args.i32();
+    GuestAddr buf = c.args.ptr();
+    uint32_t size = c.args.u32();
+    off_t offset = off_t(c.args.u64());
+    c.ret(uint32_t(::pwrite(fd, c.mem.ptr<void>(buf), size, offset)));
+}
+B32_THUNK(_ftruncate) {
+    int fd = c.args.i32();
+    c.ret(uint32_t(::ftruncate(fd, off_t(c.args.u64()))));
+}
+B32_THUNK(_fsync) { c.ret(uint32_t(::fsync(c.args.i32()))); }
+B32_THUNK(_fchmod) {
+    int fd = c.args.i32();
+    c.ret(uint32_t(::fchmod(fd, mode_t(c.args.u32()))));
+}
+B32_THUNK(_flock) {
+    int fd = c.args.i32();
+    c.ret(uint32_t(::flock(fd, c.args.i32())));
+}
+// ssize_t readlink(const char *, char *, size_t)
+B32_THUNK(_readlink) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr buf = c.args.ptr();
+    c.ret(uint32_t(::readlink(path, c.mem.ptr<char>(buf), c.args.u32())));
+}
+B32_THUNK(_symlink) {
+    const char *target = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::symlink(target, c.mem.cstr(c.args.ptr()))));
+}
+// char *mkdtemp(char *template): fills in the guest's template in place.
+B32_THUNK(_mkdtemp) {
+    GuestAddr path = c.args.ptr();
+    c.ret(::mkdtemp(c.mem.ptr<char>(path)) ? path : 0);
+}
+
+namespace {
+// Two guest timevals (atime, mtime), or none for "now".
+bool readTimes(Call &c, GuestAddr times, struct timeval out[2]) {
+    if (!times) return false;
+    for (int i = 0; i < 2; i++) out[i] = {c.mem.read<int32_t>(times + i * 8), c.mem.read<int32_t>(times + i * 8 + 4)};
+    return true;
+}
+}  // namespace
+
+B32_THUNK(_utimes) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    struct timeval times[2];
+    c.ret(uint32_t(::utimes(path, readTimes(c, c.args.ptr(), times) ? times : nullptr)));
+}
+B32_THUNK(_futimes) {
+    int fd = c.args.i32();
+    struct timeval times[2];
+    c.ret(uint32_t(::futimes(fd, readTimes(c, c.args.ptr(), times) ? times : nullptr)));
+}
+
+// File system details (struct statfs differs between the ABIs) aren't
+// offered; callers fall back to statvfs, which is converted.
+B32_THUNK(_fstatfs) {
+    setGuestErrno(c, ENOTSUP);
+    c.ret(uint32_t(-1));
+}
+B32_THUNK(_getfsstat) {
+    setGuestErrno(c, ENOTSUP);
+    c.ret(uint32_t(-1));
+}
+B32_THUNK(_fsctl) {
+    setGuestErrno(c, ENOTSUP);
+    c.ret(uint32_t(-1));
+}
