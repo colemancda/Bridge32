@@ -10,6 +10,8 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 
+#include <vector>
+
 using namespace b32;
 
 namespace {
@@ -154,3 +156,143 @@ B32_RECT_GETTER(CGRectGetHeight)
 B32_DATA(_CGRectZero, 16) {}
 B32_DATA(_CGPointZero, 8) {}
 B32_DATA(_CGSizeZero, 8) {}
+
+// --- more CGContext -------------------------------------------------------------------
+
+#define B32_CONTEXT_OP(fn) \
+    B32_THUNK(_##fn) { fn(ref<CGContextRef>(c)); }
+B32_CONTEXT_OP(CGContextBeginPath)
+B32_CONTEXT_OP(CGContextClosePath)
+B32_CONTEXT_OP(CGContextFillPath)
+B32_CONTEXT_OP(CGContextSaveGState)
+B32_CONTEXT_OP(CGContextRestoreGState)
+
+B32_THUNK(_CGContextScaleCTM) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat x = cgf(c);
+    CGContextScaleCTM(ctx, x, cgf(c));
+}
+B32_THUNK(_CGContextTranslateCTM) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat x = cgf(c);
+    CGContextTranslateCTM(ctx, x, cgf(c));
+}
+B32_THUNK(_CGContextAddRect) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextAddRect(ctx, rect(c));
+}
+B32_THUNK(_CGContextAddArcToPoint) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat x1 = cgf(c), y1 = cgf(c), x2 = cgf(c), y2 = cgf(c);
+    CGContextAddArcToPoint(ctx, x1, y1, x2, y2, cgf(c));
+}
+B32_THUNK(_CGContextDrawImage) {
+    auto ctx = ref<CGContextRef>(c);
+    CGRect r = rect(c);
+    CGContextDrawImage(ctx, r, ref<CGImageRef>(c));
+}
+B32_THUNK(_CGContextSetStrokeColorSpace) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextSetStrokeColorSpace(ctx, ref<CGColorSpaceRef>(c));
+}
+B32_THUNK(_CGContextSetFillColorSpace) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextSetFillColorSpace(ctx, ref<CGColorSpaceRef>(c));
+}
+
+namespace {
+// Color components for the context's current color space (plus alpha), as
+// guest floats.
+std::vector<CGFloat> components(Call &c, GuestAddr p, size_t count) {
+    std::vector<CGFloat> values(count);
+    for (size_t i = 0; i < count; i++) values[i] = c.mem.read<float>(p + uint32_t(i) * 4);
+    return values;
+}
+}  // namespace
+
+// void CGContextSetFillColor(CGContextRef, const CGFloat *components): RGB(A)
+// in practice; four components covers it.
+B32_THUNK(_CGContextSetFillColor) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextSetFillColor(ctx, components(c, c.args.ptr(), 4).data());
+}
+B32_THUNK(_CGContextSetStrokeColor) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextSetStrokeColor(ctx, components(c, c.args.ptr(), 4).data());
+}
+
+// void CGContextStrokeLineSegments(CGContextRef, const CGPoint *points, size_t count)
+B32_THUNK(_CGContextStrokeLineSegments) {
+    auto ctx = ref<CGContextRef>(c);
+    GuestAddr points = c.args.ptr();
+    uint32_t count = c.args.u32();
+    std::vector<CGPoint> host(count);
+    for (uint32_t i = 0; i < count; i++)
+        host[i] = CGPointMake(c.mem.read<float>(points + i * 8), c.mem.read<float>(points + i * 8 + 4));
+    CGContextStrokeLineSegments(ctx, host.data(), count);
+}
+
+B32_THUNK(_CGColorSpaceCreateDeviceRGB) { c.ret(c.rt.bridge().toGuest((id)CGColorSpaceCreateDeviceRGB())); }
+B32_THUNK(_CGColorSpaceRelease) { CGColorSpaceRelease(ref<CGColorSpaceRef>(c)); }
+B32_THUNK(_CGImageGetWidth) { c.ret(uint32_t(CGImageGetWidth(ref<CGImageRef>(c)))); }
+B32_THUNK(_CGImageGetHeight) { c.ret(uint32_t(CGImageGetHeight(ref<CGImageRef>(c)))); }
+
+// --- CGAffineTransform: six CGFloats, 24 bytes, returned through r0 ------------------------
+
+namespace {
+CGAffineTransform transform(Call &c) {
+    CGFloat v[6];
+    for (auto &x : v) x = cgf(c);
+    return CGAffineTransformMake(v[0], v[1], v[2], v[3], v[4], v[5]);
+}
+void writeTransform(Call &c, GuestAddr out, CGAffineTransform t) {
+    const CGFloat v[6] = {t.a, t.b, t.c, t.d, t.tx, t.ty};
+    for (int i = 0; i < 6; i++) c.mem.write<float>(out + uint32_t(i) * 4, float(v[i]));
+}
+}  // namespace
+
+B32_DATA(_CGAffineTransformIdentity, 24) {
+    const float identity[6] = {1, 0, 0, 1, 0, 0};
+    rt.mem().copyIn(addr, identity, sizeof identity);
+}
+
+B32_THUNK(_CGAffineTransformMakeRotation) {
+    GuestAddr out = c.args.ptr();
+    writeTransform(c, out, CGAffineTransformMakeRotation(cgf(c)));
+}
+B32_THUNK(_CGAffineTransformMakeScale) {
+    GuestAddr out = c.args.ptr();
+    CGFloat x = cgf(c);
+    writeTransform(c, out, CGAffineTransformMakeScale(x, cgf(c)));
+}
+B32_THUNK(_CGAffineTransformMakeTranslation) {
+    GuestAddr out = c.args.ptr();
+    CGFloat x = cgf(c);
+    writeTransform(c, out, CGAffineTransformMakeTranslation(x, cgf(c)));
+}
+B32_THUNK(_CGAffineTransformRotate) {
+    GuestAddr out = c.args.ptr();
+    CGAffineTransform t = transform(c);
+    writeTransform(c, out, CGAffineTransformRotate(t, cgf(c)));
+}
+B32_THUNK(_CGAffineTransformScale) {
+    GuestAddr out = c.args.ptr();
+    CGAffineTransform t = transform(c);
+    CGFloat x = cgf(c);
+    writeTransform(c, out, CGAffineTransformScale(t, x, cgf(c)));
+}
+B32_THUNK(_CGAffineTransformTranslate) {
+    GuestAddr out = c.args.ptr();
+    CGAffineTransform t = transform(c);
+    CGFloat x = cgf(c);
+    writeTransform(c, out, CGAffineTransformTranslate(t, x, cgf(c)));
+}
+B32_THUNK(_CGAffineTransformConcat) {
+    GuestAddr out = c.args.ptr();
+    CGAffineTransform a = transform(c);
+    writeTransform(c, out, CGAffineTransformConcat(a, transform(c)));
+}
+B32_THUNK(_CGAffineTransformInvert) {
+    GuestAddr out = c.args.ptr();
+    writeTransform(c, out, CGAffineTransformInvert(transform(c)));
+}
