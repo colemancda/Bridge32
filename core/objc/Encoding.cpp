@@ -63,8 +63,22 @@ Type parseType(const char *&p) {
         markStruct(t);
         break;
     }
-    case '(':  // unions: treat as opaque bytes of the first member
-        fatal("union type encodings are not supported yet");
+    case '(': {  // unions: marshalled as their largest member
+        while (*p && *p != '=' && *p != ')') p++;
+        std::vector<Type> members;
+        if (*p == '=') {
+            p++;
+            while (*p && *p != ')') members.push_back(parseType(p));
+        }
+        if (*p == ')') p++;
+        if (!members.empty()) {
+            t = *std::max_element(members.begin(), members.end(),
+                                  [](const Type &a, const Type &b) { return a.guestSize() < b.guestSize(); });
+        } else {
+            t.code = 'v';
+        }
+        break;
+    }
     case '[': {
         while (*p >= '0' && *p <= '9') t.count = t.count * 10 + uint32_t(*p++ - '0');
         t.fields.push_back(parseType(p));
