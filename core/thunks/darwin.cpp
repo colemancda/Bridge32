@@ -12,6 +12,7 @@
 
 #include <mach/mach.h>
 #include <pthread.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -395,3 +396,49 @@ B32_THUNK(___vsprintf_chk) {
     c.mem.copyIn(buffer, s.c_str(), s.size() + 1);
     c.ret(uint32_t(s.size()));
 }
+
+// --- system logging, notifications and extended attributes ------------------------------------
+
+// Apple System Log: messages go to the log; there's nothing to search.
+B32_THUNK(_asl_open) { c.ret(1); }
+B32_THUNK(_asl_new) { c.ret(1); }
+B32_THUNK(_asl_free) {}
+B32_THUNK(_asl_set) { c.ret(0); }
+B32_THUNK(_asl_set_query) { c.ret(0); }
+B32_THUNK(_asl_get) { c.ret(0); }
+B32_THUNK(_asl_search) { c.ret(0); }
+B32_THUNK(_aslresponse_next) { c.ret(0); }
+B32_THUNK(_aslresponse_free) {}
+// int asl_log(aslclient, aslmsg, int level, const char *format, ...)
+B32_THUNK(_asl_log) {
+    c.args.u32();
+    c.args.u32();
+    c.args.i32();
+    std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
+    log("asl: %s", s.c_str());
+    c.ret(0);
+}
+
+// Darwin notifications aren't delivered to the guest; registering succeeds.
+// uint32_t notify_register_dispatch(const char *name, int *token, dispatch_queue_t, notify_handler_t)
+B32_THUNK(_notify_register_dispatch) {
+    static std::atomic<int32_t> nextToken{1};
+    c.args.ptr();
+    if (GuestAddr token = c.args.ptr()) c.mem.write<int32_t>(token, nextToken++);
+    c.ret(0);
+}
+B32_THUNK(_notify_cancel) { c.ret(0); }
+
+// No extended attributes on the guest's files.
+B32_THUNK(_getxattr) {
+    setGuestErrno(c, ENOATTR);
+    c.ret(uint32_t(-1));
+}
+B32_THUNK(_removexattr) { c.ret(0); }
+
+B32_THUNK(_host_info) { c.ret(KERN_FAILURE); }
+B32_THUNK(_atoll) { c.ret64(uint64_t(std::atoll(c.mem.cstr(c.args.ptr())))); }
+
+// Unsigned 64-bit integers to floating point.
+B32_THUNK(___floatundidf) { c.retF64(double(c.args.u64())); }
+B32_THUNK(___floatundisf) { c.retF32(float(c.args.u64())); }
