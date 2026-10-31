@@ -307,14 +307,19 @@ bool blocks::isGuestBlock(Bridge &bridge, GuestAddr object) {
 
 id blocks::toHost(Bridge &bridge, GuestAddr object) {
     if (!isGuestBlock(bridge, object)) return nil;
-    std::lock_guard guard(lock);
-    if (auto it = hostBlockByWrapper.find(object); it != hostBlockByWrapper.end()) return (id)it->second;
-    if (auto it = hostByGuest.find(object); it != hostByGuest.end()) return (id)it->second;
     GuestAddr isa = bridge.runtime().mem().read<uint32_t>(object);
-    if (isa == guestClasses().global) return (id)makeHostBlock(object, true);
-    if (isa == guestClasses().malloc) fatal("guest heap block 0x%08x wasn't made by Block_copy", object);
-    // A stack block: copied now, owned by an autoreleased host block.
-    return objc_autorelease((id)makeHostBlock(copyToGuestHeap(object), false));
+    {
+        std::lock_guard guard(lock);
+        if (auto it = hostBlockByWrapper.find(object); it != hostBlockByWrapper.end()) return (id)it->second;
+        if (auto it = hostByGuest.find(object); it != hostByGuest.end()) return (id)it->second;
+        if (isa == guestClasses().global) return (id)makeHostBlock(object, true);
+        if (isa == guestClasses().malloc) fatal("guest heap block 0x%08x wasn't made by Block_copy", object);
+    }
+    // A stack block: copied now (its copy helper runs guest code, so with no
+    // lock held), owned by an autoreleased host block.
+    GuestAddr copy = copyToGuestHeap(object);
+    std::lock_guard guard(lock);
+    return objc_autorelease((id)makeHostBlock(copy, false));
 }
 
 GuestAddr blocks::toGuest(Bridge &, id object) {
@@ -374,7 +379,7 @@ constexpr uint32_t kByrefNeedsFree = 1u << 24, kByrefHasCopyDispose = 1u << 25, 
 
 GuestAddr byrefCopy(GuestAddr src) {
     GuestMemory &m = mem();
-    std::lock_guard guard(lock);
+    std::unique_lock guard(lock);
     GuestAddr forwarding = m.read<uint32_t>(src + kByrefForwarding);
     uint32_t flags = m.read<uint32_t>(forwarding + kByrefFlags);
     if ((flags & kRefcountMask) == 0) {
@@ -390,6 +395,7 @@ GuestAddr byrefCopy(GuestAddr src) {
             m.write<uint32_t>(copy + kByrefKeep, m.read<uint32_t>(src + kByrefKeep));
             m.write<uint32_t>(copy + kByrefDestroy, m.read<uint32_t>(src + kByrefDestroy));
             if (flags & kByrefLayoutExtended) m.write<uint32_t>(copy + kByrefLayout, m.read<uint32_t>(src + kByrefLayout));
+            guard.unlock();  // the keep helper is guest code
             Runtime::threadCpu().call(m.read<uint32_t>(src + kByrefKeep), {copy, src});
         } else {
             std::memcpy(m.ptr<uint8_t>(copy + kByrefHeader), m.ptr<uint8_t>(src + kByrefHeader), size - kByrefHeader);
@@ -402,7 +408,7 @@ GuestAddr byrefCopy(GuestAddr src) {
 
 void byrefRelease(GuestAddr byref) {
     GuestMemory &m = mem();
-    std::lock_guard guard(lock);
+    std::unique_lock guard(lock);
     GuestAddr forwarding = m.read<uint32_t>(byref + kByrefForwarding);
     uint32_t flags = m.read<uint32_t>(forwarding + kByrefFlags);
     if (!(flags & kByrefNeedsFree)) return;
@@ -410,6 +416,7 @@ void byrefRelease(GuestAddr byref) {
         m.write<uint32_t>(forwarding + kByrefFlags, flags - 2);
         return;
     }
+    guard.unlock();  // the destroy helper is guest code
     if (flags & kByrefHasCopyDispose) Runtime::threadCpu().call(m.read<uint32_t>(forwarding + kByrefDestroy), {forwarding});
     heap().free(forwarding);
 }
