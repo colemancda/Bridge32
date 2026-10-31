@@ -15,6 +15,8 @@
 #include <dlfcn.h>
 
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 using namespace b32;
@@ -329,6 +331,12 @@ constexpr CFunction kCoreGraphics[] = {
     {"CGPathCreateMutable", "o:"}, {"CGPathRelease", "v:o"}, {"CGPathRetain", "o:o"}, {"CGPathCloseSubpath", "v:o"},
     {"CGPathCreateCopy", "o:o"}, {"CGPathIsEmpty", "B:o"},
     {"CGGradientRelease", "v:o"}, {"CGGradientCreateWithColors", "o:oop"},
+    {"CGDataProviderCreateWithFilename", "o:p"}, {"CGFontCreateWithDataProvider", "o:o"},
+    {"CGFontRelease", "v:o"}, {"CGFontRetain", "o:o"}, {"CGFontGetUnitsPerEm", "i:o"},
+    {"CGFontGetAscent", "i:o"}, {"CGFontGetDescent", "i:o"}, {"CGFontGetLeading", "i:o"},
+    {"CGFontGetCapHeight", "i:o"}, {"CGFontGetXHeight", "i:o"}, {"CGFontGetNumberOfGlyphs", "z:o"},
+    {"CGFontCopyTableForTag", "o:ou"}, {"CGFontCreateWithFontName", "o:o"},
+    {"CGFontGetGlyphWithGlyphName", "u:oo"},
 };
 }  // namespace
 
@@ -568,3 +576,79 @@ B32_THUNK(_CGRectDivide) {
 }
 
 B32_THUNK(_CGAffineTransformIsIdentity) { c.ret(CGAffineTransformIsIdentity(transform(c))); }
+
+// --- fonts and data providers -----------------------------------------------------------------
+
+// CGDataProviderRef CGDataProviderCreateWithData(void *info, const void *data, size_t size,
+//     CGDataProviderReleaseDataCallback): the bytes stay in guest memory, which
+// never moves; the guest's release callback isn't called (the data leaks).
+B32_THUNK(_CGDataProviderCreateWithData) {
+    c.args.ptr();
+    GuestAddr data = c.args.ptr();
+    size_t size = c.args.u32();
+    c.ret(c.rt.bridge().toGuest((id)CGDataProviderCreateWithData(nullptr, c.mem.ptr<void>(data), size, nullptr)));
+}
+
+// bool CGFontGetGlyphAdvances(CGFontRef, const CGGlyph glyphs[], size_t count, int advances[]):
+// both arrays have the same layout in the guest.
+B32_THUNK(_CGFontGetGlyphAdvances) {
+    auto font = ref<CGFontRef>(c);
+    GuestAddr glyphs = c.args.ptr();
+    size_t count = c.args.u32();
+    GuestAddr advances = c.args.ptr();
+    c.ret(CGFontGetGlyphAdvances(font, c.mem.ptr<CGGlyph>(glyphs), count, c.mem.ptr<int>(advances)));
+}
+
+// CGContextShowGlyphsAtPoint is gone from the macOS SDK; it's drawn with
+// CGContextShowGlyphsAtPositions, laying glyphs out by their advances in the
+// font and size the guest set on the context (which CG doesn't hand back).
+namespace {
+struct TextState {
+    CGFontRef font = nullptr;
+    CGFloat size = 0;
+};
+std::mutex textLock;
+std::unordered_map<CGContextRef, TextState> textStates;
+}  // namespace
+
+B32_THUNK(_CGContextSetFont) {
+    auto ctx = ref<CGContextRef>(c);
+    auto font = ref<CGFontRef>(c);
+    CGContextSetFont(ctx, font);
+    std::lock_guard guard(textLock);
+    TextState &state = textStates[ctx];
+    if (font) CGFontRetain(font);
+    if (state.font) CGFontRelease(state.font);
+    state.font = font;
+}
+
+B32_THUNK(_CGContextSetFontSize) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat size = cgf(c);
+    CGContextSetFontSize(ctx, size);
+    std::lock_guard guard(textLock);
+    textStates[ctx].size = size;
+}
+
+// void CGContextShowGlyphsAtPoint(CGContextRef, CGFloat x, CGFloat y, const CGGlyph glyphs[], size_t count)
+B32_THUNK(_CGContextShowGlyphsAtPoint) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat x = cgf(c), y = cgf(c);
+    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
+    size_t count = c.args.u32();
+    TextState state;
+    {
+        std::lock_guard guard(textLock);
+        state = textStates[ctx];
+    }
+    std::vector<int> advances(count);
+    if (state.font) CGFontGetGlyphAdvances(state.font, glyphs, count, advances.data());
+    CGFloat scale = state.font ? state.size / CGFontGetUnitsPerEm(state.font) : 0;
+    std::vector<CGPoint> positions(count);
+    CGFloat pen = x;
+    for (size_t i = 0; i < count; i++) {
+        positions[i] = CGPointMake(pen, y);
+        pen += advances[i] * scale;
+    }
+    CGContextShowGlyphsAtPositions(ctx, glyphs, positions.data(), count);
+}
