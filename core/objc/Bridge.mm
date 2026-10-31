@@ -6,6 +6,8 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <pthread.h>
+
 #import <Foundation/Foundation.h>
 #include <dlfcn.h>
 #include <mach-o/loader.h>
@@ -382,7 +384,8 @@ void Bridge::addGuestMethods(ClassInfo *info, GuestAddr list) {
     for (uint32_t i = 0; i < count; i++) {
         GuestAddr m = list + 8 + i * entsize;
         GuestAddr sel = guestSel(mem.cstr(mem.read<uint32_t>(m)));
-        info->methods[sel] = GuestMethod{mem.read<uint32_t>(m + 8), mem.cstr(mem.read<uint32_t>(m + 4))};
+        info->methods[sel] = GuestMethod{mem.read<uint32_t>(m + 8), mem.cstr(mem.read<uint32_t>(m + 4)), m};
+        methodOwners_[m] = {info, sel};
     }
 }
 
@@ -442,7 +445,7 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
         for (uint32_t i = 0; i < count; i++) {
             GuestAddr ivar = ivars + 8 + i * entsize;
             GuestAddr name = mem.read<uint32_t>(ivar + 4), type = mem.read<uint32_t>(ivar + 8);
-            cls->ivars.push_back({name ? mem.cstr(name) : "", mem.read<uint32_t>(ivar), type ? mem.cstr(type) : ""});
+            cls->ivars.push_back({name ? mem.cstr(name) : "", mem.read<uint32_t>(ivar), type ? mem.cstr(type) : "", ivar});
         }
     }
 
@@ -690,10 +693,60 @@ id Bridge::toHost(GuestAddr addr) {
                   Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
                   isa ? isa->name.c_str() : "unknown", mem.read<uint32_t>(addr), mem.read<uint32_t>(addr + 4),
                   mem.read<uint32_t>(addr + 8), mem.read<uint32_t>(addr + 12));
-        fatal("0x%08x is not a live object (unmapped)", addr);
+        fatal("0x%08x is not a live object (unmapped; thread %x)", addr, pthread_mach_thread_np(pthread_self()));
     }
     uint32_t handle = it->second;
-    return handleObjects_[handle];
+    id object = handleObjects_[handle];
+    if (!mutableBuffers_.empty()) syncMutableBytes(object);
+    return object;
+}
+
+// Removes an NSMutableData's guest buffer from the map when the data goes away.
+@interface B32MutableBytesSentinel : NSObject {
+@public
+    b32::objc::Bridge *bridge;
+    id data;  // not retained
+}
+@end
+@implementation B32MutableBytesSentinel
+- (void)dealloc {
+    bridge->forgetMutableBytesOf(data);
+    [super dealloc];
+}
+@end
+
+GuestAddr Bridge::mutableBytes(id data) {
+    std::lock_guard guard(lock_);
+    auto *mutableData = static_cast<NSMutableData *>(data);
+    uint32_t length = uint32_t(mutableData.length);
+    if (auto it = mutableBuffers_.find(data); it != mutableBuffers_.end()) {
+        if (it->second.length == length) return it->second.guest;
+        // Resized on the host: a new buffer (the old one is freed with the data).
+        mutableBuffers_.erase(it);
+    } else {
+        static char sentinelKey;
+        B32MutableBytesSentinel *sentinel = [[B32MutableBytesSentinel alloc] init];
+        sentinel->bridge = this;
+        sentinel->data = data;
+        objc_setAssociatedObject(data, &sentinelKey, sentinel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [sentinel release];
+    }
+    GuestAddr guest = guestBytes(mutableData.bytes, length, data);
+    mutableBuffers_[data] = {guest, length};
+    return guest;
+}
+
+void Bridge::syncMutableBytes(id data) {
+    auto it = mutableBuffers_.find(data);
+    if (it == mutableBuffers_.end()) return;
+    auto *mutableData = static_cast<NSMutableData *>(data);
+    if (mutableData.length != it->second.length) return;
+    if (it->second.length) std::memcpy(mutableData.mutableBytes, rt_.mem().ptr<void>(it->second.guest), it->second.length);
+}
+
+void Bridge::forgetMutableBytesOf(id data) {
+    std::lock_guard guard(lock_);
+    mutableBuffers_.erase(data);
 }
 
 GuestAddr Bridge::guestCString(const char *s, id owner) {
