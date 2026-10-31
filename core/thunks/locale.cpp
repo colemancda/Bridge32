@@ -432,6 +432,24 @@ B32_THUNK(_swprintf) {
     c.ret(uint32_t(s.size()));
 }
 
+// int vswprintf(wchar_t *, size_t, const wchar_t *format, va_list)
+B32_THUNK(_vswprintf) {
+    wchar_t *buf = hostWide(c, c.args.ptr());
+    uint32_t size = c.args.u32();
+    std::string format;
+    for (const wchar_t *f = hostWide(c, c.args.ptr()); *f; f++) format += char(*f);
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    std::string s = formatGuest(c, format.c_str(), va);
+    if (!size || s.size() >= size) {
+        if (size) buf[0] = 0;
+        c.ret(uint32_t(-1));
+        return;
+    }
+    for (size_t i = 0; i < s.size(); i++) buf[i] = wchar_t(static_cast<unsigned char>(s[i]));
+    buf[s.size()] = 0;
+    c.ret(uint32_t(s.size()));
+}
+
 // --- message catalogs: none, so std::messages returns its defaults -------------------------
 
 B32_THUNK(_catopen) { c.ret(uint32_t(-1)); }
