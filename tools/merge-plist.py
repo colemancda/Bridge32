@@ -2,7 +2,10 @@
 """Writes the Info.plist for a wrapped game: the guest's own keys (bundle id,
 name, NSMainNibFile, ...) with the shell's platform keys on top.
 
-usage: merge-plist.py GUEST_INFO_PLIST SHELL_INFO_PLIST OUT_INFO_PLIST
+usage: merge-plist.py GUEST_INFO_PLIST SHELL_INFO_PLIST OUT_INFO_PLIST [GUEST_BUNDLE_NAME [ORIENTATION]]
+
+ORIENTATION (portrait, landscape-left, landscape-right) turns the guest's
+screen on the Mac, for games that draw landscape without declaring it.
 """
 import plistlib
 import sys
@@ -23,6 +26,8 @@ FROM_SHELL = {
 
 def main():
     guest_path, shell_path, out_path = sys.argv[1:4]
+    bundle_name = sys.argv[4] if len(sys.argv) > 4 else None
+    orientation = sys.argv[5] if len(sys.argv) > 5 else None
     with open(guest_path, "rb") as f:
         guest = plistlib.load(f)
     with open(shell_path, "rb") as f:
@@ -33,6 +38,18 @@ def main():
         if key in shell:
             merged[key] = shell[key]
     merged["B32GuestExecutable"] = guest["CFBundleExecutable"]
+    # The shell's UIDeviceFamily wins for the Mac; keep the guest's (iPhone,
+    # iPad or both) for choosing the device the guest sees.
+    merged["B32GuestDeviceFamily"] = guest.get("UIDeviceFamily", [1])
+    # The guest bundle's directory name, recreated next to Documents/ in the
+    # container the way iOS lays out an app's sandbox.
+    if bundle_name:
+        merged["B32GuestBundleName"] = bundle_name
+    if orientation:
+        names = {"portrait": "UIInterfaceOrientationPortrait",
+                 "landscape-left": "UIInterfaceOrientationLandscapeLeft",
+                 "landscape-right": "UIInterfaceOrientationLandscapeRight"}
+        merged["B32Orientation"] = names[orientation]
     # A distinct identifier, so the wrapped game gets its own sandbox
     # container and never collides with an installed iOS app of the same id.
     merged["CFBundleIdentifier"] = guest.get("CFBundleIdentifier", "unknown") + ".bridge32"

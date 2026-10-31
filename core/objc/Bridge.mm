@@ -6,6 +6,9 @@
 #include "core/Runtime.h"
 
 #import <Foundation/Foundation.h>
+#include <dlfcn.h>
+#include <mach-o/loader.h>
+#include <malloc/malloc.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 
@@ -149,10 +152,87 @@ GuestAddr Bridge::resolveDataSymbol(const std::string &symbol) {
     return 0;
 }
 
+namespace {
+// Whether `address` lies in a data (not code) segment of a loaded image.
+bool inDataSegment(const void *address) {
+    Dl_info info;
+    if (!dladdr(address, &info) || !info.dli_fbase) return false;
+    auto *header = static_cast<const mach_header_64 *>(info.dli_fbase);
+    auto cmd = reinterpret_cast<const uint8_t *>(header + 1);
+    uintptr_t slide = 0;
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        auto *lc = reinterpret_cast<const load_command *>(cmd);
+        if (lc->cmd == LC_SEGMENT_64) {
+            auto *seg = reinterpret_cast<const segment_command_64 *>(cmd);
+            if (std::strcmp(seg->segname, "__TEXT") == 0) slide = uintptr_t(header) - seg->vmaddr;
+        }
+        cmd += lc->cmdsize;
+    }
+    cmd = reinterpret_cast<const uint8_t *>(header + 1);
+    auto addr = uintptr_t(address);
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        auto *lc = reinterpret_cast<const load_command *>(cmd);
+        if (lc->cmd == LC_SEGMENT_64) {
+            auto *seg = reinterpret_cast<const segment_command_64 *>(cmd);
+            if (addr >= seg->vmaddr + slide && addr < seg->vmaddr + slide + seg->vmsize)
+                return std::strcmp(seg->segname, "__TEXT") != 0;
+        }
+        cmd += lc->cmdsize;
+    }
+    return false;
+}
+
+// Whether `p` is plausibly an ObjC object: a tagged pointer, or memory whose
+// class the runtime knows.
+bool looksLikeObject(void *p) {
+    if (!p) return false;
+    if (isTaggedPointer((id)p)) return true;
+    if ((uintptr_t(p) & 7) != 0) return false;
+    Dl_info info;
+    bool inImage = dladdr(p, &info) != 0;
+    if (!inImage && !malloc_zone_from_ptr(p)) return false;
+    Class cls = object_getClass((id)p);
+    return cls && objc_getClass(class_getName(cls)) != nil;
+}
+}  // namespace
+
+namespace {
+bool endsWith(const std::string &s, const char *suffix) {
+    size_t n = std::strlen(suffix);
+    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+}
+}  // namespace
+
+GuestAddr Bridge::resolveHostConstant(const std::string &symbol) {
+    if (symbol.size() < 2 || symbol[0] != '_') return 0;
+    void *address = dlsym(RTLD_DEFAULT, symbol.c_str() + 1);
+    void *value = nullptr;
+    if (address && inDataSegment(address)) {
+        value = *static_cast<void **>(address);
+        if (!looksLikeObject(value)) return 0;
+    } else if (!address && (endsWith(symbol, "Notification") || endsWith(symbol, "Key"))) {
+        // Gone from the host (MPMoviePlayerContentPreloadDidFinishNotification):
+        // such names have always been strings equal to the symbol's name.
+        value = [[NSString alloc] initWithUTF8String:symbol.c_str() + 1];
+        log("host has no %s; using a string of its name", symbol.c_str() + 1);
+    } else {
+        return 0;
+    }
+    std::lock_guard guard(lock_);
+    if (auto it = hostConstants_.find(symbol); it != hostConstants_.end()) return it->second;
+    GuestAddr variable = rt_.heap().calloc(1, 4);
+    rt_.mem().write<uint32_t>(variable, toGuest((id)value));
+    hostConstants_.emplace(symbol, variable);
+    return variable;
+}
+
 ClassInfo *Bridge::stubForName(const std::string &name) {
     std::lock_guard guard(lock_);
     if (auto it = stubsByName_.find(name); it != stubsByName_.end()) return it->second;
-    Class host = objc_getClass(name.c_str());
+    // A class Mac Catalyst lacks or doesn't support (UIAlertView) can have a
+    // compat replacement named B32Compat_<name>, which the guest gets instead.
+    Class host = objc_getClass(("B32Compat_" + name).c_str());
+    if (!host) host = objc_getClass(name.c_str());
     if (!host) log("class %s doesn't exist on the host; messages to it will fail", name.c_str());
     return makeStub(host, name);
 }
@@ -341,7 +421,12 @@ void Bridge::collectProtocols(GuestAddr list, std::vector<std::string> &names) {
 
 void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     ClassInfo *super = cls->super;
-    if (!super->host) fatal("class %s's superclass %s is missing on the host", cls->name.c_str(), super->name.c_str());
+    if (!super->host) {
+        // No shadow class: the guest class works for guest-to-guest calls
+        // only, and anything reaching the host fails with a clear message.
+        log("class %s's superclass %s is missing on the host", cls->name.c_str(), super->name.c_str());
+        return;
+    }
 
     std::string name = cls->name;
     if (objc_getClass(name.c_str())) {
@@ -505,6 +590,11 @@ id Bridge::toHost(GuestAddr addr) {
 
     auto it = handleByGuest_.find(addr);
     if (it == handleByGuest_.end()) {
+        // An SVC instruction: the guest loaded a stub's code as data, so a
+        // data import (a constant or variable) was bound as a function.
+        if ((addr & 0xff000000) == 0xef000000)
+            fatal("guest used the code of import %s as an object; it's a data symbol that needs a B32_DATA definition",
+                  rt_.thunks().nameOf(addr & 0xffffff).c_str());
         GuestMemory &mem = rt_.mem();
         ClassInfo *isa = mem.isMapped(addr) ? classInfo(mem.read<uint32_t>(addr)) : nullptr;
         fatal("0x%08x is not a live object (isa %s)", addr, isa ? isa->name.c_str() : "unknown");
@@ -515,9 +605,12 @@ id Bridge::toHost(GuestAddr addr) {
 
 GuestAddr Bridge::guestCString(const char *s, id owner) {
     if (!s) return 0;
-    size_t n = std::strlen(s) + 1;
-    GuestAddr buf = rt_.heap().alloc(uint32_t(n));
-    rt_.mem().copyIn(buf, s, n);
+    return guestBytes(s, uint32_t(std::strlen(s) + 1), owner);
+}
+
+GuestAddr Bridge::guestBytes(const void *bytes, uint32_t size, id owner) {
+    GuestAddr buf = rt_.heap().alloc(std::max(size, 1u));
+    rt_.mem().copyIn(buf, bytes, size);
     if (owner && !isTaggedPointer(owner)) {
         std::lock_guard guard(lock_);
         B32GuestBuffers *buffers = objc_getAssociatedObject(owner, &buffersKey);

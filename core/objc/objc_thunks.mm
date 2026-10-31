@@ -7,6 +7,7 @@
 #include "core/thunks/Format.h"
 
 #import <Foundation/Foundation.h>
+#include <objc/objc-sync.h>
 #include <objc/runtime.h>
 
 using namespace b32;
@@ -194,3 +195,18 @@ B32_THUNK(_NSSearchPathForDirectoriesInDomains) {
     BOOL expand = c.args.u32() != 0;
     c.ret(bridge(c).toGuest(NSSearchPathForDirectoriesInDomains(dir, mask, expand)));
 }
+
+// --- @synchronized ------------------------------------------------------------------
+
+B32_THUNK(_objc_sync_enter) { c.ret(uint32_t(objc_sync_enter(bridge(c).toHost(c.args.ptr())))); }
+B32_THUNK(_objc_sync_exit) { c.ret(uint32_t(objc_sync_exit(bridge(c).toHost(c.args.ptr())))); }
+
+// --- @try/@catch support: only reached once something throws -----------------------
+
+B32_THUNK(_objc_begin_catch) { fatal("ObjC exception caught; exceptions are not supported yet"); }
+B32_THUNK(_objc_end_catch) { fatal("ObjC exception caught; exceptions are not supported yet"); }
+B32_THUNK(_objc_exception_rethrow) { fatal("ObjC exception rethrown; exceptions are not supported yet"); }
+B32_THUNK(___objc_personality_v0) { fatal("ObjC exception unwinding is not supported yet"); }
+// struct objc_typeinfo { const void *vtable; const char *name; Class cls; }
+B32_DATA(_OBJC_EHTYPE_$_NSException, 12) {}
+B32_THUNK(dyld_stub_binder) { fatal("lazy binding requested, but every symbol pointer is bound at load time"); }

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <unordered_map>
 
 namespace b32 {
 
@@ -165,6 +166,8 @@ Image MachOLoader::load(const std::string &path) {
         cmd += lc.cmdsize;
     }
 
+    if (onDylibs) onDylibs(image.dylibs);
+
     if (image.hasMain) {
         // entryoff is a file offset; turn it into the address in __TEXT.
         for (const auto &seg : segments)
@@ -176,8 +179,22 @@ Image MachOLoader::load(const std::string &path) {
         std::memcpy(&sym, slice + symtab.symoff + index * sizeof sym, sizeof sym);
         return reinterpret_cast<const char *>(slice + symtab.stroff + sym.n_un.n_strx);
     };
+    // The image's own external definitions. Weak and coalesced symbols (C++
+    // template instantiations, inline functions) are bound like imports but
+    // resolve to the image itself.
+    std::unordered_map<std::string, GuestAddr> defined;
+    for (uint32_t i = 0; i < symtab.nsyms; i++) {
+        struct nlist sym;
+        std::memcpy(&sym, slice + symtab.symoff + i * sizeof sym, sizeof sym);
+        if ((sym.n_type & N_STAB) || (sym.n_type & N_TYPE) != N_SECT || !(sym.n_type & N_EXT)) continue;
+        GuestAddr addr = sym.n_value | ((sym.n_desc & N_ARM_THUMB_DEF) ? 1 : 0);
+        defined.emplace(reinterpret_cast<const char *>(slice + symtab.stroff + sym.n_un.n_strx), addr);
+    }
+
     auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
-        mem_.write<uint32_t>(where, uint32_t(resolve_(symbol) + addend));
+        auto own = defined.find(symbol);
+        GuestAddr target = own != defined.end() ? own->second : resolve_(symbol);
+        mem_.write<uint32_t>(where, uint32_t(target + addend));
         image.bindCount++;
     };
 

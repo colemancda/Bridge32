@@ -14,6 +14,8 @@
 #import <UIKit/UIKit.h>
 #include <unistd.h>
 
+#include <atomic>
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         NSBundle *bundle = [NSBundle mainBundle];
@@ -35,13 +37,22 @@ int main(int argc, char **argv) {
         }
         setvbuf(stdout, nullptr, _IOLBF, 0);
 
+        // iOS puts the app bundle next to Documents/ in its sandbox, and some
+        // engines find their data by looking there.
+        if (NSString *bundleName = [bundle objectForInfoDictionaryKey:@"B32GuestBundleName"]) {
+            NSString *link = [NSHomeDirectory() stringByAppendingPathComponent:bundleName];
+            [[NSFileManager defaultManager] removeItemAtPath:link error:nil];
+            [[NSFileManager defaultManager] createSymbolicLinkAtPath:link withDestinationPath:bundle.resourcePath error:nil];
+        }
+
         b32::uikit::configureHost();
         b32::gl::loadHostOpenGLES();
 
         static auto monitor = b32::DynarmicCpu::makeMonitor();
+        static std::atomic<size_t> nextProcessor{0};
         static b32::Runtime rt([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
             return std::make_unique<b32::DynarmicCpu>(mem, std::move(handler), b32::DynarmicCpu::Arch::V7,
-                                                      monitor.get(), 0);
+                                                      monitor.get(), nextProcessor++);
         });
         rt.load(path.fileSystemRepresentation);
         b32::log("loaded %s", path.fileSystemRepresentation);

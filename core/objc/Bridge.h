@@ -71,6 +71,9 @@ public:
     // Loader: ObjC data imports (_OBJC_CLASS_$_..., __objc_empty_cache,
     // ___CFConstantStringClassReference). Returns 0 for other symbols.
     GuestAddr resolveDataSymbol(const std::string &symbol);
+    // A host `extern id const` (NSString notification names and keys, mostly)
+    // as a guest variable holding its proxy; 0 if the symbol isn't one.
+    GuestAddr resolveHostConstant(const std::string &symbol);
     // Uniques selectors, realizes classes and categories, creates shadow classes.
     void setupImage(const Image &image);
     // Calls +load on guest classes and categories, as dyld does before initializers.
@@ -102,8 +105,9 @@ public:
     // overrides run. Arguments are guest words after self and _cmd.
     uint64_t send(GuestAddr receiver, const char *sel, std::initializer_list<uint32_t> args = {});
 
-    // Guest copy of a host C string, freed with `owner` (or never if nil).
+    // Guest copies of host memory, freed with `owner` (or never if nil).
     GuestAddr guestCString(const char *s, id owner);
+    GuestAddr guestBytes(const void *bytes, uint32_t size, id owner);
 
     // Value conversion between the ABIs (see Encoding.h for the type rules).
     void toHostValue(const Type &type, const uint8_t *guest, uint8_t *host);
@@ -163,6 +167,7 @@ private:
     std::unordered_map<GuestAddr, id> cfstrings_;
 
     GuestAddr emptyCache_ = 0;
+    std::unordered_map<std::string, GuestAddr> hostConstants_;
 };
 
 }  // namespace b32::objc

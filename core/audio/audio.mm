@@ -54,9 +54,7 @@ struct Completion {
 
 void soundCompleted(SystemSoundID sound, void *data) {
     auto *completion = static_cast<Completion *>(data);
-    Cpu *cpu = Runtime::currentCpu();
-    if (!cpu) fatal("system sound completion on a thread without a guest CPU");
-    cpu->call(completion->proc, {sound, completion->clientData});
+    Runtime::threadCpu().call(completion->proc, {sound, completion->clientData});
 }
 
 }  // namespace

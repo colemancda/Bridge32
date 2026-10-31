@@ -4,6 +4,8 @@
 #include "core/mem/Layout.h"
 #include "core/objc/Bridge.h"
 
+#include <dlfcn.h>
+
 extern "C" void *objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void *);
 
@@ -17,9 +19,27 @@ struct ExitRequest {
 };
 
 thread_local Cpu *currentCpuForThread = nullptr;
+Runtime *instance = nullptr;
 }  // namespace
 
 Cpu *Runtime::currentCpu() { return currentCpuForThread; }
+
+Cpu &Runtime::threadCpu() {
+    if (currentCpuForThread) return *currentCpuForThread;
+    Runtime &rt = *instance;
+    std::lock_guard guard(rt.attachLock_);
+    // Attached threads take stack slots from the top down; guest threads
+    // created with pthread_create take them from the bottom up.
+    uint32_t slot = layout::kMaxThreads - 1 - uint32_t(rt.attachedCpus_.size());
+    if (slot < layout::kMaxThreads / 2) fatal("too many host threads calling into the guest");
+    auto cpu = rt.makeCpu_(*rt.mem_, [&rt](Cpu &c, uint32_t imm) { rt.thunks_->dispatch(rt, c, imm); });
+    GuestAddr stackBottom = layout::kStackBase + slot * layout::kStackSize;
+    rt.mem_->map(stackBottom, layout::kStackSize);
+    cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
+    currentCpuForThread = cpu.get();
+    rt.attachedCpus_.push_back(std::move(cpu));
+    return *currentCpuForThread;
+}
 
 std::unordered_map<std::string, DataSymbolRegistry::Entry> &DataSymbolRegistry::all() {
     static std::unordered_map<std::string, Entry> registry;
@@ -29,9 +49,32 @@ std::unordered_map<std::string, DataSymbolRegistry::Entry> &DataSymbolRegistry::
 Runtime::Runtime(CpuFactory makeCpu)
     : mem_(std::make_unique<GuestMemory>()),
       heap_(std::make_unique<GuestHeap>(*mem_)),
-      thunks_(std::make_unique<ThunkTable>(*mem_)) {
+      thunks_(std::make_unique<ThunkTable>(*mem_)),
+      makeCpu_(std::move(makeCpu)) {
+    instance = this;
     bridge_ = std::make_unique<objc::Bridge>(*this);
-    cpu_ = makeCpu(*mem_, [this](Cpu &cpu, uint32_t imm) { thunks_->dispatch(*this, cpu, imm); });
+    cpu_ = makeCpu_(*mem_, [this](Cpu &cpu, uint32_t imm) { thunks_->dispatch(*this, cpu, imm); });
+}
+
+uint32_t Runtime::runThread(uint32_t slot, GuestAddr fn, GuestAddr arg) {
+    if (slot == 0 || slot >= layout::kMaxThreads) fatal("bad guest thread slot %u", slot);
+    std::unique_ptr<Cpu> cpu = makeCpu_(*mem_, [this](Cpu &c, uint32_t imm) { thunks_->dispatch(*this, c, imm); });
+    GuestAddr stackBottom = layout::kStackBase + slot * layout::kStackSize;
+    if (!mem_->isMapped(stackBottom)) mem_->map(stackBottom, layout::kStackSize);
+    cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
+    currentCpuForThread = cpu.get();
+    void *pool = objc_autoreleasePoolPush();
+    uint32_t result = 0;
+    try {
+        result = uint32_t(cpu->call(fn, {arg}));
+    } catch (const ThreadExit &exit) {
+        result = exit.value;
+    } catch (const ExitRequest &request) {
+        std::exit(request.status);
+    }
+    objc_autoreleasePoolPop(pool);
+    currentCpuForThread = nullptr;
+    return result;
 }
 
 Runtime::~Runtime() = default;
@@ -58,11 +101,28 @@ GuestAddr Runtime::internString(const std::string &s) {
 GuestAddr Runtime::resolve(const std::string &symbol) {
     if (GuestAddr data = dataSymbol(symbol)) return data;
     if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
+    // Object constants (notification names, keys...) the host exports.
+    if (!ThunkRegistry::all().count(symbol))
+        if (GuestAddr constant = bridge_->resolveHostConstant(symbol)) return constant;
     return thunks_->stubFor(symbol);
 }
 
+namespace {
+// Loads the host's copy of a framework the guest links, preferring the
+// iOSSupport (Mac Catalyst) variant, so its classes and constants exist.
+void loadHostLibrary(const std::string &path) {
+    for (std::string candidate : {"/System/iOSSupport" + path, path})
+        if (dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL)) return;
+    log("no host library for %s", path.c_str());
+}
+}  // namespace
+
 void Runtime::load(const std::string &path) {
     MachOLoader loader(*mem_, [this](const std::string &s) { return resolve(s); });
+    loader.onDylibs = [](const std::vector<std::string> &dylibs) {
+        for (const auto &d : dylibs)
+            if (d.rfind("/System/Library/Frameworks/", 0) == 0) loadHostLibrary(d);
+    };
     image_ = loader.load(path);
     // Old binaries reach dyld through two pointers at the start of __dyld:
     // the lazy binding entry point and _dyld_func_lookup.

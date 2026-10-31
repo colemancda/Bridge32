@@ -24,6 +24,7 @@ ThunkTable::ThunkTable(GuestMemory &mem) : mem_(mem) {
 }
 
 GuestAddr ThunkTable::stubFor(const std::string &symbol) {
+    std::lock_guard guard(lock_);
     auto [it, inserted] = byName_.try_emplace(symbol, uint32_t(entries_.size()));
     uint32_t index = it->second;
     if (inserted) {
@@ -39,14 +40,27 @@ GuestAddr ThunkTable::stubFor(const std::string &symbol) {
 }
 
 void ThunkTable::dispatch(Runtime &rt, Cpu &cpu, uint32_t index) {
-    if (index >= entries_.size()) fatal("SVC #0x%x at 0x%08x is not a thunk", index, cpu.reg(Cpu::PC) - 4);
-    const Entry &entry = entries_[index];
-    if (!entry.fn) fatal("missing symbol %s (called from 0x%08x)", entry.name.c_str(), cpu.reg(Cpu::LR));
-    Call call{rt, cpu, rt.mem(), rt.heap(), Args(cpu), entry.name.c_str()};
-    entry.fn(call);
+    ThunkFn fn;
+    const char *name;
+    {
+        std::lock_guard guard(lock_);
+        if (index >= entries_.size()) fatal("SVC #0x%x at 0x%08x is not a thunk", index, cpu.reg(Cpu::PC) - 4);
+        // Deque elements never move, so the name stays valid after unlocking.
+        fn = entries_[index].fn;
+        name = entries_[index].name.c_str();
+    }
+    if (!fn) fatal("missing symbol %s (called from 0x%08x)", name, cpu.reg(Cpu::LR));
+    Call call{rt, cpu, rt.mem(), rt.heap(), Args(cpu), name};
+    fn(call);
+}
+
+std::string ThunkTable::nameOf(uint32_t index) const {
+    std::lock_guard guard(lock_);
+    return index < entries_.size() ? entries_[index].name : "";
 }
 
 std::vector<std::string> ThunkTable::missing() const {
+    std::lock_guard guard(lock_);
     std::vector<std::string> names;
     for (const auto &e : entries_)
         if (!e.fn) names.push_back(e.name);

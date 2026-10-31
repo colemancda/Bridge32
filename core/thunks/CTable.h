@@ -9,7 +9,12 @@
 //   p  pointer into guest memory (passed through without copying)
 //   a  vertex array pointer, or an offset when an array buffer is bound
 //   e  index pointer, or an offset when an element array buffer is bound
+//   o  CF or ObjC object, converted by the bridge (CF types are toll-free
+//      ObjC objects on the host)
+//   d  double: two words in the guest
 //   h  opaque host pointer (ALCdevice *, ALCcontext *), a small handle in the guest
+//   S  array of guest C string pointers, as many as the previous argument says
+//      (glShaderSource)
 //   B  boolean (return only)
 //   s  C string (return only), copied into guest memory once per first argument
 #pragma once
@@ -35,6 +40,11 @@ void registerCFunctions(const CFunction *functions, size_t count, LibraryLoader 
 // installed by the GL module.
 using BufferBoundQuery = bool (*)(char code);
 void setBufferBoundQuery(BufferBoundQuery query);
+
+// The guest handles behind 'h': opaque host pointers as small integers.
+uint32_t hostHandle(void *pointer);
+void *hostPointer(uint32_t handle);
+void forgetHostHandle(void *pointer);
 
 // For an `extern NSString *const` (or other object constant) the host
 // exports: the guest variable holds the guest proxy of the host's value.

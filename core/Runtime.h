@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +36,20 @@ public:
 
     // The CPU of the guest thread running on this host thread, if any.
     static Cpu *currentCpu();
+    // The current thread's CPU, attaching one (with its own guest stack) to
+    // a host thread that hasn't run guest code before: callbacks from
+    // AudioToolbox's or GCD's threads into guest functions.
+    static Cpu &threadCpu();
+
+    // Runs fn(arg) as a new guest thread on the calling host thread, with
+    // its own CPU and a guest stack in `slot` (1..kMaxThreads-1); returns
+    // fn's result. exit() from the thread ends the process.
+    uint32_t runThread(uint32_t slot, GuestAddr fn, GuestAddr arg);
+
+    // Thrown by pthread_exit; runThread catches it and returns `value`.
+    struct ThreadExit {
+        uint32_t value;
+    };
 
     // Loads the executable and binds every import. Doesn't run anything.
     void load(const std::string &path);
@@ -59,6 +74,9 @@ private:
     std::unique_ptr<GuestMemory> mem_;
     std::unique_ptr<GuestHeap> heap_;
     std::unique_ptr<ThunkTable> thunks_;
+    CpuFactory makeCpu_;
+    std::mutex attachLock_;
+    std::vector<std::unique_ptr<Cpu>> attachedCpus_;  // never freed; foreign threads are few
     std::unique_ptr<Cpu> cpu_;
     std::unique_ptr<objc::Bridge> bridge_;
     Image image_;

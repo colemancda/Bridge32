@@ -264,6 +264,7 @@ B32_THUNK(_fopen) {
     const char *mode = c.mem.cstr(c.args.ptr());
     FILE *f = std::fopen(path, mode);
     if (!f) log("fopen(%s, %s) failed: %s", path, mode, std::strerror(errno));
+    if (getenv("B32_TRACE_FILES")) log("fopen(%s, %s) = %p", path, mode, (void *)f);
     c.ret(wrapFile(c, f));
 }
 
@@ -330,6 +331,15 @@ B32_THUNK(_fgets) {
 B32_THUNK(_fprintf) {
     FILE *f = hostFile(c, c.args.ptr());
     std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
+    c.ret(uint32_t(std::fwrite(s.data(), 1, s.size(), f)));
+}
+
+// int vfprintf(FILE *, const char *, va_list)
+B32_THUNK(_vfprintf) {
+    FILE *f = hostFile(c, c.args.ptr());
+    const char *format = c.mem.cstr(c.args.ptr());
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    std::string s = formatGuest(c, format, va);
     c.ret(uint32_t(std::fwrite(s.data(), 1, s.size(), f)));
 }
 

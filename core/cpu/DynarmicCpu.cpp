@@ -7,6 +7,7 @@
 #include <dynarmic/interface/A32/config.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <cstdlib>
 #include <optional>
 
 namespace b32 {
@@ -103,7 +104,10 @@ DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarm
     Dynarmic::A32::UserConfig config;
     config.callbacks = callbacks_.get();
     config.arch_version = arch == Arch::V6K ? Dynarmic::A32::ArchVersion::v6K : Dynarmic::A32::ArchVersion::v7;
-    config.fastmem_pointer = reinterpret_cast<uintptr_t>(mem.base());
+    // B32_NO_FASTMEM=1 routes every guest access through the callbacks. It's
+    // slow, but without fastmem dynarmic installs no exception handler, so a
+    // debugger sees host crashes directly.
+    if (!getenv("B32_NO_FASTMEM")) config.fastmem_pointer = reinterpret_cast<uintptr_t>(mem.base());
     config.global_monitor = monitor;
     config.processor_id = processorId;
     config.fastmem_exclusive_access = monitor != nullptr;

@@ -5,6 +5,8 @@
 #include "core/cpu/Cpu.h"
 #include "core/mem/GuestHeap.h"
 
+#include <deque>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,7 +22,19 @@ class Args {
 public:
     Args(Cpu &cpu) : cpu_(cpu) {}
 
+    // Reads arguments from a guest va_list (a pointer to the next stack word).
+    static Args fromVaList(Cpu &cpu, GuestAddr vaList) {
+        Args args(cpu);
+        args.vaList_ = vaList;
+        return args;
+    }
+
     uint32_t u32() {
+        if (vaList_) {
+            uint32_t v = cpu_.mem().read<uint32_t>(vaList_);
+            vaList_ += 4;
+            return v;
+        }
         uint32_t v = next_ < 4 ? cpu_.reg(next_) : cpu_.mem().read<uint32_t>(cpu_.reg(Cpu::SP) + (next_ - 4) * 4);
         next_++;
         return v;
@@ -40,6 +54,7 @@ public:
 private:
     Cpu &cpu_;
     int next_ = 0;
+    GuestAddr vaList_ = 0;
 };
 
 struct Call {
@@ -81,6 +96,9 @@ public:
 
     void dispatch(Runtime &rt, Cpu &cpu, uint32_t index);
 
+    // The import whose stub's SVC immediate is `index`, or "".
+    std::string nameOf(uint32_t index) const;
+
     // Imports bound so far that have no host implementation.
     std::vector<std::string> missing() const;
 
@@ -90,7 +108,8 @@ private:
         ThunkFn fn;
     };
     GuestMemory &mem_;
-    std::vector<Entry> entries_;
+    mutable std::mutex lock_;  // guest threads bind (dlsym) and dispatch concurrently
+    std::deque<Entry> entries_;
     std::unordered_map<std::string, uint32_t> byName_;
 };
 

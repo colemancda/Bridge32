@@ -34,9 +34,10 @@ ffi_type *ffiFor(char code) {
     case 'i': return &ffi_type_sint32;
     case 'u': return &ffi_type_uint32;
     case 'f': return &ffi_type_float;
+    case 'd': return &ffi_type_double;
     case 'z': return &ffi_type_sint64;
     case 'B': return &ffi_type_uint8;
-    case 'p': case 'a': case 'e': case 'h': case 's': return &ffi_type_pointer;
+    case 'p': case 'a': case 'e': case 'h': case 's': case 'S': case 'o': return &ffi_type_pointer;
     default: fatal("bad C signature code '%c'", code);
     }
 }
@@ -68,23 +69,9 @@ Prepared &prepare(Call &c) {
     return *p;
 }
 
-// Opaque host pointers ('h') as guest handles.
+std::mutex handlesLock;
 std::vector<void *> handles = {nullptr};
 std::unordered_map<void *, uint32_t> handleOf;
-
-uint32_t toHandle(void *p) {
-    if (!p) return 0;
-    std::lock_guard guard(lock);
-    auto [it, inserted] = handleOf.emplace(p, uint32_t(handles.size()));
-    if (inserted) handles.push_back(p);
-    return it->second;
-}
-
-void *fromHandle(uint32_t h) {
-    std::lock_guard guard(lock);
-    if (h >= handles.size()) fatal("bad host handle %u", h);
-    return handles[h];
-}
 
 void *pointerOrOffset(Call &c, uint32_t word, char code) {
     if (!word) return nullptr;
@@ -99,10 +86,12 @@ void cThunk(Call &c) {
         uint32_t u;
         float f;
         int64_t z;
+        double d;
         void *ptr;
     };
     Value values[16];
     void *slots[16];
+    std::vector<const char *> strings;  // for 'S'
     uint32_t firstArg = c.cpu.reg(0);
     for (size_t k = 0; k < p.args.size(); k++) {
         Value &v = values[k];
@@ -114,7 +103,23 @@ void cThunk(Call &c) {
         case 'z': v.z = int32_t(word); break;
         case 'p': v.ptr = word ? c.mem.ptr<void>(word) : nullptr; break;
         case 'a': case 'e': v.ptr = pointerOrOffset(c, word, p.args[k]); break;
-        case 'h': v.ptr = fromHandle(word); break;
+        case 'h': v.ptr = hostPointer(word); break;
+        case 'o': v.ptr = (void *)c.rt.bridge().toHost(word); break;
+        case 'd': {
+            uint64_t bits = word | (uint64_t(c.args.u32()) << 32);
+            std::memcpy(&v.d, &bits, 8);
+            break;
+        }
+        case 'S': {
+            uint32_t count = k ? values[k - 1].u : 0;
+            strings.resize(count);
+            for (uint32_t i = 0; i < count; i++) {
+                GuestAddr s = c.mem.read<uint32_t>(word + i * 4);
+                strings[i] = s ? c.mem.cstr(s) : nullptr;
+            }
+            v.ptr = word ? strings.data() : nullptr;
+            break;
+        }
         }
         slots[k] = &v;
     }
@@ -127,7 +132,10 @@ void cThunk(Call &c) {
     case 'i': case 'u': c.ret(*reinterpret_cast<uint32_t *>(result)); break;
     case 'f': c.ret(*reinterpret_cast<uint32_t *>(result)); break;
     case 'B': c.ret(result[0]); break;
-    case 'h': c.ret(toHandle(*reinterpret_cast<void **>(result))); break;
+    case 'h': c.ret(hostHandle(*reinterpret_cast<void **>(result))); break;
+    case 'o': c.ret(c.rt.bridge().toGuest(*reinterpret_cast<id *>(result))); break;
+    case 'z': c.ret(uint32_t(*reinterpret_cast<int64_t *>(result))); break;
+    case 'd': c.ret64(*reinterpret_cast<uint64_t *>(result)); break;
     case 's': {
         static std::unordered_map<std::string, GuestAddr> strings;
         const char *s = *reinterpret_cast<const char **>(result);
@@ -156,6 +164,28 @@ void registerCFunctions(const CFunction *functions, size_t count, LibraryLoader 
 }
 
 void setBufferBoundQuery(BufferBoundQuery query) { bufferBound = query; }
+
+uint32_t hostHandle(void *p) {
+    if (!p) return 0;
+    std::lock_guard guard(handlesLock);
+    auto [it, inserted] = handleOf.emplace(p, uint32_t(handles.size()));
+    if (inserted) handles.push_back(p);
+    return it->second;
+}
+
+void *hostPointer(uint32_t h) {
+    std::lock_guard guard(handlesLock);
+    if (h >= handles.size()) fatal("bad host handle %u", h);
+    return handles[h];
+}
+
+void forgetHostHandle(void *p) {
+    std::lock_guard guard(handlesLock);
+    if (auto it = handleOf.find(p); it != handleOf.end()) {
+        handles[it->second] = nullptr;
+        handleOf.erase(it);
+    }
+}
 
 void objcConstant(Runtime &rt, GuestAddr addr, const char *name) {
     auto *value = static_cast<id *>(dlsym(RTLD_DEFAULT, name));

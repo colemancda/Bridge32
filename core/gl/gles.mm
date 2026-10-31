@@ -15,6 +15,9 @@
 
 #include <dlfcn.h>
 
+#include <cstring>
+#include <unordered_map>
+
 using namespace b32;
 
 namespace {
@@ -98,6 +101,36 @@ constexpr CFunction kFunctions[] = {
     // blending and discard extensions
     {"glBlendEquationOES", "v:u"}, {"glBlendEquationSeparateOES", "v:uu"}, {"glBlendFuncSeparateOES", "v:uuuu"},
     {"glDiscardFramebufferEXT", "v:uip"},
+
+    // OpenGL ES 2.0 (beyond what ES 1.1 shares)
+    {"glAttachShader", "v:uu"}, {"glBindAttribLocation", "v:uup"}, {"glBlendColor", "v:ffff"},
+    {"glBlendEquation", "v:u"}, {"glBlendEquationSeparate", "v:uu"}, {"glBlendFuncSeparate", "v:uuuu"},
+    {"glBindFramebuffer", "v:uu"}, {"glBindRenderbuffer", "v:uu"}, {"glCheckFramebufferStatus", "u:u"},
+    {"glCompileShader", "v:u"}, {"glCreateProgram", "u:"}, {"glCreateShader", "u:u"},
+    {"glDeleteFramebuffers", "v:ip"}, {"glDeleteProgram", "v:u"}, {"glDeleteRenderbuffers", "v:ip"},
+    {"glDeleteShader", "v:u"}, {"glDetachShader", "v:uu"}, {"glDisableVertexAttribArray", "v:u"},
+    {"glEnableVertexAttribArray", "v:u"}, {"glFramebufferRenderbuffer", "v:uuuu"},
+    {"glFramebufferTexture2D", "v:uuuui"}, {"glGenerateMipmap", "v:u"}, {"glGenFramebuffers", "v:ip"},
+    {"glGenRenderbuffers", "v:ip"}, {"glGetActiveAttrib", "v:uuipppp"}, {"glGetActiveUniform", "v:uuipppp"},
+    {"glGetAttachedShaders", "v:uipp"}, {"glGetAttribLocation", "i:up"}, {"glGetProgramiv", "v:uup"},
+    {"glGetProgramInfoLog", "v:uipp"}, {"glGetShaderiv", "v:uup"}, {"glGetShaderInfoLog", "v:uipp"},
+    {"glGetShaderSource", "v:uipp"}, {"glGetShaderPrecisionFormat", "v:uupp"}, {"glGetUniformfv", "v:uip"},
+    {"glGetUniformiv", "v:uip"}, {"glGetUniformLocation", "i:up"}, {"glGetVertexAttribfv", "v:uup"},
+    {"glGetVertexAttribiv", "v:uup"}, {"glGetRenderbufferParameteriv", "v:uup"},
+    {"glGetFramebufferAttachmentParameteriv", "v:uuup"}, {"glIsProgram", "B:u"}, {"glIsShader", "B:u"},
+    {"glIsFramebuffer", "B:u"}, {"glIsRenderbuffer", "B:u"}, {"glLinkProgram", "v:u"},
+    {"glReleaseShaderCompiler", "v:"}, {"glRenderbufferStorage", "v:uuii"}, {"glShaderSource", "v:uiSp"},
+    {"glStencilFuncSeparate", "v:uuiu"}, {"glStencilMaskSeparate", "v:uu"}, {"glStencilOpSeparate", "v:uuuu"},
+    {"glUniform1f", "v:if"}, {"glUniform2f", "v:iff"}, {"glUniform3f", "v:ifff"}, {"glUniform4f", "v:iffff"},
+    {"glUniform1i", "v:ii"}, {"glUniform2i", "v:iii"}, {"glUniform3i", "v:iiii"}, {"glUniform4i", "v:iiiii"},
+    {"glUniform1fv", "v:iip"}, {"glUniform2fv", "v:iip"}, {"glUniform3fv", "v:iip"}, {"glUniform4fv", "v:iip"},
+    {"glUniform1iv", "v:iip"}, {"glUniform2iv", "v:iip"}, {"glUniform3iv", "v:iip"}, {"glUniform4iv", "v:iip"},
+    {"glUniformMatrix2fv", "v:iiup"}, {"glUniformMatrix3fv", "v:iiup"}, {"glUniformMatrix4fv", "v:iiup"},
+    {"glUseProgram", "v:u"}, {"glValidateProgram", "v:u"},
+    {"glVertexAttrib1f", "v:uf"}, {"glVertexAttrib2f", "v:uff"}, {"glVertexAttrib3f", "v:ufff"},
+    {"glVertexAttrib4f", "v:uffff"}, {"glVertexAttrib1fv", "v:up"}, {"glVertexAttrib2fv", "v:up"},
+    {"glVertexAttrib3fv", "v:up"}, {"glVertexAttrib4fv", "v:up"}, {"glVertexAttribPointer", "v:uiuiia"},
+    {"glGetBufferParameteriv", "v:uup"},
 };
 
 bool glBufferBound(char code) {
@@ -116,9 +149,111 @@ void b32::gl::loadHostOpenGLES() {
 
 B32_C_FUNCTIONS(kFunctions, library);
 
+// --- OES_mapbuffer -----------------------------------------------------------------------
+// The mapping is driver memory the guest can't address, so the guest gets a
+// shadow copy in guest memory that is written back on unmap.
+
+namespace {
+constexpr uint32_t GL_BUFFER_SIZE = 0x8764;
+struct Mapping {
+    void *host;
+    GuestAddr shadow;
+    uint32_t size;
+};
+std::unordered_map<uint32_t, Mapping> mappings;  // by target
+template <typename F> F glFunction(const char *name) { return reinterpret_cast<F>(dlsym(library(), name)); }
+}  // namespace
+
+// void *glMapBufferOES(GLenum target, GLenum access)
+B32_THUNK(_glMapBufferOES) {
+    uint32_t target = c.args.u32(), access = c.args.u32();
+    static auto map = glFunction<void *(*)(uint32_t, uint32_t)>("glMapBufferOES");
+    static auto getParam = glFunction<void (*)(uint32_t, uint32_t, int32_t *)>("glGetBufferParameteriv");
+    void *host = map(target, access);
+    if (!host) {
+        c.ret(0);
+        return;
+    }
+    int32_t size = 0;
+    getParam(target, GL_BUFFER_SIZE, &size);
+    GuestAddr shadow = c.heap.alloc(uint32_t(size));
+    c.mem.copyIn(shadow, host, uint32_t(size));
+    mappings[target] = {host, shadow, uint32_t(size)};
+    c.ret(shadow);
+}
+
+// GLboolean glUnmapBufferOES(GLenum target)
+B32_THUNK(_glUnmapBufferOES) {
+    uint32_t target = c.args.u32();
+    static auto unmap = glFunction<uint8_t (*)(uint32_t)>("glUnmapBufferOES");
+    auto it = mappings.find(target);
+    if (it != mappings.end()) {
+        std::memcpy(it->second.host, c.mem.ptr<void>(it->second.shadow), it->second.size);
+        c.heap.free(it->second.shadow);
+        mappings.erase(it);
+    }
+    c.ret(unmap(target));
+}
+
 // EAGL string constants (OpenGL ES is loaded before the guest is bound).
 B32_OBJC_CONSTANT(kEAGLDrawablePropertyRetainedBacking)
 B32_OBJC_CONSTANT(kEAGLDrawablePropertyColorFormat)
 B32_OBJC_CONSTANT(kEAGLColorFormatRGBA8)
 B32_OBJC_CONSTANT(kEAGLColorFormatRGB565)
 B32_OBJC_CONSTANT(kEAGLColorFormatSRGBA8)
+
+// --- frame dumps (B32_DUMP_FRAMES=1) ------------------------------------------------------
+// Every 60th presented frame is read back and written to $TMPDIR/b32-frame.png,
+// so rendering can be checked without a screen (or with the display asleep).
+
+#import <ImageIO/ImageIO.h>
+#import <CoreGraphics/CoreGraphics.h>
+#import <Foundation/Foundation.h>
+#include "core/objc/Dispatch.h"
+#include <objc/message.h>
+
+namespace {
+constexpr uint32_t GL_RENDERBUFFER = 0x8D41, GL_RENDERBUFFER_WIDTH = 0x8D42, GL_RENDERBUFFER_HEIGHT = 0x8D43;
+constexpr uint32_t GL_RGBA = 0x1908, GL_UNSIGNED_BYTE = 0x1401;
+
+void dumpFrame() {
+    static auto getParam = glFunction<void (*)(uint32_t, uint32_t, int32_t *)>("glGetRenderbufferParameteriv");
+    static auto readPixels =
+        glFunction<void (*)(int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, void *)>("glReadPixels");
+    int32_t width = 0, height = 0;
+    getParam(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &width);
+    getParam(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &height);
+    if (width <= 0 || height <= 0) return;
+    std::vector<uint8_t> pixels(size_t(width) * height * 4);
+    readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    // GL rows run bottom-up.
+    std::vector<uint8_t> flipped(pixels.size());
+    for (int32_t y = 0; y < height; y++)
+        std::memcpy(&flipped[size_t(y) * width * 4], &pixels[size_t(height - 1 - y) * width * 4], size_t(width) * 4);
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef bitmap = CGBitmapContextCreate(flipped.data(), size_t(width), size_t(height), 8, size_t(width) * 4,
+                                                space, kCGImageAlphaNoneSkipLast);
+    CGImageRef image = CGBitmapContextCreateImage(bitmap);
+    NSURL *url = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"b32-frame.png"]];
+    CGImageDestinationRef dest = CGImageDestinationCreateWithURL((CFURLRef)url, CFSTR("public.png"), 1, nullptr);
+    CGImageDestinationAddImage(dest, image, nullptr);
+    CGImageDestinationFinalize(dest);
+    CFRelease(dest);
+    CGImageRelease(image);
+    CGContextRelease(bitmap);
+    CGColorSpaceRelease(space);
+}
+
+bool dumpingFrames(id receiver) {
+    static const bool enabled = getenv("B32_DUMP_FRAMES") != nullptr;
+    return enabled && [receiver isKindOfClass:objc_getClass("EAGLContext")];
+}
+}  // namespace
+
+// - (BOOL)presentRenderbuffer:(NSUInteger)target
+B32_OVERRIDE_WHEN(dumpingFrames, "presentRenderbuffer:") {
+    static uint64_t frames = 0;
+    if (frames++ % 60 == 0) dumpFrame();
+    NSUInteger target = o.args.u32();
+    o.c.ret(reinterpret_cast<BOOL (*)(id, SEL, NSUInteger)>(objc_msgSend)(o.receiver, o.sel, target));
+}

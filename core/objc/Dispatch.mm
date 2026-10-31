@@ -144,6 +144,11 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     id recv = toHost(receiver);
     const char *name = selName(sel);
     SEL hsel = sel_registerName(name);
+    // B32_TRACE_SENDS=1 logs every guest-to-host message.
+    static const bool trace = getenv("B32_TRACE_SENDS") != nullptr;
+    if (trace)
+        log("guest -> host %c[%s %s]%s", object_isClass(recv) ? '+' : '-', object_getClassName(recv), name,
+            superInfo ? " (super)" : "");
 
     Args args(c.cpu);
     GuestAddr retPtr = stret ? args.ptr() : 0;
@@ -247,8 +252,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
 }
 
 uint64_t Bridge::send(GuestAddr receiver, const char *sel, std::initializer_list<uint32_t> args) {
-    Cpu *cpu = Runtime::currentCpu();
-    if (!cpu) fatal("-%s sent from a thread without a guest CPU", sel);
+    Cpu *cpu = &Runtime::threadCpu();
     std::vector<uint32_t> words = {receiver, guestSel(sel)};
     words.insert(words.end(), args);
     return cpu->call(rt_.thunks().stubFor("_objc_msgSend"), words);
@@ -268,9 +272,13 @@ struct Trampoline {
 void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
     auto *t = static_cast<Trampoline *>(user);
     Bridge &bridge = *t->bridge;
+    // B32_TRACE_CALLS=1 logs every host-to-guest method call.
+    static const bool trace = getenv("B32_TRACE_CALLS") != nullptr;
+    if (trace)
+        log("host -> guest %c[%s %s]", object_isClass(*static_cast<id *>(args[0])) ? '+' : '-',
+            object_getClassName(*static_cast<id *>(args[0])), bridge.selName(t->sel));
     Runtime &rt = bridge.runtime();
-    Cpu *cpu = Runtime::currentCpu();
-    if (!cpu) fatal("guest method %s called on a thread without a guest CPU", bridge.selName(t->sel));
+    Cpu *cpu = &Runtime::threadCpu();
     const Signature &sig = t->call->sig;
 
     std::vector<uint32_t> words;
