@@ -9,6 +9,7 @@
 #include <sys/time.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <climits>
 #include <cmath>
@@ -716,4 +717,97 @@ B32_THUNK(_gettimeofday) {
         c.mem.write<int32_t>(tv + 4, int32_t(now.tv_usec));
     }
     c.ret(0);
+}
+
+// --- stdio odds and ends --------------------------------------------------------------------------
+
+// ssize_t getline(char **linep, size_t *capp, FILE *): the line buffer is
+// guest memory, grown with the guest heap.
+B32_THUNK(_getline) {
+    GuestAddr linep = c.args.ptr(), capp = c.args.ptr();
+    FILE *f = hostFile(c, c.args.ptr());
+    std::string line;
+    int ch;
+    while ((ch = std::fgetc(f)) != EOF) {
+        line += char(ch);
+        if (ch == '\n') break;
+    }
+    if (line.empty()) {
+        c.ret(uint32_t(-1));
+        return;
+    }
+    GuestAddr buf = c.mem.read<uint32_t>(linep);
+    uint32_t cap = c.mem.read<uint32_t>(capp);
+    if (!buf || cap < line.size() + 1) {
+        if (buf) c.heap.free(buf);
+        cap = uint32_t(line.size() + 1);
+        buf = c.heap.alloc(cap);
+        c.mem.write<uint32_t>(linep, buf);
+        c.mem.write<uint32_t>(capp, cap);
+    }
+    c.mem.copyIn(buf, line.c_str(), line.size() + 1);
+    c.ret(uint32_t(line.size()));
+}
+B32_THUNK(_flockfile) { ::flockfile(hostFile(c, c.args.ptr())); }
+B32_THUNK(_funlockfile) { ::funlockfile(hostFile(c, c.args.ptr())); }
+
+// int vasprintf(char **ret, const char *format, va_list)
+B32_THUNK(_vasprintf) {
+    GuestAddr out = c.args.ptr();
+    const char *format = c.mem.cstr(c.args.ptr());
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    std::string s = formatGuest(c, format, va);
+    GuestAddr str = c.heap.alloc(uint32_t(s.size() + 1));
+    c.mem.copyIn(str, s.c_str(), s.size() + 1);
+    c.mem.write<uint32_t>(out, str);
+    c.ret(uint32_t(s.size()));
+}
+
+// --- atomics the compiler calls out to --------------------------------------------------------------
+
+// int64_t OSAtomicAdd64(int64_t amount, volatile int64_t *value)
+B32_THUNK(_OSAtomicAdd64) {
+    int64_t amount = int64_t(c.args.u64());
+    auto *value = c.mem.ptr<std::atomic<int64_t>>(c.args.ptr());
+    c.ret64(uint64_t(value->fetch_add(amount) + amount));
+}
+// void __atomic_load(size_t size, void *src, void *dst, int order) and
+// __atomic_store(size_t size, void *dst, void *src, int order): for sizes
+// without lock-free instructions; a lock makes them atomic with each other.
+namespace {
+std::mutex atomicLock;
+}
+B32_THUNK(___atomic_load) {
+    uint32_t size = c.args.u32();
+    void *src = c.mem.ptr<void>(c.args.ptr()), *dst = c.mem.ptr<void>(c.args.ptr());
+    std::lock_guard guard(atomicLock);
+    std::memcpy(dst, src, size);
+}
+B32_THUNK(___atomic_store) {
+    uint32_t size = c.args.u32();
+    void *dst = c.mem.ptr<void>(c.args.ptr()), *src = c.mem.ptr<void>(c.args.ptr());
+    std::lock_guard guard(atomicLock);
+    std::memcpy(dst, src, size);
+}
+
+// --- more math ------------------------------------------------------------------------------------
+
+B32_THUNK(___fpclassifyd) { c.ret(uint32_t(std::fpclassify(c.args.f64()))); }
+B32_THUNK(___fpclassify) { c.ret(uint32_t(std::fpclassify(c.args.f64()))); }  // long double is double
+B32_THUNK(___fpclassifyf) { c.ret(uint32_t(std::fpclassify(c.args.f32()))); }
+B32_THUNK(_remainderf) {
+    float x = c.args.f32();
+    c.retF32(std::remainder(x, c.args.f32()));
+}
+B32_THUNK(_fmaf) {
+    float x = c.args.f32(), y = c.args.f32();
+    c.retF32(std::fma(x, y, c.args.f32()));
+}
+B32_THUNK(_nextafter) {
+    double x = c.args.f64();
+    c.retF64(std::nextafter(x, c.args.f64()));
+}
+B32_THUNK(_fmodl) {
+    double x = c.args.f64();
+    c.retF64(std::fmod(x, c.args.f64()));
 }
