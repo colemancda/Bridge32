@@ -54,6 +54,31 @@ B32_OVERRIDE("stringWithFormat:", "initWithFormat:", "stringByAppendingFormat:",
     returnObject(o, reinterpret_cast<id (*)(id, SEL, NSString *, ...)>(objc_msgSend)(o.receiver, o.sel, @"%@", text));
 }
 
+// -initWithFormat:arguments: and friends take a va_list: a guest pointer to
+// the next stack word. The locale versions render the same way.
+B32_OVERRIDE("initWithFormat:arguments:") {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    Args va = Args::fromVaList(o.c.cpu, o.args.ptr());
+    std::string s = formatGuest(o.c, [format UTF8String], va, describeObject);
+    returnObject(o, [static_cast<NSString *>(o.receiver) initWithString:[NSString stringWithUTF8String:s.c_str()]]);
+}
+B32_OVERRIDE("initWithFormat:locale:arguments:") {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    o.args.ptr();  // locale
+    Args va = Args::fromVaList(o.c.cpu, o.args.ptr());
+    std::string s = formatGuest(o.c, [format UTF8String], va, describeObject);
+    returnObject(o, [static_cast<NSString *>(o.receiver) initWithString:[NSString stringWithUTF8String:s.c_str()]]);
+}
+B32_OVERRIDE("initWithFormat:locale:", "stringWithFormat:locale:") {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    o.args.ptr();  // locale
+    std::string s = formatGuest(o.c, [format UTF8String], o.args, describeObject);
+    NSString *text = [NSString stringWithUTF8String:s.c_str()];
+    returnObject(o, o.sel == @selector(stringWithFormat:locale:)
+                        ? [static_cast<Class>(o.receiver) stringWithString:text]
+                        : [static_cast<NSString *>(o.receiver) initWithString:text]);
+}
+
 B32_OVERRIDE("appendFormat:") {
     NSString *text = formatted(o);
     reinterpret_cast<void (*)(id, SEL, NSString *, ...)>(objc_msgSend)(o.receiver, o.sel, @"%@", text);
