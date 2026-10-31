@@ -32,6 +32,7 @@
 #include <atomic>
 #include <cmath>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -83,6 +84,11 @@ bool tracking() { return following() || factor() > 1; }
 std::mutex lock;
 std::unordered_set<uint32_t> scaledRenderbuffers;
 std::unordered_set<uint32_t> scaledFramebuffers;
+// Framebuffers whose color target is a texture or an unscaled renderbuffer
+// (a game's offscreen passes), and what each depth or stencil renderbuffer is
+// attached to: its size has to match its framebuffer's color target.
+std::unordered_set<uint32_t> unscaledFramebuffers;
+std::unordered_map<uint32_t, uint32_t> attachedTo;  // renderbuffer -> framebuffer
 int32_t drawableWidth = 0, drawableHeight = 0;  // the guest's own idea of the drawable's size
 uint32_t drawableRenderbuffer = 0;
 CALayer *drawableLayer = nil;
@@ -154,11 +160,15 @@ B32_OVERRIDE_WHEN(isContext, "renderbufferStorage:fromDrawable:") {
 namespace {
 
 // Storage the size of the drawable is the screen's depth, stencil or
-// multisample buffer, and grows with it.
+// multisample buffer, and grows with it, unless it's attached to an
+// offscreen framebuffer (whose color target keeps the guest's size). A
+// renderbuffer not attached yet is settled when it is.
 int32_t storageScale(int32_t width, int32_t height) {
     uint32_t renderbuffer = boundRenderbuffer();
     std::lock_guard<std::mutex> guard(lock);
-    bool scale = tracking() && width == drawableWidth && height == drawableHeight;
+    auto owner = attachedTo.find(renderbuffer);
+    bool offscreen = owner != attachedTo.end() && unscaledFramebuffers.count(owner->second);
+    bool scale = tracking() && width > 0 && width == drawableWidth && height == drawableHeight && !offscreen;
     if (scale) scaledRenderbuffers.insert(renderbuffer);
     else scaledRenderbuffers.erase(renderbuffer);
     return scale ? factor() : 1;
@@ -200,18 +210,83 @@ void getRenderbufferParameter(Call &c, bool oes) {
     if (out) c.mem.write<int32_t>(out, value);
 }
 
+constexpr uint32_t GL_DEPTH_ATTACHMENT = 0x8D00, GL_STENCIL_ATTACHMENT = 0x8D20;
+constexpr uint32_t GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE = 0x8CD0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME = 0x8CD1;
+constexpr uint32_t GL_RENDERBUFFER_TARGET = 0x8D41, GL_FRAMEBUFFER_TARGET = 0x8D40;
+
+// Gives a drawable-sized depth or stencil renderbuffer the size its
+// framebuffer's color target has: scaled for the screen, the guest's own for
+// an offscreen pass. Called with `lock` not held.
+void matchDepthAndStencil(uint32_t framebuffer, bool scaled) {
+    static auto getAttachment = glFunction<void (*)(uint32_t, uint32_t, uint32_t, int32_t *)>(
+        "glGetFramebufferAttachmentParameteriv");
+    static auto bindRenderbuffer = glFunction<void (*)(uint32_t, uint32_t)>("glBindRenderbuffer");
+    static auto getParam = glFunction<void (*)(uint32_t, uint32_t, int32_t *)>("glGetRenderbufferParameteriv");
+    static auto storage = glFunction<void (*)(uint32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorage");
+    static auto storageMultisample =
+        glFunction<void (*)(uint32_t, int32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorageMultisampleAPPLE");
+    constexpr uint32_t GL_RENDERBUFFER_INTERNAL_FORMAT = 0x8D44, GL_RENDERBUFFER_SAMPLES = 0x8CAB;
+    if (framebuffer == 0 || !tracking()) return;
+    for (uint32_t attachment : {GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT}) {
+        int32_t type = 0, name = 0;
+        getAttachment(GL_FRAMEBUFFER_TARGET, attachment, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &type);
+        if (type != int32_t(GL_RENDERBUFFER_TARGET)) continue;
+        getAttachment(GL_FRAMEBUFFER_TARGET, attachment, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &name);
+        uint32_t rb = uint32_t(name);
+        int32_t width, height, f = factor();
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            if (rb == drawableRenderbuffer || drawableWidth == 0) continue;
+            width = drawableWidth;
+            height = drawableHeight;
+        }
+        uint32_t previous = boundRenderbuffer();
+        bindRenderbuffer(GL_RENDERBUFFER_TARGET, rb);
+        int32_t current = 0, format = 0, samples = 0;
+        getParam(GL_RENDERBUFFER_TARGET, GL_RENDERBUFFER_WIDTH, &current);
+        getParam(GL_RENDERBUFFER_TARGET, GL_RENDERBUFFER_INTERNAL_FORMAT, &format);
+        getParam(GL_RENDERBUFFER_TARGET, GL_RENDERBUFFER_SAMPLES, &samples);
+        bool isScreenSized = current == width || current == width * f;
+        int32_t wanted = scaled ? f : 1;
+        if (isScreenSized && current != width * wanted) {
+            if (samples > 0) storageMultisample(GL_RENDERBUFFER_TARGET, samples, uint32_t(format), width * wanted, height * wanted);
+            else storage(GL_RENDERBUFFER_TARGET, uint32_t(format), width * wanted, height * wanted);
+        }
+        bindRenderbuffer(GL_RENDERBUFFER_TARGET, previous);
+        if (isScreenSized) {
+            std::lock_guard<std::mutex> guard(lock);
+            if (scaled) scaledRenderbuffers.insert(rb);
+            else scaledRenderbuffers.erase(rb);
+        }
+    }
+}
+
 // A framebuffer is scaled while its color attachment is a scaled renderbuffer.
 void framebufferRenderbuffer(Call &c, bool oes) {
     static auto attachOES = glFunction<void (*)(uint32_t, uint32_t, uint32_t, uint32_t)>("glFramebufferRenderbufferOES");
     static auto attach = glFunction<void (*)(uint32_t, uint32_t, uint32_t, uint32_t)>("glFramebufferRenderbuffer");
     uint32_t target = c.args.u32(), attachment = c.args.u32(), rbTarget = c.args.u32(), renderbuffer = c.args.u32();
-    if (attachment == GL_COLOR_ATTACHMENT0) {
-        uint32_t framebuffer = boundFramebuffer();
+    uint32_t framebuffer = boundFramebuffer();
+    int colorState = -1;  // 1 scaled, 0 offscreen, -1 not known yet
+    {
         std::lock_guard<std::mutex> guard(lock);
-        if (scaledRenderbuffers.count(renderbuffer)) scaledFramebuffers.insert(framebuffer);
-        else scaledFramebuffers.erase(framebuffer);
+        if (attachment == GL_COLOR_ATTACHMENT0) {
+            bool scaled = scaledRenderbuffers.count(renderbuffer) != 0;
+            if (scaled) {
+                scaledFramebuffers.insert(framebuffer);
+                unscaledFramebuffers.erase(framebuffer);
+            } else {
+                scaledFramebuffers.erase(framebuffer);
+                unscaledFramebuffers.insert(framebuffer);
+            }
+        } else if (renderbuffer) {
+            attachedTo[renderbuffer] = framebuffer;
+        }
+        if (scaledFramebuffers.count(framebuffer)) colorState = 1;
+        else if (unscaledFramebuffers.count(framebuffer)) colorState = 0;
     }
     (oes ? attachOES : attach)(target, attachment, rbTarget, renderbuffer);
+    if (colorState >= 0) matchDepthAndStencil(framebuffer, colorState == 1);
 }
 
 void framebufferTexture2D(Call &c, bool oes) {
@@ -219,12 +294,16 @@ void framebufferTexture2D(Call &c, bool oes) {
     static auto attach = glFunction<void (*)(uint32_t, uint32_t, uint32_t, uint32_t, int32_t)>("glFramebufferTexture2D");
     uint32_t target = c.args.u32(), attachment = c.args.u32(), texTarget = c.args.u32(), texture = c.args.u32();
     int32_t level = c.args.i32();
-    if (attachment == GL_COLOR_ATTACHMENT0) {
-        uint32_t framebuffer = boundFramebuffer();
+    uint32_t framebuffer = boundFramebuffer();
+    bool color = attachment == GL_COLOR_ATTACHMENT0;
+    if (color) {
         std::lock_guard<std::mutex> guard(lock);
         scaledFramebuffers.erase(framebuffer);
+        unscaledFramebuffers.insert(framebuffer);
     }
     (oes ? attachOES : attach)(target, attachment, texTarget, texture, level);
+    // Rendering to a texture: its depth and stencil keep the guest's size.
+    if (color) matchDepthAndStencil(framebuffer, false);
 }
 
 void rect(Call &c, const char *name) {
@@ -307,6 +386,7 @@ constexpr uint32_t GL_RENDERBUFFER_SAMPLES = 0x8CAB;
 // the window wants another factor, reallocate the screen's renderbuffers at
 // it, keeping the guest's bindings, and carry the viewport and scissor over.
 void followWindow(Call &) {
+    if (!following()) return;  // a pinned factor stays put
     int wanted = wantedFactor.load(), old = factor();
     if (wanted == old || !drawableLayer) return;
     // EAGL has no headers in the Catalyst SDK.
