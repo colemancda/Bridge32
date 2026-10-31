@@ -251,6 +251,55 @@ B32_THUNK(___strcat_chk) {
     std::strcat(hostPtr(c, dst), c.mem.cstr(c.args.ptr()));
     c.ret(dst);
 }
+B32_THUNK(_strlcat) {
+    char *dst = hostPtr(c, c.args.ptr());
+    const char *src = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::strlcat(dst, src, c.args.u32())));
+}
+B32_THUNK(_strcasestr) {
+    GuestAddr s = c.args.ptr();
+    const char *find = c.mem.cstr(c.args.ptr());
+    c.ret(guestPtr(c, s, hostPtr(c, s), ::strcasestr(hostPtr(c, s), find)));
+}
+// char *strtok_r(char *str, const char *sep, char **last): *last is a guest pointer.
+B32_THUNK(_strtok_r) {
+    GuestAddr str = c.args.ptr();
+    const char *sep = c.mem.cstr(c.args.ptr());
+    GuestAddr last = c.args.ptr();
+    GuestAddr p = str ? str : c.mem.read<uint32_t>(last);
+    if (!p) {
+        c.ret(0);
+        return;
+    }
+    p += GuestAddr(std::strspn(hostPtr(c, p), sep));
+    if (!*hostPtr(c, p)) {
+        c.mem.write<uint32_t>(last, 0);
+        c.ret(0);
+        return;
+    }
+    GuestAddr token = p;
+    p += GuestAddr(std::strcspn(hostPtr(c, p), sep));
+    if (*hostPtr(c, p)) {
+        *hostPtr(c, p) = '\0';
+        c.mem.write<uint32_t>(last, p + 1);
+    } else {
+        c.mem.write<uint32_t>(last, 0);
+    }
+    c.ret(token);
+}
+B32_THUNK(_ldexpf) {
+    float x = c.args.f32();
+    c.retF32(std::ldexp(x, c.args.i32()));
+}
+B32_THUNK(_scalbnf) {
+    float x = c.args.f32();
+    c.retF32(std::scalbn(x, c.args.i32()));
+}
+B32_THUNK(_scalbn) {
+    double x = c.args.f64();
+    c.retF64(std::scalbn(x, c.args.i32()));
+}
+
 B32_THUNK(_strlcpy) {
     char *dst = hostPtr(c, c.args.ptr());
     const char *src = c.mem.cstr(c.args.ptr());
@@ -470,6 +519,15 @@ B32_THUNK(_fseek) {
 }
 
 B32_THUNK(_ftell) { c.ret(uint32_t(std::ftell(hostFile(c, c.args.ptr())))); }
+
+// int fseeko(FILE *, off_t, int) and off_t ftello(FILE *): off_t is 64-bit,
+// for files past 2 GB (and engines that read big data packs with them).
+B32_THUNK(_fseeko) {
+    FILE *f = hostFile(c, c.args.ptr());
+    off_t offset = off_t(c.args.u64());
+    c.ret(uint32_t(::fseeko(f, offset, c.args.i32())));
+}
+B32_THUNK(_ftello) { c.ret64(uint64_t(::ftello(hostFile(c, c.args.ptr())))); }
 B32_THUNK(_rewind) { std::rewind(hostFile(c, c.args.ptr())); }
 B32_THUNK(_feof) { c.ret(uint32_t(std::feof(hostFile(c, c.args.ptr())))); }
 B32_THUNK(_ferror) { c.ret(uint32_t(std::ferror(hostFile(c, c.args.ptr())))); }
@@ -505,6 +563,22 @@ B32_THUNK(_putc) {
 B32_THUNK(_ungetc) {
     int ch = c.args.i32();
     c.ret(uint32_t(std::ungetc(ch, hostFile(c, c.args.ptr()))));
+}
+// FILE *freopen(const char *path, const char *mode, FILE *): the guest handle stays the same.
+B32_THUNK(_freopen) {
+    GuestAddr path = c.args.ptr();
+    const char *mode = c.mem.cstr(c.args.ptr());
+    GuestAddr f = c.args.ptr();
+    FILE *host = ::freopen(path ? c.mem.cstr(path) : nullptr, mode, hostFile(c, f));
+    if (!host) {
+        c.ret(0);
+        return;
+    }
+    {
+        std::lock_guard guard(filesLock);
+        files[f] = host;
+    }
+    c.ret(f);
 }
 B32_THUNK(_fileno) { c.ret(uint32_t(::fileno(hostFile(c, c.args.ptr())))); }
 B32_THUNK(_fdopen) {
