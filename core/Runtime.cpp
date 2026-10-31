@@ -145,6 +145,13 @@ GuestAddr Runtime::resolve(const std::string &symbol) {
     return thunks_->stubFor(symbol);
 }
 
+GuestAddr Runtime::lookUp(const std::string &symbol) {
+    if (auto it = image_.exports.find(symbol); it != image_.exports.end()) return it->second;
+    if (libraryExports_.count(symbol) || dataSymbol(symbol) || ThunkRegistry::all().count(symbol)) return resolve(symbol);
+    if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
+    return bridge_->resolveHostConstant(symbol);
+}
+
 namespace {
 // Loads the host's copy of a framework the guest links, preferring the
 // iOSSupport (Mac Catalyst) variant, so its classes and constants exist.
