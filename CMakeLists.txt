@@ -45,7 +45,7 @@ add_library(b32core OBJECT
     core/thunks/pthread.cpp
     core/thunks/sqlite.cpp
     core/thunks/systemconfiguration.mm
-    core/objc/arc.mm core/objc/Blocks.mm core/objc/Bridge.mm
+    core/objc/arc.mm core/objc/Blocks.mm core/objc/Bridge.mm core/objc/reflection.mm
     core/objc/Dispatch.mm
     core/objc/Encoding.cpp
     core/objc/objc_thunks.mm
