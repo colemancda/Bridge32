@@ -312,3 +312,52 @@ B32_OVERRIDE("performSelector:withObject:withObject:") {
     GuestAddr sel = o.args.u32(), a = o.args.ptr(), b = o.args.ptr();
     o.c.ret(uint32_t(o.bridge.send(o.guestReceiver, o.bridge.selName(sel), {a, b})));
 }
+
+// --- buffers the guest hands over (bytesNoCopy) ------------------------------------------------------
+// Host NSData and NSString keep pointing at the guest's bytes, with no copy;
+// when they're done (freeWhenDone, the default) the bytes go back to the
+// guest heap, not to the host's free(), which doesn't know them.
+
+namespace {
+id dataNoCopy(OverrideCall &o, NSData *allocated, bool hasFreeArg) {
+    GuestAddr bytes = o.args.ptr();
+    NSUInteger length = o.args.u32();
+    bool freeWhenDone = hasFreeArg ? o.args.u32() != 0 : true;
+    void *host = bytes ? o.c.mem.ptr<void>(bytes) : nullptr;
+    if (!freeWhenDone) return [allocated initWithBytesNoCopy:host length:length freeWhenDone:NO];
+    GuestHeap *heap = &o.c.heap;
+    return [allocated initWithBytesNoCopy:host length:length deallocator:^(void *, NSUInteger) {
+        if (bytes) heap->free(bytes);
+    }];
+}
+}  // namespace
+
+B32_OVERRIDE("dataWithBytesNoCopy:length:") {
+    returnObject(o, [dataNoCopy(o, [static_cast<Class>(o.receiver) alloc], false) autorelease]);
+}
+B32_OVERRIDE("dataWithBytesNoCopy:length:freeWhenDone:") {
+    returnObject(o, [dataNoCopy(o, [static_cast<Class>(o.receiver) alloc], true) autorelease]);
+}
+B32_OVERRIDE("initWithBytesNoCopy:length:") { returnObject(o, dataNoCopy(o, static_cast<NSData *>(o.receiver), false)); }
+B32_OVERRIDE("initWithBytesNoCopy:length:freeWhenDone:") {
+    returnObject(o, dataNoCopy(o, static_cast<NSData *>(o.receiver), true));
+}
+
+// - (instancetype)initWithBytesNoCopy:(void *)bytes length:(NSUInteger)len
+//       encoding:(NSStringEncoding)encoding freeWhenDone:(BOOL)freeBuffer
+B32_OVERRIDE("initWithBytesNoCopy:length:encoding:freeWhenDone:") {
+    GuestAddr bytes = o.args.ptr();
+    NSUInteger length = o.args.u32();
+    NSStringEncoding encoding = o.args.u32();
+    bool freeWhenDone = o.args.u32() != 0;
+    void *host = bytes ? o.c.mem.ptr<void>(bytes) : nullptr;
+    auto *str = static_cast<NSString *>(o.receiver);
+    if (!freeWhenDone) {
+        returnObject(o, [str initWithBytesNoCopy:host length:length encoding:encoding freeWhenDone:NO]);
+        return;
+    }
+    GuestHeap *heap = &o.c.heap;
+    returnObject(o, [str initWithBytesNoCopy:host length:length encoding:encoding deallocator:^(void *, NSUInteger) {
+        if (bytes) heap->free(bytes);
+    }]);
+}
