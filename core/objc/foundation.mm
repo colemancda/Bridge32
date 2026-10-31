@@ -39,6 +39,10 @@ B32_THUNK(_NSGetUncaughtExceptionHandler) { c.ret(exceptionHandler); }
 // --- strings and geometry ------------------------------------------------------------------------
 
 B32_THUNK(_NSHomeDirectory) { c.ret(bridge(c).toGuest(NSHomeDirectory())); }
+B32_THUNK(_NSTemporaryDirectory) { c.ret(bridge(c).toGuest(NSTemporaryDirectory())); }
+B32_THUNK(_NSUserName) { c.ret(bridge(c).toGuest(@"mobile")); }  // the iOS user
+B32_THUNK(_NSFullUserName) { c.ret(bridge(c).toGuest(@"Mobile User")); }
+B32_THUNK(_NSOpenStepRootDirectory) { c.ret(bridge(c).toGuest(NSOpenStepRootDirectory())); }
 
 B32_THUNK(_NSLogv) {
     NSString *format = bridge(c).toHost(c.args.ptr());
