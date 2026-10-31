@@ -25,6 +25,7 @@ struct Image {
     std::string path;
     std::string installName;  // LC_ID_DYLIB, for dylibs
     uint32_t slide = 0;
+    GuestAddr base = 0;       // where the Mach-O header is (__TEXT's start)
     GuestAddr end = 0;        // first address past the image
     uint32_t cpuSubtype = 0;
     std::vector<Section> sections;
