@@ -18,6 +18,10 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
+#include <cctype>
+#include <string>
+#include <string_view>
+
 using namespace b32;
 using namespace b32::objc;
 
@@ -67,6 +71,36 @@ struct HostCall {
     std::vector<ffi_type *> argTypes;
 };
 
+// Whether a selector keyword names a value that is a double in the 32-bit
+// SDK too (NSTimeInterval, dates, CLLocation values, doubleValue...) rather
+// than a CGFloat, which is a float there.
+static bool namesDouble(std::string_view keyword) {
+    static const char *const kDoubleWords[] = {"duration", "delay", "interval", "time",     "date",
+                                               "double",   "latitude", "longitude", "degrees", "distance",
+                                               "accuracy", "altitude", "speed",    "course",  "heading",
+                                               "seconds"};
+    std::string lower(keyword);
+    for (char &ch : lower) ch = char(std::tolower(ch));
+    for (const char *word : kDoubleWords)
+        if (lower.find(word) != std::string::npos) return true;
+    return false;
+}
+
+// The host encodes CGFloat as 'd' like double. Arguments and results that
+// the selector doesn't name as a double are CGFloats: a float in the guest.
+static void markCGFloats(Signature &sig, const char *selName) {
+    std::string_view name(selName);
+    if (sig.ret.code == 'd' && !namesDouble(name)) sig.ret.cgfloat = true;
+    size_t start = 0;
+    for (size_t i = 2; i < sig.args.size(); i++) {
+        size_t colon = name.find(':', start);
+        std::string_view keyword = name.substr(start, colon == std::string_view::npos ? std::string_view::npos : colon - start);
+        if (sig.args[i].code == 'd' && !namesDouble(keyword)) sig.args[i].cgfloat = true;
+        if (colon == std::string_view::npos) break;
+        start = colon + 1;
+    }
+}
+
 HostCall &hostCall(const std::string &types, const char *selName) {
     static std::recursive_mutex lock;
     static std::unordered_map<std::string, std::unique_ptr<HostCall>> cache;
@@ -74,11 +108,14 @@ HostCall &hostCall(const std::string &types, const char *selName) {
     // the only 'q's that stay 64-bit until the signature database exists.
     bool wide = std::strstr(selName, "LongLong") != nullptr || std::strstr(selName, "Int64") != nullptr;
     std::string key = (wide ? "W" : "N") + types;
+    // Which doubles are CGFloats depends on the selector.
+    if (types.find('d') != std::string::npos) key += std::string("/") + selName;
     std::lock_guard guard(lock);
     if (auto it = cache.find(key); it != cache.end()) return *it->second;
 
     auto call = std::make_unique<HostCall>();
     call->sig = parseSignature(types.c_str());
+    markCGFloats(call->sig, selName);
     auto markWide = [&](Type &t) {
         if (wide && (t.code == 'q' || t.code == 'Q')) t.wide = true;
     };
