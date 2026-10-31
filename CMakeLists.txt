@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.24)
+
+# Optimized with symbols unless asked otherwise: an unoptimized dynarmic
+# compiles and dispatches guest code slowly enough that games stutter.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
 project(Bridge32 LANGUAGES C CXX OBJC OBJCXX)
 
 set(CMAKE_CXX_STANDARD 20)
