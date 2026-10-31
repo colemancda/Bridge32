@@ -5,6 +5,7 @@
 // give up quietly. Guest memory is all in one region, so vm_read_overwrite
 // is a copy and vm_protect has nothing to do.
 
+#include "Format.h"
 #include "Thunks.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
@@ -13,6 +14,7 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cmath>
@@ -299,6 +301,15 @@ B32_THUNK(___udivmodsi4) {
     if (remainder) c.mem.write<uint32_t>(remainder, b ? a % b : a);
     c.ret(q);
 }
+// int __divmodsi4(int a, int b, int *remainder)
+B32_THUNK(___divmodsi4) {
+    int32_t a = c.args.i32(), b = c.args.i32();
+    GuestAddr remainder = c.args.ptr();
+    // Division by zero is undefined; INT_MIN / -1 wraps, as the ARM helpers do.
+    int32_t q = b == 0 ? 0 : (b == -1 ? int32_t(0u - uint32_t(a)) : a / b);
+    if (remainder) c.mem.write<int32_t>(remainder, b == 0 ? a : (b == -1 ? 0 : a % b));
+    c.ret(uint32_t(q));
+}
 B32_THUNK(___exp10) { c.retF64(std::pow(10.0, c.args.f64())); }
 B32_THUNK(___exp10f) { c.retF32(std::pow(10.0f, c.args.f32())); }
 // struct { float sin, cos; } __sincosf_stret(float): 8 bytes, returned through r0.
@@ -313,4 +324,74 @@ B32_THUNK(___sincos_stret) {
     double x = c.args.f64();
     c.mem.write<double>(out, std::sin(x));
     c.mem.write<double>(out + 8, std::cos(x));
+}
+
+// --- the rest of the _FORTIFY_SOURCE family -------------------------------------------------------
+// The extra size argument is the destination's, which the host needn't check again.
+
+namespace {
+char *hostChars(Call &c, GuestAddr p) { return p ? c.mem.ptr<char>(p) : nullptr; }
+
+void writeFormatted(Call &c, GuestAddr buffer, uint32_t size, const std::string &s) {
+    if (!size) return;
+    size_t n = std::min<size_t>(s.size(), size - 1);
+    c.mem.copyIn(buffer, s.data(), n);
+    c.mem.write<char>(buffer + uint32_t(n), '\0');
+}
+}  // namespace
+
+B32_THUNK(___strcpy_chk) {
+    GuestAddr dst = c.args.ptr();
+    std::strcpy(hostChars(c, dst), c.mem.cstr(c.args.ptr()));
+    c.ret(dst);
+}
+B32_THUNK(___strncpy_chk) {
+    GuestAddr dst = c.args.ptr();
+    const char *src = c.mem.cstr(c.args.ptr());
+    std::strncpy(hostChars(c, dst), src, c.args.u32());
+    c.ret(dst);
+}
+B32_THUNK(___strncat_chk) {
+    GuestAddr dst = c.args.ptr();
+    const char *src = c.mem.cstr(c.args.ptr());
+    std::strncat(hostChars(c, dst), src, c.args.u32());
+    c.ret(dst);
+}
+B32_THUNK(___memmove_chk) {
+    GuestAddr dst = c.args.ptr(), src = c.args.ptr();
+    std::memmove(hostChars(c, dst), hostChars(c, src), c.args.u32());
+    c.ret(dst);
+}
+// int __snprintf_chk(char *s, size_t maxlen, int flag, size_t slen, const char *format, ...)
+B32_THUNK(___snprintf_chk) {
+    GuestAddr buffer = c.args.ptr();
+    uint32_t size = c.args.u32();
+    c.args.i32();
+    c.args.u32();
+    std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
+    writeFormatted(c, buffer, size, s);
+    c.ret(uint32_t(s.size()));
+}
+// int __vsnprintf_chk(char *s, size_t maxlen, int flag, size_t slen, const char *format, va_list)
+B32_THUNK(___vsnprintf_chk) {
+    GuestAddr buffer = c.args.ptr();
+    uint32_t size = c.args.u32();
+    c.args.i32();
+    c.args.u32();
+    const char *format = c.mem.cstr(c.args.ptr());
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    std::string s = formatGuest(c, format, va);
+    writeFormatted(c, buffer, size, s);
+    c.ret(uint32_t(s.size()));
+}
+// int __vsprintf_chk(char *s, int flag, size_t slen, const char *format, va_list)
+B32_THUNK(___vsprintf_chk) {
+    GuestAddr buffer = c.args.ptr();
+    c.args.i32();
+    c.args.u32();
+    const char *format = c.mem.cstr(c.args.ptr());
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    std::string s = formatGuest(c, format, va);
+    c.mem.copyIn(buffer, s.c_str(), s.size() + 1);
+    c.ret(uint32_t(s.size()));
 }
