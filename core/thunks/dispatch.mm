@@ -53,6 +53,7 @@ dispatch_source_type_t sourceType(Call &c, GuestAddr type) {
     if (isData(c, type, "__dispatch_source_type_read")) return DISPATCH_SOURCE_TYPE_READ;
     if (isData(c, type, "__dispatch_source_type_write")) return DISPATCH_SOURCE_TYPE_WRITE;
     if (isData(c, type, "__dispatch_source_type_signal")) return DISPATCH_SOURCE_TYPE_SIGNAL;
+    if (isData(c, type, "__dispatch_source_type_vnode")) return DISPATCH_SOURCE_TYPE_VNODE;
     fatal("unsupported dispatch source type 0x%08x", type);
 }
 
@@ -70,6 +71,7 @@ B32_DATA(__dispatch_source_type_data_or, 16) {}
 B32_DATA(__dispatch_source_type_read, 16) {}
 B32_DATA(__dispatch_source_type_write, 16) {}
 B32_DATA(__dispatch_source_type_signal, 16) {}
+B32_DATA(__dispatch_source_type_vnode, 16) {}
 
 // --- queues ------------------------------------------------------------------------------------
 
@@ -100,13 +102,26 @@ B32_THUNK(_dispatch_set_target_queue) {
     dispatch_set_target_queue(obj, object<dispatch_queue_t>(c));
 }
 
+namespace {
+// libdispatch crashes on a null queue or block; say which, with the guest's values.
+void checkQueueAndBlock(Call &c, const char *fn, id queue, id block) {
+    if (!queue || !block)
+        fatal("%s with %s (queue 0x%08x, block 0x%08x, from 0x%08x)", fn, queue ? "no block" : "no queue",
+              c.cpu.reg(0), c.cpu.reg(1), c.cpu.reg(Cpu::LR));
+}
+}  // namespace
+
 B32_THUNK(_dispatch_async) {
     auto queue = object<dispatch_queue_t>(c);
-    dispatch_async(queue, object<dispatch_block_t>(c));
+    auto block = object<dispatch_block_t>(c);
+    checkQueueAndBlock(c, "dispatch_async", queue, block);
+    dispatch_async(queue, block);
 }
 B32_THUNK(_dispatch_sync) {
     auto queue = object<dispatch_queue_t>(c);
-    dispatch_sync(queue, object<dispatch_block_t>(c));
+    auto block = object<dispatch_block_t>(c);
+    checkQueueAndBlock(c, "dispatch_sync", queue, block);
+    dispatch_sync(queue, block);
 }
 B32_THUNK(_dispatch_barrier_async) {
     auto queue = object<dispatch_queue_t>(c);
@@ -261,4 +276,25 @@ B32_THUNK(_dispatch_source_get_data) { c.ret(uint32_t(dispatch_source_get_data(o
 B32_THUNK(_dispatch_source_merge_data) {
     auto source = object<dispatch_source_t>(c);
     dispatch_source_merge_data(source, c.args.u32());
+}
+
+// --- queue-specific values -------------------------------------------------------------------
+// Keys and values are guest words, kept as is (the guest only compares them).
+// A guest destructor isn't run: the value is the guest's to free.
+
+// void dispatch_queue_set_specific(dispatch_queue_t, const void *key, void *context, dispatch_function_t)
+B32_THUNK(_dispatch_queue_set_specific) {
+    auto queue = object<dispatch_queue_t>(c);
+    auto key = reinterpret_cast<const void *>(uintptr_t(c.args.ptr()));
+    auto context = reinterpret_cast<void *>(uintptr_t(c.args.ptr()));
+    dispatch_queue_set_specific(queue, key, context, nullptr);
+}
+B32_THUNK(_dispatch_queue_get_specific) {
+    auto queue = object<dispatch_queue_t>(c);
+    auto key = reinterpret_cast<const void *>(uintptr_t(c.args.ptr()));
+    c.ret(uint32_t(uintptr_t(dispatch_queue_get_specific(queue, key))));
+}
+B32_THUNK(_dispatch_get_specific) {
+    auto key = reinterpret_cast<const void *>(uintptr_t(c.args.ptr()));
+    c.ret(uint32_t(uintptr_t(dispatch_get_specific(key))));
 }
