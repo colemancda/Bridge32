@@ -203,9 +203,10 @@ B32_OBJC_CONSTANT(kEAGLColorFormatRGBA8)
 B32_OBJC_CONSTANT(kEAGLColorFormatRGB565)
 B32_OBJC_CONSTANT(kEAGLColorFormatSRGBA8)
 
-// --- frame dumps (B32_DUMP_FRAMES=1) ------------------------------------------------------
-// Every 60th presented frame is read back and written to $TMPDIR/b32-frame.png,
-// so rendering can be checked without a screen (or with the display asleep).
+// --- presents: game hooks, and frame dumps (B32_DUMP_FRAMES=1) ----------------------------
+// With B32_DUMP_FRAMES, every 60th presented frame is read back and written
+// to $TMPDIR/b32-frame.png, so rendering can be checked without a screen (or
+// with the display asleep).
 
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -245,16 +246,28 @@ void dumpFrame() {
     CGColorSpaceRelease(space);
 }
 
-bool dumpingFrames(id receiver) {
+bool dumpingFrames() {
     static const bool enabled = getenv("B32_DUMP_FRAMES") != nullptr;
-    return enabled && [receiver isKindOfClass:objc_getClass("EAGLContext")];
+    return enabled;
+}
+
+std::vector<gl::PresentHook> &presentHooks() {
+    static std::vector<gl::PresentHook> hooks;
+    return hooks;
+}
+
+bool watchingPresents(id receiver) {
+    return (dumpingFrames() || !presentHooks().empty()) && [receiver isKindOfClass:objc_getClass("EAGLContext")];
 }
 }  // namespace
 
+void b32::gl::addPresentHook(PresentHook hook) { presentHooks().push_back(hook); }
+
 // - (BOOL)presentRenderbuffer:(NSUInteger)target
-B32_OVERRIDE_WHEN(dumpingFrames, "presentRenderbuffer:") {
+B32_OVERRIDE_WHEN(watchingPresents, "presentRenderbuffer:") {
+    for (gl::PresentHook hook : presentHooks()) hook(o.c);
     static uint64_t frames = 0;
-    if (frames++ % 60 == 0) dumpFrame();
+    if (dumpingFrames() && frames++ % 60 == 0) dumpFrame();
     NSUInteger target = o.args.u32();
     o.c.ret(reinterpret_cast<BOOL (*)(id, SEL, NSUInteger)>(objc_msgSend)(o.receiver, o.sel, target));
 }
