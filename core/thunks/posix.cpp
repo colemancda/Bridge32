@@ -23,6 +23,7 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <utime.h>
+#include <uuid/uuid.h>
 #include <zlib.h>
 
 #include <cerrno>
@@ -875,4 +876,35 @@ B32_THUNK(_execv) {
 B32_THUNK(_execvp) {
     setGuestErrno(c, ENOTSUP);
     c.ret(uint32_t(-1));
+}
+
+// --- logging: os_log goes nowhere -----------------------------------------------------------------
+// os_log_type_enabled says no, so code that checks first skips building messages.
+
+B32_DATA(__os_log_default, 4) {}
+// os_log_t os_log_create(const char *subsystem, const char *category): any
+// non-NULL value works, since every os_log call ignores it.
+B32_THUNK(_os_log_create) { c.ret(c.rt.dataSymbol("__os_log_default")); }
+B32_THUNK(_os_log_type_enabled) { c.ret(0); }
+B32_THUNK(__os_log_impl) {}
+// size_t _os_log_pack_size(size_t os_log_format_size): a header plus the arguments.
+B32_THUNK(__os_log_pack_size) { c.ret(c.args.u32() + 32); }
+// uint8_t *_os_log_pack_fill(os_log_pack_t pack, size_t size, int errno, const void *dso, const char *fmt):
+// the arguments go right after the header.
+B32_THUNK(__os_log_pack_fill) {
+    GuestAddr pack = c.args.ptr();
+    c.ret(pack + 32);
+}
+B32_THUNK(_os_log_pack_send) { c.ret(0); }
+
+// --- UUIDs (uuid_t is 16 bytes in both) -------------------------------------------------------------
+
+B32_THUNK(_uuid_generate_random) { ::uuid_generate_random(c.mem.ptr<unsigned char>(c.args.ptr())); }
+B32_THUNK(_uuid_unparse) {
+    const unsigned char *uu = c.mem.ptr<unsigned char>(c.args.ptr());
+    ::uuid_unparse(uu, c.mem.ptr<char>(c.args.ptr()));
+}
+B32_THUNK(_uuid_parse) {
+    const char *in = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::uuid_parse(in, c.mem.ptr<unsigned char>(c.args.ptr()))));
 }
