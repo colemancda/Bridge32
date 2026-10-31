@@ -12,6 +12,8 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
+#include <unordered_set>
+
 using namespace b32;
 using namespace b32::objc;
 
@@ -182,6 +184,27 @@ bool inDataSegment(const void *address) {
     return false;
 }
 
+// Whether `cls` is a registered class or metaclass, decided without asking
+// the runtime about it: for a non-object (C++ typeinfo, whose first word is a
+// vtable) that would crash.
+bool isRegisteredClass(Class cls) {
+    static std::mutex lock;
+    static std::unordered_set<Class> classes;
+    static int known = 0;
+    std::lock_guard guard(lock);
+    if (classes.count(cls)) return true;
+    int count = objc_getClassList(nullptr, 0);
+    if (count == known) return false;
+    std::vector<Class> list(size_t(count) + 64);
+    count = objc_getClassList(list.data(), int(list.size()));
+    for (int i = 0; i < count; i++) {
+        classes.insert(list[size_t(i)]);
+        classes.insert(object_getClass(list[size_t(i)]));
+    }
+    known = count;
+    return classes.count(cls) != 0;
+}
+
 // Whether `p` is plausibly an ObjC object: a tagged pointer, or memory whose
 // class the runtime knows.
 bool looksLikeObject(void *p) {
@@ -191,8 +214,7 @@ bool looksLikeObject(void *p) {
     Dl_info info;
     bool inImage = dladdr(p, &info) != 0;
     if (!inImage && !malloc_zone_from_ptr(p)) return false;
-    Class cls = object_getClass((id)p);
-    return cls && objc_getClass(class_getName(cls)) != nil;
+    return isRegisteredClass(object_getClass((id)p));
 }
 }  // namespace
 
@@ -205,6 +227,9 @@ bool endsWith(const std::string &s, const char *suffix) {
 
 GuestAddr Bridge::resolveHostConstant(const std::string &symbol) {
     if (symbol.size() < 2 || symbol[0] != '_') return 0;
+    // C++ symbols (typeinfo, vtables) aren't ObjC objects, and their first
+    // word would crash the runtime's class lookup.
+    if (symbol.compare(0, 3, "__Z") == 0) return 0;
     void *address = dlsym(RTLD_DEFAULT, symbol.c_str() + 1);
     void *value = nullptr;
     if (address && inDataSegment(address)) {
@@ -360,9 +385,10 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
     GuestMemory &mem = rt_.mem();
 
     GuestAddr superAddr = mem.read<uint32_t>(addr + layout32::kClassSuper);
-    if (!superAddr) fatal("guest root classes are not supported (class at 0x%08x)", addr);
-    ClassInfo *super = classInfo(superAddr);
-    if (!super) super = realizeGuestClass(superAddr);
+    // A root class of the app's own (no superclass) works between guest
+    // objects; with no host ancestor it gets no shadow class.
+    ClassInfo *super = superAddr ? classInfo(superAddr) : nullptr;
+    if (superAddr && !super) super = realizeGuestClass(superAddr);
 
     GuestAddr metaAddr = mem.read<uint32_t>(addr + layout32::kClassIsa);
     GuestAddr ro = mem.read<uint32_t>(addr + layout32::kClassData) & ~3u;
@@ -378,7 +404,7 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
     cls->meta = meta;
     meta->instance = cls;
     cls->super = super;
-    meta->super = super->meta;
+    meta->super = super ? super->meta : cls;  // a root metaclass's superclass is its class
     if (mem.read<uint32_t>(ro + layout32::kRoFlags) & layout32::kRoMeta) fatal("class list entry is a metaclass");
 
     // Ivars stay where the guest compiler put them (newer compilers hardcode
@@ -421,6 +447,10 @@ void Bridge::collectProtocols(GuestAddr list, std::vector<std::string> &names) {
 
 void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     ClassInfo *super = cls->super;
+    if (!super) {
+        log("guest root class %s has no host counterpart", cls->name.c_str());
+        return;
+    }
     if (!super->host) {
         // No shadow class: the guest class works for guest-to-guest calls
         // only, and anything reaching the host fails with a clear message.
