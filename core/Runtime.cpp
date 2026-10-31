@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <climits>
 #include <cstring>
 
@@ -218,12 +219,13 @@ void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs) {
 
 size_t Runtime::loadGuestLibrary(const std::string &path) {
     // Each library gets its window before it loads, since its own
-    // dependencies load (and take the next windows) part way through.
+    // dependencies load (and take the next windows) part way through. A
+    // window fits the library, in whole megabytes.
+    uint32_t window = (MachOLoader::span(path) + layout::kLibraryAlignment - 1) & ~(layout::kLibraryAlignment - 1);
     GuestAddr base = nextLibraryBase_;
-    nextLibraryBase_ += layout::kLibraryWindow;
-    if (nextLibraryBase_ > layout::kHeapBase) fatal("too many guest libraries");
+    nextLibraryBase_ += std::max(window, layout::kLibraryAlignment);
+    if (nextLibraryBase_ > layout::kHeapBase) fatal("guest libraries have used up their address space");
     Image lib = makeLoader().load(path, base);
-    if (lib.end > base + layout::kLibraryWindow) fatal("guest library %s is too big for its window", path.c_str());
     for (const auto &[name, addr] : lib.exports) libraryExports_.emplace(name, addr);
     if (lib.dyldSection) {
         mem_->write<uint32_t>(lib.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
