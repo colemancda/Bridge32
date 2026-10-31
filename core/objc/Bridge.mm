@@ -339,6 +339,7 @@ ClassInfo *Bridge::classOf(GuestAddr object) {
 
 void Bridge::setupImage(const Image &image) {
     GuestMemory &mem = rt_.mem();
+    settingUp_ = true;
 
     for (const auto &s : image.sections) {
         if (s.name == "__cfstring") cfstringSections_.push_back({s.addr, s.addr + s.size});
@@ -377,6 +378,7 @@ void Bridge::setupImage(const Image &image) {
                 addGuestMethods(&staging, methods);
                 for (auto &[sel, method] : staging.methods) {
                     info->methods[sel] = method;
+                    methodOwners_[method.entry] = {info, sel};  // not the temporary staging class
                     if (selName(sel) == std::string("load") && info->isMeta) loadMethods_.push_back({info->instance, method.imp});
                     // Host code must see the category too.
                     // The bridge runs +initialize itself (ensureInitialized).
@@ -387,6 +389,10 @@ void Bridge::setupImage(const Image &image) {
             log("category %s(%s) loaded", cls->name.c_str(), catName);
         }
     }
+
+    settingUp_ = false;
+    for (const auto &r : deferredResolvers_) installTrampoline(r.target, r.sel, r.method, r.owner);
+    deferredResolvers_.clear();
 }
 
 void Bridge::addGuestMethods(ClassInfo *info, GuestAddr list) {
@@ -662,6 +668,7 @@ id Bridge::cfstringToHost(GuestAddr addr) {
 }
 
 void Bridge::ensureInitialized(ClassInfo *cls) {
+    if (!running_) return;  // not while images are still being set up
     if (cls && cls->isMeta) cls = cls->instance;
     if (!cls || !cls->isGuest || cls->initialized) return;
     std::lock_guard guard(initLock_);
@@ -715,6 +722,20 @@ Protocol *Bridge::hostProtocol(const std::string &name) {
     if (!p) return objc_getProtocol(name.c_str());
     objc_registerProtocol(p);
     return p;
+}
+
+GuestAddr Bridge::protocolNamed(const std::string &name) {
+    {
+        std::lock_guard guard(lock_);
+        if (auto it = guestProtocolByName_.find(name); it != guestProtocolByName_.end()) return it->second;
+    }
+    Protocol *host = objc_getProtocol(name.c_str());
+    return host ? toGuest((id)host) : 0;
+}
+
+bool Bridge::isAlias(GuestAddr guest) {
+    std::lock_guard guard(lock_);
+    return aliases_.count(guest) != 0;
 }
 
 id Bridge::toHost(GuestAddr addr) {
