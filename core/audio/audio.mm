@@ -105,3 +105,40 @@ B32_THUNK(_AudioSessionGetProperty) {
     if (size && data) std::memset(c.mem.ptr<uint8_t>(data), 0, c.mem.read<uint32_t>(size));
     c.ret(0);
 }
+
+// --- OpenAL extensions -----------------------------------------------------------------------
+
+// ALvoid *alcGetProcAddress(ALCdevice *, const ALCchar *funcName) and
+// alGetProcAddress(const ALchar *): the guest gets our thunk for an extension
+// we bridge, or NULL.
+namespace {
+GuestAddr procAddress(Call &c, GuestAddr name) {
+    std::string symbol = std::string("_") + c.mem.cstr(name);
+    if (!ThunkRegistry::all().count(symbol)) {
+        log("OpenAL extension %s isn't bridged", symbol.c_str() + 1);
+        return 0;
+    }
+    return c.rt.thunks().stubFor(symbol);
+}
+}  // namespace
+B32_THUNK(_alcGetProcAddress) {
+    c.args.u32();
+    c.ret(procAddress(c, c.args.ptr()));
+}
+B32_THUNK(_alGetProcAddress) { c.ret(procAddress(c, c.args.ptr())); }
+
+// void alBufferDataStatic(ALint buffer, ALenum format, ALvoid *data, ALsizei size, ALsizei freq):
+// Apple's zero-copy variant; a copy does the same here.
+B32_THUNK(_alBufferDataStatic) {
+    static auto bufferData = reinterpret_cast<void (*)(uint32_t, int32_t, const void *, int32_t, int32_t)>(
+        dlsym(openAL(), "alBufferData"));
+    uint32_t buffer = c.args.u32();
+    int32_t format = c.args.i32();
+    GuestAddr data = c.args.ptr();
+    int32_t size = c.args.i32();
+    bufferData(buffer, format, c.mem.ptr<void>(data), size, c.args.i32());
+}
+
+// The host mixes at its own rate.
+B32_THUNK(_alcMacOSXMixerOutputRate) {}
+B32_THUNK(_alcMacOSXGetMixerOutputRate) { c.retF64(44100.0); }
