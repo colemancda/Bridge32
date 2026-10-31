@@ -66,8 +66,8 @@ B32_THUNK(_objc_retainAutorelease) {
 }
 
 namespace {
-// Host pool tokens are 64-bit; the guest gets an index.
-std::vector<void *> poolTokens;
+// Host pool tokens are 64-bit; the guest gets an index into its thread's list.
+thread_local std::vector<void *> poolTokens;  // GCD threads run guest code with their own pools
 }  // namespace
 
 B32_THUNK(_objc_autoreleasePoolPush) {
@@ -138,6 +138,40 @@ B32_THUNK(_objc_getClass) {
     ClassInfo *info = bridge(c).classNamed(c.mem.cstr(c.args.ptr()));
     c.ret(info ? info->addr : 0);
 }
+// int objc_getClassList(Class *buffer, int count): the app's own classes;
+// SDKs look through them for subclasses of their own.
+B32_THUNK(_objc_getClassList) {
+    GuestAddr buffer = c.args.ptr();
+    int32_t count = c.args.i32();
+    std::vector<GuestAddr> classes = bridge(c).guestClasses();
+    for (int32_t i = 0; buffer && i < count && size_t(i) < classes.size(); i++)
+        c.mem.write<uint32_t>(buffer + uint32_t(i) * 4, classes[size_t(i)]);
+    c.ret(uint32_t(classes.size()));
+}
+
+// BOOL class_conformsToProtocol(Class, Protocol *): a guest Protocol is a
+// protocol_t { isa, name, ... }.
+B32_THUNK(_class_conformsToProtocol) {
+    ClassInfo *cls = bridge(c).classInfo(c.args.ptr());
+    GuestAddr protocol = c.args.ptr();
+    if (!cls || !protocol) {
+        c.ret(0);
+        return;
+    }
+    c.ret(bridge(c).conformsTo(cls, c.mem.cstr(c.mem.read<uint32_t>(protocol + 4))) ? 1 : 0);
+}
+
+B32_THUNK(_class_getSuperclass) {
+    ClassInfo *cls = bridge(c).classInfo(c.args.ptr());
+    if (cls && !cls->isGuest && cls->host && !cls->super) {
+        // A host class stub: its superclass comes from the host.
+        Class super = class_getSuperclass(cls->host);
+        c.ret(super ? bridge(c).toGuest((id)super) : 0);
+        return;
+    }
+    c.ret(cls && cls->super ? cls->super->addr : 0);
+}
+
 B32_THUNK(_objc_lookUpClass) {
     ClassInfo *info = bridge(c).classNamed(c.mem.cstr(c.args.ptr()));
     c.ret(info ? info->addr : 0);
