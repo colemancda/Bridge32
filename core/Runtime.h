@@ -69,6 +69,14 @@ public:
     // library's, a data symbol, ObjC data, a host constant or a thunk), or 0.
     GuestAddr lookUp(const std::string &symbol);
 
+    // dlopen of a guest library (a path in the app, as engines load their
+    // renderers and game code): loads it and any libraries it needs, runs
+    // their initializers on `cpu`, and returns a handle, or 0 if there's no
+    // such library. Opening one again returns the same handle.
+    uint32_t openLibrary(const std::string &path, Cpu &cpu);
+    // dlsym on such a handle: the library's own export, or 0.
+    GuestAddr librarySymbol(uint32_t handle, const std::string &symbol);
+
     // Guest address of an imported data symbol (___stderrp etc.), or 0.
     GuestAddr dataSymbol(const std::string &symbol);
     // Copies a host string into guest memory that lives as long as the process.
@@ -79,6 +87,8 @@ private:
     GuestAddr thisReturning(GuestAddr target);
     MachOLoader makeLoader();
     void loadLinkedLibraries(const std::vector<std::string> &dylibs);
+    // Loads the guest library at `path` into the next window; its index in libraries_.
+    size_t loadGuestLibrary(const std::string &path);
     std::string findGuestLibrary(const std::string &installName) const;
     GuestAddr buildProcessStack(GuestAddr stackTop, const std::vector<std::string> &argv,
                                 const std::vector<std::string> &envp, GuestAddr *argvOut, GuestAddr *envpOut,
@@ -97,6 +107,8 @@ private:
     std::string mainDir_;  // the executable's folder, for @rpath and @executable_path
     std::vector<Image> libraries_;  // guest libraries, dependencies first
     std::unordered_map<std::string, bool> librariesSeen_;  // by install name
+    std::unordered_map<std::string, size_t> librariesByPath_;  // index in libraries_
+    std::recursive_mutex openLock_;
     std::unordered_map<std::string, GuestAddr> libraryExports_;
     std::unordered_map<GuestAddr, GuestAddr> thisShims_;  // library constructor -> shim returning this
     GuestAddr nextLibraryBase_;
