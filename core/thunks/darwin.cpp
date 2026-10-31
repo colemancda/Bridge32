@@ -10,8 +10,10 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <mach/clock.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -26,6 +28,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 using namespace b32;
 
@@ -442,3 +445,71 @@ B32_THUNK(_atoll) { c.ret64(uint64_t(std::atoll(c.mem.cstr(c.args.ptr())))); }
 // Unsigned 64-bit integers to floating point.
 B32_THUNK(___floatundidf) { c.retF64(double(c.args.u64())); }
 B32_THUNK(___floatundisf) { c.retF32(float(c.args.u64())); }
+
+// --- more of the C library ---------------------------------------------------------------------
+
+// void *reallocf(void *, size_t): realloc that frees the block when it fails.
+B32_THUNK(_reallocf) {
+    GuestAddr p = c.args.ptr();
+    uint32_t size = c.args.u32();
+    GuestAddr q = c.heap.realloc(p, size);
+    if (!q && p && size) c.heap.free(p);
+    c.ret(q);
+}
+B32_THUNK(_isatty) { c.ret(uint32_t(::isatty(c.args.i32()))); }
+B32_THUNK(_isxdigit) { c.ret(uint32_t(std::isxdigit(c.args.i32()))); }
+B32_THUNK(_digittoint) {
+    int ch = c.args.i32();
+    c.ret(uint32_t(std::isdigit(ch) ? ch - '0' : std::isxdigit(ch) ? (std::tolower(ch) - 'a' + 10) : 0));
+}
+
+// int pthread_attr_getstacksize(const pthread_attr_t *, size_t *): guest threads get 1 MB.
+B32_THUNK(_pthread_attr_getstacksize) {
+    c.args.ptr();
+    if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, 1 << 20);
+    c.ret(0);
+}
+
+// void qsort_b(void *base, size_t n, size_t size, int (^compare)(const void *, const void *))
+B32_THUNK(_qsort_b) {
+    GuestAddr base = c.args.ptr();
+    uint32_t n = c.args.u32(), size = c.args.u32();
+    GuestAddr block = c.args.ptr();
+    GuestAddr invoke = c.mem.read<uint32_t>(block + 12);
+    // Insertion into a sorted copy keeps the comparisons in guest memory; n is small in practice.
+    std::vector<uint8_t> tmp(size);
+    for (uint32_t i = 1; i < n; i++) {
+        std::memcpy(tmp.data(), c.mem.ptr<void>(base + i * size), size);
+        GuestAddr key = c.heap.alloc(size);
+        c.mem.copyIn(key, tmp.data(), size);
+        uint32_t j = i;
+        while (j > 0 && int32_t(c.cpu.call(invoke, {block, base + (j - 1) * size, key})) > 0) {
+            std::memmove(c.mem.ptr<void>(base + j * size), c.mem.ptr<void>(base + (j - 1) * size), size);
+            j--;
+        }
+        c.mem.copyIn(base + j * size, tmp.data(), size);
+        c.heap.free(key);
+    }
+}
+
+B32_THUNK(_OSAtomicOr32Orig) {
+    int32_t mask = c.args.i32();
+    c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_or(mask)));
+}
+
+// The clock service: mach_timespec_t { unsigned tv_sec; int tv_nsec } is the same in both.
+B32_THUNK(_host_get_clock_service) {
+    c.args.u32();
+    int id = c.args.i32();
+    clock_serv_t clock = 0;
+    kern_return_t kr = host_get_clock_service(mach_host_self(), id, &clock);
+    if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, clock);
+    c.ret(uint32_t(kr));
+}
+B32_THUNK(_clock_get_time) {
+    clock_serv_t clock = c.args.u32();
+    c.ret(uint32_t(clock_get_time(clock, c.mem.ptr<mach_timespec_t>(c.args.ptr()))));
+}
+
+B32_DATA(_in6addr_any, 16) {}
+B32_DATA(_in6addr_loopback, 16) { rt.mem().write<uint8_t>(addr + 15, 1); }
