@@ -268,6 +268,12 @@ B32_MATHF2(powf) B32_MATHF2(fmodf) B32_MATHF2(copysignf) B32_MATHF2(fmaxf) B32_M
 B32_MATH1(floor) B32_MATH1(ceil) B32_MATH1(round) B32_MATH1(log) B32_MATH1(log10) B32_MATH1(exp) B32_MATH1(fabs)
 B32_MATH1(tan) B32_MATH1(atan) B32_MATH1(acos) B32_MATH1(asin)
 B32_MATH2(pow) B32_MATH2(fmod) B32_MATH2(atan2)
+B32_MATHF1(log2f) B32_MATHF1(exp2f) B32_MATHF1(cbrtf) B32_MATHF1(sinhf) B32_MATHF1(coshf) B32_MATHF1(tanhf)
+B32_MATHF1(log1pf) B32_MATHF1(expm1f) B32_MATHF1(rintf) B32_MATHF1(nearbyintf) B32_MATHF1(asinhf) B32_MATHF1(acoshf)
+B32_MATHF1(atanhf) B32_MATHF2(hypotf)
+B32_MATH1(log2) B32_MATH1(exp2) B32_MATH1(cbrt) B32_MATH1(sinh) B32_MATH1(cosh) B32_MATH1(tanh) B32_MATH1(trunc)
+B32_MATH1(log1p) B32_MATH1(expm1) B32_MATH1(rint) B32_MATH1(nearbyint)
+B32_MATH2(hypot) B32_MATH2(fmax) B32_MATH2(fmin) B32_MATH2(copysign)
 
 B32_THUNK(_lroundf) { c.ret(uint32_t(int32_t(std::lround(c.args.f32())))); }
 B32_THUNK(_modff) {
