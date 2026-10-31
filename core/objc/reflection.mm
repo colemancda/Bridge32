@@ -158,20 +158,31 @@ B32_THUNK(_class_respondsToSelector) {
     c.ret(cls && bridge(c).findMethod(cls, sel) ? 1 : 0);
 }
 
-B32_THUNK(_method_getName) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + kMethodSel)); }
-B32_THUNK(_method_getTypeEncoding) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + kMethodTypes)); }
+// Like the runtime, these answer NULL (or do nothing) for a NULL method, ivar
+// or property: SDKs swizzle methods a class may not have.
+namespace {
+uint32_t fieldOf(Call &c, GuestAddr p, uint32_t offset) { return p ? c.mem.read<uint32_t>(p + offset) : 0; }
+}  // namespace
+
+B32_THUNK(_method_getName) { c.ret(fieldOf(c, c.args.ptr(), kMethodSel)); }
+B32_THUNK(_method_getTypeEncoding) { c.ret(fieldOf(c, c.args.ptr(), kMethodTypes)); }
 B32_THUNK(_method_getImplementation) {
     GuestAddr m = c.args.ptr();
     c.ret(m ? c.mem.read<uint32_t>(m + kMethodImp) : 0);
 }
 B32_THUNK(_method_setImplementation) {
     GuestAddr m = c.args.ptr(), imp = c.args.ptr();
+    if (!m) {
+        c.ret(0);
+        return;
+    }
     GuestAddr previous = c.mem.read<uint32_t>(m + kMethodImp);
     bridge(c).setMethodImp(m, imp);
     c.ret(previous);
 }
 B32_THUNK(_method_exchangeImplementations) {
     GuestAddr a = c.args.ptr(), b = c.args.ptr();
+    if (!a || !b) return;
     GuestAddr impA = c.mem.read<uint32_t>(a + kMethodImp), impB = c.mem.read<uint32_t>(b + kMethodImp);
     bridge(c).setMethodImp(a, impB);
     bridge(c).setMethodImp(b, impA);
@@ -227,6 +238,24 @@ B32_THUNK(_class_getInstanceVariable) {
     const GuestIvar *ivar = cls && name ? findIvar(cls, c.mem.cstr(name)) : nullptr;
     c.ret(ivar ? ivar->entry : 0);
 }
+// Ivar *class_copyIvarList(Class, unsigned int *outCount): the class's own
+// ivars (not its superclasses'), as their ivar_t entries; none for host classes.
+B32_THUNK(_class_copyIvarList) {
+    ClassInfo *cls = classArg(c);
+    GuestAddr outCount = c.args.ptr();
+    std::vector<GuestAddr> entries;
+    if (cls && cls->isGuest)
+        for (const auto &ivar : cls->ivars)
+            if (ivar.entry) entries.push_back(ivar.entry);
+    if (outCount) c.mem.write<uint32_t>(outCount, uint32_t(entries.size()));
+    if (entries.empty()) {
+        c.ret(0);
+        return;
+    }
+    GuestAddr list = c.heap.calloc(uint32_t(entries.size() + 1), 4);
+    for (size_t i = 0; i < entries.size(); i++) c.mem.write<uint32_t>(list + uint32_t(i) * 4, entries[i]);
+    c.ret(list);
+}
 B32_THUNK(_class_getInstanceSize) {
     ClassInfo *cls = classArg(c);
     if (cls && !cls->isGuest && cls->host) {
@@ -236,9 +265,12 @@ B32_THUNK(_class_getInstanceSize) {
     c.ret(cls ? cls->instanceSize : 0);
 }
 B32_THUNK(_class_getIvarLayout) { c.ret(0); }
-B32_THUNK(_ivar_getName) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + 4)); }
-B32_THUNK(_ivar_getTypeEncoding) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + 8)); }
-B32_THUNK(_ivar_getOffset) { c.ret(ivarOffset(c, c.args.ptr())); }
+B32_THUNK(_ivar_getName) { c.ret(fieldOf(c, c.args.ptr(), 4)); }
+B32_THUNK(_ivar_getTypeEncoding) { c.ret(fieldOf(c, c.args.ptr(), 8)); }
+B32_THUNK(_ivar_getOffset) {
+    GuestAddr ivar = c.args.ptr();
+    c.ret(ivar ? ivarOffset(c, ivar) : 0);
+}
 // The guest's own ivars live in the object's guest half, at their offsets.
 B32_THUNK(_object_getIvar) {
     GuestAddr object = c.args.ptr(), ivar = c.args.ptr();
@@ -291,8 +323,8 @@ B32_THUNK(_property_copyAttributeList) {
     c.ret(0);
 }
 // property_t { const char *name, *attributes }
-B32_THUNK(_property_getName) { c.ret(c.mem.read<uint32_t>(c.args.ptr())); }
-B32_THUNK(_property_getAttributes) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + 4)); }
+B32_THUNK(_property_getName) { c.ret(fieldOf(c, c.args.ptr(), 0)); }
+B32_THUNK(_property_getAttributes) { c.ret(fieldOf(c, c.args.ptr(), 4)); }
 
 // protocol_t { isa, const char *name, ... }
 B32_THUNK(_protocol_getName) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + 4)); }
