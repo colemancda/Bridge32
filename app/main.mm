@@ -45,6 +45,9 @@ int main(int argc, char **argv) {
             [[NSFileManager defaultManager] createSymbolicLinkAtPath:link withDestinationPath:bundle.resourcePath error:nil];
         }
 
+        // No AppKit window restoration: after a crash it would stop the next
+        // launch at a modal "reopen windows?" alert, and games have no windows to restore.
+        [NSUserDefaults.standardUserDefaults registerDefaults:@{@"ApplePersistenceIgnoreState" : @YES}];
         b32::uikit::configureHost();
         b32::gl::loadHostOpenGLES();
 
