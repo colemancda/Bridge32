@@ -156,3 +156,20 @@ B32_CMTIME(kCMTimeNegativeInfinity)
 B32_DATA(_kCFTypeDictionaryKeyCallBacks, 24) {}
 B32_DATA(_kCFTypeDictionaryValueCallBacks, 20) {}
 B32_DATA(_kCFCopyStringDictionaryKeyCallBacks, 24) {}
+
+// CGFloat constants: floats in the guest.
+B32_DATA(_UIScrollViewDecelerationRateFast, 4) { rt.mem().write<float>(addr, float(UIScrollViewDecelerationRateFast)); }
+B32_DATA(_UIScrollViewDecelerationRateNormal, 4) { rt.mem().write<float>(addr, float(UIScrollViewDecelerationRateNormal)); }
+B32_DATA(_UIWindowLevelStatusBar, 4) { rt.mem().write<float>(addr, float(UIWindowLevelStatusBar)); }
+B32_DATA(_UIWindowLevelAlert, 4) { rt.mem().write<float>(addr, float(UIWindowLevelAlert)); }
+B32_DATA(_UIWindowLevelNormal, 4) { rt.mem().write<float>(addr, float(UIWindowLevelNormal)); }
+
+// CATransform3D CATransform3DMakeTranslation(CGFloat tx, CGFloat ty, CGFloat tz):
+// sixteen CGFloats, returned through r0.
+B32_THUNK(_CATransform3DMakeTranslation) {
+    GuestAddr out = c.args.ptr();
+    float tx = c.args.f32(), ty = c.args.f32(), tz = c.args.f32();
+    CATransform3D t = CATransform3DMakeTranslation(tx, ty, tz);
+    const CGFloat *v = &t.m11;
+    for (int i = 0; i < 16; i++) c.mem.write<float>(out + uint32_t(i) * 4, float(v[i]));
+}
