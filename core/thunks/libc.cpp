@@ -85,7 +85,37 @@ B32_THUNK(_realloc) {
     GuestAddr p = c.args.ptr();
     c.ret(c.heap.realloc(p, c.args.u32()));
 }
+// int posix_memalign(void **out, size_t alignment, size_t size)
+B32_THUNK(_posix_memalign) {
+    GuestAddr out = c.args.ptr();
+    uint32_t alignment = c.args.u32(), size = c.args.u32();
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+        c.ret(EINVAL);
+        return;
+    }
+    GuestAddr p = c.heap.alloc(size ? size : 1, alignment);
+    c.mem.write<uint32_t>(out, p);
+    c.ret(p ? 0 : ENOMEM);
+}
 B32_THUNK(_malloc_size) { c.ret(c.heap.sizeOf(c.args.ptr())); }
+
+// int *_NSGetArgc(void) and char ***_NSGetArgv(void): the process as the
+// guest sees it, launched with no arguments but its executable's path.
+namespace {
+GuestAddr processArgs(Call &c) {
+    static GuestAddr args = [&] {
+        // int argc; char **argv; then argv's two entries.
+        GuestAddr block = c.heap.calloc(1, 16);
+        c.mem.write<int32_t>(block, 1);
+        c.mem.write<uint32_t>(block + 4, block + 8);
+        c.mem.write<uint32_t>(block + 8, c.rt.internString(c.rt.image().path));
+        return block;
+    }();
+    return args;
+}
+}  // namespace
+B32_THUNK(__NSGetArgc) { c.ret(processArgs(c)); }
+B32_THUNK(__NSGetArgv) { c.ret(processArgs(c) + 4); }
 
 B32_THUNK(_exit) { c.rt.exit(c.args.i32()); }
 B32_THUNK(__exit) { c.rt.exit(c.args.i32()); }
@@ -196,6 +226,15 @@ B32_THUNK(_bzero) {
     std::memset(hostPtr(c, dst), 0, c.args.u32());
 }
 
+// errno_t memset_s(void *s, rsize_t smax, int c, rsize_t n)
+B32_THUNK(_memset_s) {
+    GuestAddr dst = c.args.ptr();
+    uint32_t max = c.args.u32();
+    int value = c.args.i32();
+    uint32_t n = c.args.u32();
+    if (dst) std::memset(hostPtr(c, dst), value, std::min(max, n));
+    c.ret(n > max ? EOVERFLOW : 0);
+}
 B32_THUNK(___memcpy_chk) {
     GuestAddr dst = c.args.ptr(), src = c.args.ptr();
     std::memcpy(hostPtr(c, dst), hostPtr(c, src), c.args.u32());
@@ -327,6 +366,11 @@ B32_THUNK(_dlsym) {
 }
 
 B32_THUNK(_dlclose) { c.ret(0); }
+
+// libobjc's id objc_unsafeClaimAutoreleasedReturnValue(id): ARC's way of
+// taking an autoreleased return value without retaining it, which here is
+// the value itself.
+B32_THUNK(_objc_unsafeClaimAutoreleasedReturnValue) { c.ret(c.args.ptr()); }
 
 // int dladdr(const void *addr, Dl_info *info): answers for the app's own
 // image, which is what games ask about (to find their bundle). Guest
