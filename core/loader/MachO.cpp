@@ -8,6 +8,7 @@
 #include <mach-o/reloc.h>
 #include <libkern/OSByteOrder.h>
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -84,7 +85,7 @@ int64_t readSleb(const uint8_t *&p, const uint8_t *end) {
 
 }  // namespace
 
-Image MachOLoader::load(const std::string &path) {
+Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     std::vector<uint8_t> file = readFile(path);
     auto [sliceOffset, sliceSize] = pickSlice(file);
     const uint8_t *slice = file.data() + sliceOffset;
@@ -92,11 +93,29 @@ Image MachOLoader::load(const std::string &path) {
     mach_header header;
     std::memcpy(&header, slice, sizeof header);
     if (header.magic != MH_MAGIC || header.cputype != CPU_TYPE_ARM) fatal("%s is not a 32-bit ARM Mach-O", path.c_str());
-    if (header.filetype != MH_EXECUTE) fatal("%s is not an executable", path.c_str());
+    if (header.filetype != MH_EXECUTE && header.filetype != MH_DYLIB)
+        fatal("%s is not an executable or a dylib", path.c_str());
 
     Image image;
     image.path = path;
     image.cpuSubtype = header.cpusubtype;
+    const bool isDylib = header.filetype == MH_DYLIB;
+    if (isDylib) {
+        // Slide so the first segment starts at dylibBase.
+        const uint8_t *c = slice + sizeof header;
+        for (uint32_t i = 0; i < header.ncmds; i++) {
+            load_command lc;
+            std::memcpy(&lc, c, sizeof lc);
+            if (lc.cmd == LC_SEGMENT) {
+                segment_command seg;
+                std::memcpy(&seg, c, sizeof seg);
+                image.slide = dylibBase - seg.vmaddr;
+                break;
+            }
+            c += lc.cmdsize;
+        }
+    }
+    const uint32_t slide = image.slide;
 
     std::vector<segment_command> segments;
     symtab_command symtab{};
@@ -113,7 +132,9 @@ Image MachOLoader::load(const std::string &path) {
         case LC_SEGMENT: {
             segment_command seg;
             std::memcpy(&seg, cmd, sizeof seg);
+            seg.vmaddr += slide;
             segments.push_back(seg);
+            image.end = std::max(image.end, seg.vmaddr + seg.vmsize);
             if (seg.vmsize && seg.initprot) {
                 mem_.map(seg.vmaddr, seg.vmsize);
                 if (seg.filesize) mem_.copyIn(seg.vmaddr, slice + seg.fileoff, seg.filesize);
@@ -121,7 +142,8 @@ Image MachOLoader::load(const std::string &path) {
             for (uint32_t s = 0; s < seg.nsects; s++) {
                 section sect;
                 std::memcpy(&sect, cmd + sizeof seg + s * sizeof sect, sizeof sect);
-                image.sections.push_back({fixedName(sect.segname, 16), fixedName(sect.sectname, 16), sect.addr, sect.size});
+                image.sections.push_back(
+                    {fixedName(sect.segname, 16), fixedName(sect.sectname, 16), sect.addr + slide, sect.size});
             }
             break;
         }
@@ -145,6 +167,12 @@ Image MachOLoader::load(const std::string &path) {
             std::memcpy(&pc, cmd + sizeof(thread_command) + 8 + 15 * 4, 4);
             std::memcpy(&cpsr, cmd + sizeof(thread_command) + 8 + 16 * 4, 4);
             image.entry = pc | ((cpsr & (1u << 5)) ? 1 : 0);
+            break;
+        }
+        case LC_ID_DYLIB: {
+            dylib_command dc;
+            std::memcpy(&dc, cmd, sizeof dc);
+            image.installName = reinterpret_cast<const char *>(cmd) + dc.dylib.name.offset;
             break;
         }
         case LC_LOAD_DYLIB:
@@ -182,13 +210,68 @@ Image MachOLoader::load(const std::string &path) {
     // The image's own external definitions. Weak and coalesced symbols (C++
     // template instantiations, inline functions) are bound like imports but
     // resolve to the image itself.
-    std::unordered_map<std::string, GuestAddr> defined;
+    std::unordered_map<std::string, GuestAddr> &defined = image.exports;
     for (uint32_t i = 0; i < symtab.nsyms; i++) {
         struct nlist sym;
         std::memcpy(&sym, slice + symtab.symoff + i * sizeof sym, sizeof sym);
         if ((sym.n_type & N_STAB) || (sym.n_type & N_TYPE) != N_SECT || !(sym.n_type & N_EXT)) continue;
-        GuestAddr addr = sym.n_value | ((sym.n_desc & N_ARM_THUMB_DEF) ? 1 : 0);
+        GuestAddr addr = (sym.n_value + slide) | ((sym.n_desc & N_ARM_THUMB_DEF) ? 1 : 0);
         defined.emplace(reinterpret_cast<const char *>(slice + symtab.stroff + sym.n_un.n_strx), addr);
+    }
+
+    // A slid image's own pointers move with it: rebase opcodes (iOS 4+) or
+    // local relocations (older images).
+    if (slide) {
+        auto rebase = [&](GuestAddr where) { mem_.write<uint32_t>(where, mem_.read<uint32_t>(where) + slide); };
+        if (haveDyldInfo) {
+            const uint8_t *p = slice + dyldInfo.rebase_off, *end = p + dyldInfo.rebase_size;
+            uint64_t segOffset = 0;
+            int segIndex = 0;
+            auto address = [&] { return GuestAddr(segments.at(segIndex).vmaddr + segOffset); };
+            while (p < end) {
+                uint8_t byte = *p++;
+                uint8_t imm = byte & REBASE_IMMEDIATE_MASK;
+                switch (byte & REBASE_OPCODE_MASK) {
+                case REBASE_OPCODE_DONE: p = end; break;
+                case REBASE_OPCODE_SET_TYPE_IMM: break;  // always pointers on arm
+                case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
+                    segIndex = imm;
+                    segOffset = readUleb(p, end);
+                    break;
+                case REBASE_OPCODE_ADD_ADDR_ULEB: segOffset += readUleb(p, end); break;
+                case REBASE_OPCODE_ADD_ADDR_IMM_SCALED: segOffset += imm * 4; break;
+                case REBASE_OPCODE_DO_REBASE_IMM_TIMES:
+                    for (int k = 0; k < imm; k++, segOffset += 4) rebase(address());
+                    break;
+                case REBASE_OPCODE_DO_REBASE_ULEB_TIMES:
+                    for (uint64_t k = 0, n = readUleb(p, end); k < n; k++, segOffset += 4) rebase(address());
+                    break;
+                case REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB:
+                    rebase(address());
+                    segOffset += 4 + readUleb(p, end);
+                    break;
+                case REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB: {
+                    uint64_t count = readUleb(p, end), skip = readUleb(p, end);
+                    for (uint64_t k = 0; k < count; k++, segOffset += 4 + skip) rebase(address());
+                    break;
+                }
+                default: fatal("unknown rebase opcode 0x%02x in %s", byte, path.c_str());
+                }
+            }
+        } else {
+            GuestAddr base = segments.empty() ? 0 : segments.front().vmaddr;
+            for (uint32_t i = 0; i < dysymtab.nlocrel; i++) {
+                relocation_info rel;
+                std::memcpy(&rel, slice + dysymtab.locreloff + i * sizeof rel, sizeof rel);
+                if (uint32_t(rel.r_address) & R_SCATTERED) {
+                    scattered_relocation_info srel;
+                    std::memcpy(&srel, &rel, sizeof srel);
+                    rebase(base + srel.r_address);
+                } else if (rel.r_length == 2) {
+                    rebase(base + uint32_t(rel.r_address));
+                }
+            }
+        }
     }
 
     auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
@@ -215,7 +298,7 @@ Image MachOLoader::load(const std::string &path) {
                     uint32_t indirect;
                     std::memcpy(&indirect, slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4, 4);
                     if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
-                    bind(sect.addr + k * 4, symbolName(indirect), 0);
+                    bind(sect.addr + slide + k * 4, symbolName(indirect), 0);
                 }
             }
         }
