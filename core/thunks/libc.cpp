@@ -487,12 +487,23 @@ B32_THUNK(_fopen) {
     c.ret(wrapFile(c, f));
 }
 
+// Closing a FILE twice (RSDKv4 does) is an error, not a crash.
 B32_THUNK(_fclose) {
     GuestAddr f = c.args.ptr();
-    FILE *host = hostFile(c, f);
+    FILE *host = nullptr;
     {
         std::lock_guard guard(filesLock);
-        files.erase(f);
+        auto it = files.find(f);
+        if (it != files.end()) {
+            host = it->second;
+            files.erase(it);
+        }
+    }
+    if (!host) {
+        log("fclose(0x%08x): not an open FILE (from 0x%08x)", f, c.cpu.reg(Cpu::LR));
+        setGuestErrno(c, EBADF);
+        c.ret(uint32_t(EOF));
+        return;
     }
     c.heap.free(f);
     c.ret(uint32_t(std::fclose(host)));
