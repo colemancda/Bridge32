@@ -214,3 +214,8 @@ B32_THUNK(___lshrdi3) {
     uint64_t a = c.args.u64();
     c.ret64(a >> (c.args.u32() & 63));
 }
+
+// Floating point to 64-bit integers.
+B32_THUNK(___fixsfdi) { c.ret64(uint64_t(saturate<int64_t>(c.args.f32()))); }
+B32_THUNK(___fixdfdi) { c.ret64(uint64_t(saturate<int64_t>(c.args.f64()))); }
+B32_THUNK(___fixunssfdi) { c.ret64(saturate<uint64_t>(c.args.f32())); }
