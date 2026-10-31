@@ -174,6 +174,28 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 
 @end
 
+// UIMainStoryboardFile: UIKit doesn't load it for scene-based apps (like
+// NSMainNibFile, see B32NibAppDelegate). Done when the scene connects, as
+// UIKit would: the initial view controller in a window that becomes the
+// app delegate's and key.
+static void loadMainStoryboard() {
+    NSString *name = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIMainStoryboardFile"];
+    if (!name) return;
+    UIStoryboard *storyboard = [UIStoryboard storyboardWithName:name bundle:NSBundle.mainBundle];
+    UIViewController *root = [storyboard instantiateInitialViewController];
+    if (!root) {
+        log("main storyboard %s has no initial view controller", name.UTF8String);
+        return;
+    }
+    // Through the -initWithFrame: swizzle: into the scene, turned to the guest's orientation.
+    UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, screenWidth(), screenHeight())];
+    window.rootViewController = root;
+    id<UIApplicationDelegate> delegate = UIApplication.sharedApplication.delegate;
+    if ([delegate respondsToSelector:@selector(setWindow:)]) delegate.window = window;
+    [window makeKeyAndVisible];
+    log("loaded main storyboard %s: %s", name.UTF8String, object_getClassName(root));
+}
+
 // Named in the shell's UIApplicationSceneManifest.
 @interface B32SceneDelegate : UIResponder <UIWindowSceneDelegate>
 @end
@@ -212,8 +234,10 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
             reinterpret_cast<void (*)(id, SEL)>(originalMakeKeyAndVisible)(window, @selector(makeKeyAndVisible));
     }
     log("scene connected; attached %lu window(s) created before it", (unsigned long)pendingWindows.count);
+    bool hadWindows = pendingWindows.count > 0;
     [pendingWindows removeAllObjects];
     [pendingKeyWindows removeAllObjects];
+    if (!hadWindows) loadMainStoryboard();
 }
 
 @end
