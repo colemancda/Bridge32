@@ -11,6 +11,7 @@
 #include "core/Device.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "core/thunks/MainQueue.h"
 #include "core/objc/Dispatch.h"
 
 #import <UIKit/UIKit.h>
@@ -87,6 +88,11 @@ void orient(UIWindow *window) {
     [guestWindows addObject:window];
     layoutGuestWindows();
 }
+
+// Main-queue work the guest queues during launch, held until its scene
+// connects (see holdLaunchWork).
+bool launching = false;
+NSMutableArray *heldLaunchWork = nil;
 
 NSMutableArray<UIWindow *> *pendingWindows = nil;   // created before the scene connected
 NSMutableSet<UIWindow *> *pendingKeyWindows = nil;  // ...and asked to become key
@@ -235,9 +241,19 @@ static void loadMainStoryboard() {
     }
     log("scene connected; attached %lu window(s) created before it", (unsigned long)pendingWindows.count);
     bool hadWindows = pendingWindows.count > 0;
+    // Lay the windows out now, loading their view controllers' views, as
+    // iOS does at the end of launch.
+    for (UIWindow *window in pendingWindows) [window layoutIfNeeded];
     [pendingWindows removeAllObjects];
     [pendingKeyWindows removeAllObjects];
     if (!hadWindows) loadMainStoryboard();
+
+    // Then the work the guest queued while launching, in order, after this
+    // run loop pass has drawn the windows.
+    launching = false;
+    for (dispatch_block_t work in heldLaunchWork) dispatch_async(dispatch_get_main_queue(), work);
+    if (heldLaunchWork.count) log("ran %lu block(s) queued during launch", (unsigned long)heldLaunchWork.count);
+    [heldLaunchWork removeAllObjects];
 }
 
 @end
@@ -278,6 +294,13 @@ static void loadMainStoryboard() {
 
 CGFloat b32::uikit::windowRotation() { return guestRotation(); }
 
+bool b32::uikit::holdLaunchWork(dispatch_queue_t queue, dispatch_block_t work) {
+    if (!launching || queue != dispatch_get_main_queue()) return false;
+    if (!heldLaunchWork) heldLaunchWork = [[NSMutableArray alloc] init];
+    [heldLaunchWork addObject:[[work copy] autorelease]];
+    return true;
+}
+
 UIWindow *b32::uikit::guestKeyWindow() {
     UIWindow *front = nil;
     for (UIWindow *window in guestWindows) {
@@ -293,6 +316,9 @@ void b32::uikit::configureHost() {
         device::useIPad();
     log("guest device %s, screen %.0fx%.0f", device::current().machine, screenWidth(), screenHeight());
     startController();
+    mainQueueHold = [](void *queue, void *block) {
+        return uikit::holdLaunchWork((dispatch_queue_t)queue, (dispatch_block_t)block);
+    };
 
     pendingWindows = [[NSMutableArray alloc] init];
     guestWindows = [[NSHashTable weakObjectsHashTable] retain];
@@ -318,6 +344,7 @@ void b32::uikit::configureHost() {
 
 // int UIApplicationMain(int argc, char *argv[], NSString *principalClassName, NSString *delegateClassName)
 B32_THUNK(_UIApplicationMain) {
+    launching = true;
     Bridge &bridge = c.rt.bridge();
     c.args.i32();  // the host passes the process's own argc/argv
     c.args.ptr();
