@@ -6,9 +6,11 @@
 
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
+#include "core/thunks/CTable.h"
 
 #include <CommonCrypto/CommonCrypto.h>
 #include <Security/Security.h>
+#include <dlfcn.h>
 
 using namespace b32;
 
@@ -58,5 +60,51 @@ B32_THUNK(_CCCrypt) {
     CCCryptorStatus status = CCCrypt(op, algorithm, options, ptr(key), keyLength, ptr(iv), ptr(in), inLength,
                                      ptr(out), outAvailable, &outMoved);
     if (moved) c.mem.write<uint32_t>(moved, uint32_t(outMoved));
+    c.ret(uint32_t(status));
+}
+
+// int SecRandomCopyBytes(SecRandomRef, size_t count, uint8_t *bytes)
+B32_THUNK(_SecRandomCopyBytes) {
+    c.args.ptr();
+    size_t count = c.args.u32();
+    arc4random_buf(c.mem.ptr<void>(c.args.ptr()), count);
+    c.ret(0);
+}
+B32_DATA(_kSecRandomDefault, 4) {}  // NULL, as on iOS
+
+// unsigned char *CC_SHA512(const void *data, CC_LONG len, unsigned char *md)
+B32_THUNK(_CC_SHA512) {
+    GuestAddr data = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr md = c.args.ptr();
+    CC_SHA512(c.mem.ptr<void>(data), length, c.mem.ptr<unsigned char>(md));
+    c.ret(md);
+}
+
+// --- certificates and trust (SSL pinning) ---------------------------------------------------------
+
+namespace {
+void *process() { return RTLD_DEFAULT; }
+constexpr CFunction kTrust[] = {
+    {"SecCertificateCreateWithData", "o:oo"}, {"SecCertificateCopyData", "o:o"},
+    {"SecCertificateCopySubjectSummary", "o:o"}, {"SecPolicyCreateSSL", "o:uo"}, {"SecPolicyCreateBasicX509", "o:"},
+    {"SecTrustSetAnchorCertificates", "i:oo"}, {"SecTrustSetAnchorCertificatesOnly", "i:ou"},
+    {"SecTrustSetPolicies", "i:oo"}, {"SecTrustGetCertificateCount", "z:o"}, {"SecTrustGetCertificateAtIndex", "o:oz"},
+    {"SecTrustCopyPublicKey", "o:o"}, {"SecTrustCopyExceptions", "o:o"}, {"SecTrustSetExceptions", "B:oo"},
+    // SecTrustResultType is a 32-bit enum in both ABIs.
+    {"SecTrustEvaluate", "i:op"},
+};
+}  // namespace
+
+B32_C_FUNCTIONS(kTrust, process);
+
+// OSStatus SecTrustCreateWithCertificates(CFTypeRef certificates, CFTypeRef policies, SecTrustRef *trust)
+B32_THUNK(_SecTrustCreateWithCertificates) {
+    CFTypeRef certificates = (CFTypeRef)c.rt.bridge().toHost(c.args.ptr());
+    CFTypeRef policies = (CFTypeRef)c.rt.bridge().toHost(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    SecTrustRef trust = nullptr;
+    OSStatus status = SecTrustCreateWithCertificates(certificates, policies, &trust);
+    if (out) c.mem.write<uint32_t>(out, trust ? c.rt.bridge().toGuest((id)trust) : 0);
     c.ret(uint32_t(status));
 }
