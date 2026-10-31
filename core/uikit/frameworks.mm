@@ -87,3 +87,30 @@ B32_OVERRIDE_WHEN(isDevice, "uniqueIdentifier") {
     for (unsigned char byte : digest) [udid appendFormat:@"%02x", byte];
     o.c.ret(o.bridge.toGuest(udid));
 }
+
+// Foundation's empty array and dictionary, which newer compilers use for
+// @[] and @{}: variables holding the shared empty collection.
+B32_DATA(___NSArray0__, 4) { rt.mem().write<uint32_t>(addr, rt.bridge().toGuest([NSArray array])); }
+B32_DATA(___NSDictionary0__, 4) { rt.mem().write<uint32_t>(addr, rt.bridge().toGuest([NSDictionary dictionary])); }
+
+// CGFloat constants: floats in the guest.
+#define B32_CGFLOAT_CONSTANT(name) \
+    B32_DATA(_##name, 4) { rt.mem().write<float>(addr, float(name)); }
+B32_CGFLOAT_CONSTANT(UIFontWeightUltraLight)
+B32_CGFLOAT_CONSTANT(UIFontWeightThin)
+B32_CGFLOAT_CONSTANT(UIFontWeightLight)
+B32_CGFLOAT_CONSTANT(UIFontWeightRegular)
+B32_CGFLOAT_CONSTANT(UIFontWeightMedium)
+B32_CGFLOAT_CONSTANT(UIFontWeightSemibold)
+B32_CGFLOAT_CONSTANT(UIFontWeightBold)
+B32_CGFLOAT_CONSTANT(UIFontWeightHeavy)
+B32_CGFLOAT_CONSTANT(UIFontWeightBlack)
+B32_CGFLOAT_CONSTANT(UIViewNoIntrinsicMetric)
+
+#define B32_CGSIZE_CONSTANT(name)                                  \
+    B32_DATA(_##name, 8) {                                         \
+        rt.mem().write<float>(addr, float(name.width));            \
+        rt.mem().write<float>(addr + 4, float(name.height));       \
+    }
+B32_CGSIZE_CONSTANT(UILayoutFittingCompressedSize)
+B32_CGSIZE_CONSTANT(UILayoutFittingExpandedSize)
