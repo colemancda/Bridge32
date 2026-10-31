@@ -49,7 +49,8 @@ CGPoint stick() {
     return value;
 }
 
-// How far the guest's screen is turned (as in UIKitSupport.mm).
+// How far the device is turned from portrait (as in UIKitSupport.mm), for
+// gravity; touches follow the window's own rotation, windowRotation().
 CGFloat guestRotation() {
     NSString *orientation = [NSBundle.mainBundle objectForInfoDictionaryKey:@"B32Orientation"]
                                 ?: [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIInterfaceOrientation"];
@@ -207,9 +208,9 @@ namespace {
 // that window's own coordinates: the window may be turned on the Mac.
 CGPoint guestPoint(UIWindow *window, CGPoint screen) {
     CGSize bounds = window.bounds.size;
-    CGSize shown = guestRotation() != 0 ? CGSizeMake(bounds.height, bounds.width) : bounds;
+    CGSize shown = uikit::windowRotation() != 0 ? CGSizeMake(bounds.height, bounds.width) : bounds;
     CGPoint fromCenter = CGPointMake(screen.x - shown.width / 2, screen.y - shown.height / 2);
-    CGPoint turned = CGPointApplyAffineTransform(fromCenter, CGAffineTransformMakeRotation(-guestRotation()));
+    CGPoint turned = CGPointApplyAffineTransform(fromCenter, CGAffineTransformMakeRotation(-uikit::windowRotation()));
     return CGPointMake(turned.x + bounds.width / 2, turned.y + bounds.height / 2);
 }
 
@@ -322,7 +323,7 @@ NSMutableSet *activeTouches() {
     UIWindow *window = uikit::guestKeyWindow();
     if (!window) return;
     CGSize bounds = window.bounds.size;
-    CGPoint center = guestRotation() != 0 ? CGPointMake(bounds.height / 2, bounds.width / 2)
+    CGPoint center = uikit::windowRotation() != 0 ? CGPointMake(bounds.height / 2, bounds.width / 2)
                                           : CGPointMake(bounds.width / 2, bounds.height / 2);
     CGPoint step = direction == 1 ? CGPointMake(1, 0) : direction == 2 ? CGPointMake(0, -1)
                  : direction == 3 ? CGPointMake(-1, 0) : CGPointMake(0, 1);
