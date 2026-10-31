@@ -50,6 +50,20 @@ def main():
                  "landscape-left": "UIInterfaceOrientationLandscapeLeft",
                  "landscape-right": "UIInterfaceOrientationLandscapeRight"}
         merged["B32Orientation"] = names[orientation]
+    elif "UIInterfaceOrientation" not in guest:
+        # Newer games only list the orientations they support; one that
+        # supports no portrait orientation starts in the first one listed.
+        ipad_only = merged["B32GuestDeviceFamily"] == [2]
+        supported = (guest.get("UISupportedInterfaceOrientations~ipad" if ipad_only else
+                               "UISupportedInterfaceOrientations~iphone")
+                     or guest.get("UISupportedInterfaceOrientations") or [])
+        if supported and not any("Portrait" in o for o in supported):
+            merged["B32Orientation"] = supported[0]
+    # macOS asks why an app uses Bluetooth before CoreBluetooth works; iOS 9
+    # and earlier apps only had the peripheral key, or none.
+    if "NSBluetoothAlwaysUsageDescription" not in merged:
+        merged["NSBluetoothAlwaysUsageDescription"] = guest.get(
+            "NSBluetoothPeripheralUsageDescription", "This app uses Bluetooth to talk to nearby devices.")
     # A distinct identifier, so the wrapped game gets its own sandbox
     # container and never collides with an installed iOS app of the same id.
     merged["CFBundleIdentifier"] = guest.get("CFBundleIdentifier", "unknown") + ".bridge32"
