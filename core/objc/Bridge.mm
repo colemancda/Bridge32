@@ -348,6 +348,16 @@ void Bridge::setupImage(const Image &image) {
                 mem.write<uint32_t>(s.addr + off, guestSel(mem.cstr(mem.read<uint32_t>(s.addr + off))));
     }
 
+    // Protocols (protocol_t { isa, name, ... }): by address, for converting
+    // @protocol(...) to the host's protocol of the same name.
+    if (const Section *list = image.section("__DATA", "__objc_protolist"))
+        for (uint32_t off = 0; off < list->size; off += 4) {
+            GuestAddr proto = mem.read<uint32_t>(list->addr + off);
+            std::string name = mem.cstr(mem.read<uint32_t>(proto + 4));
+            guestProtocols_[proto] = name;
+            guestProtocolByName_.emplace(name, proto);
+        }
+
     if (const Section *list = image.section("__DATA", "__objc_classlist"))
         for (uint32_t off = 0; off < list->size; off += 4) realizeGuestClass(mem.read<uint32_t>(list->addr + off));
 
@@ -369,7 +379,9 @@ void Bridge::setupImage(const Image &image) {
                     info->methods[sel] = method;
                     if (selName(sel) == std::string("load") && info->isMeta) loadMethods_.push_back({info->instance, method.imp});
                     // Host code must see the category too.
-                    if (info->host) installTrampoline(info->host, sel, method, info);
+                    // The bridge runs +initialize itself (ensureInitialized).
+                    if (info->host && !(info->isMeta && selName(sel) == std::string("initialize")))
+                        installTrampoline(info->host, sel, method, info);
                 }
             }
             log("category %s(%s) loaded", cls->name.c_str(), catName);
@@ -502,7 +514,9 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     byHostClass_[shadow] = cls;
     byHostClass_[cls->meta->host] = cls->meta;
     for (auto &[sel, method] : cls->methods) installTrampoline(shadow, sel, method, cls);
-    for (auto &[sel, method] : cls->meta->methods) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
+    // The bridge runs +initialize itself (ensureInitialized), so the host's runtime doesn't get one.
+    for (auto &[sel, method] : cls->meta->methods)
+        if (selName(sel) != std::string("initialize")) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
     // Subclasses of guest classes inherit this from their guest superclass.
     if (!super->isGuest && !cls->methods.count(guestSel("setValue:forUndefinedKey:")))
         class_addMethod(shadow, @selector(setValue:forUndefinedKey:), reinterpret_cast<IMP>(shadowSetValueForUndefinedKey),
@@ -603,6 +617,16 @@ GuestAddr Bridge::toGuest(id object) {
     }
     if (auto it = guestByHost_.find(object); it != guestByHost_.end()) return it->second;
     if (GuestAddr block = blocks::toGuest(*this, object)) return block;
+    if ([object isKindOfClass:objc_getClass("Protocol")]) {
+        // The guest's own protocol_t by that name, or a minimal one { isa, name }.
+        std::string name = protocol_getName((Protocol *)object);
+        if (auto it = guestProtocolByName_.find(name); it != guestProtocolByName_.end()) return it->second;
+        GuestAddr proto = rt_.heap().calloc(1, 44);
+        rt_.mem().write<uint32_t>(proto + 4, rt_.internString(name));
+        guestProtocols_[proto] = name;
+        guestProtocolByName_.emplace(name, proto);
+        return proto;
+    }
 
     // An instance of a guest class gets its guest half (with the guest's
     // ivars) the first time it crosses over; otherwise it's a plain proxy.
@@ -637,6 +661,22 @@ id Bridge::cfstringToHost(GuestAddr addr) {
     return s;
 }
 
+void Bridge::ensureInitialized(ClassInfo *cls) {
+    if (cls && cls->isMeta) cls = cls->instance;
+    if (!cls || !cls->isGuest || cls->initialized) return;
+    std::lock_guard guard(initLock_);
+    if (cls->initialized) return;
+    ensureInitialized(cls->super);
+    cls->initialized = true;  // before running it: +initialize may message its own class
+    GuestAddr sel = guestSel("initialize");
+    for (ClassInfo *meta = cls->meta; meta && meta->isGuest; meta = meta->super) {
+        if (auto it = meta->methods.find(sel); it != meta->methods.end()) {
+            Runtime::threadCpu().call(it->second.imp, {cls->addr, sel});
+            return;
+        }
+    }
+}
+
 bool Bridge::conformsTo(ClassInfo *cls, const std::string &protocol) {
     for (ClassInfo *c = cls; c; c = c->super) {
         if (!c->isGuest) {
@@ -667,10 +707,21 @@ void Bridge::aliasObject(GuestAddr guest, id host) {
     guestByHost_[host] = guest;
 }
 
+// The host protocol for a guest one: the host's own by that name, or an
+// empty one registered under it.
+Protocol *Bridge::hostProtocol(const std::string &name) {
+    if (Protocol *p = objc_getProtocol(name.c_str())) return p;
+    Protocol *p = objc_allocateProtocol(name.c_str());
+    if (!p) return objc_getProtocol(name.c_str());
+    objc_registerProtocol(p);
+    return p;
+}
+
 id Bridge::toHost(GuestAddr addr) {
     if (!addr) return nil;
-    std::lock_guard guard(lock_);
+    std::unique_lock guard(lock_);
     if (auto it = aliases_.find(addr); it != aliases_.end()) return it->second;
+    if (auto it = guestProtocols_.find(addr); it != guestProtocols_.end()) return (id)hostProtocol(it->second);
     if (auto it = classes_.find(addr); it != classes_.end()) {
         if (!it->second->host) fatal("class %s doesn't exist on the host", it->second->name.c_str());
         return (id)it->second->host;
@@ -682,7 +733,10 @@ id Bridge::toHost(GuestAddr addr) {
     if (it == handleByGuest_.end()) {
         // An SVC instruction: the guest loaded a stub's code as data, so a
         // data import (a constant or variable) was bound as a function.
+        // Making a host block can run guest code (a block's copy helper), so not under the lock.
+        guard.unlock();
         if (id block = blocks::toHost(*this, addr)) return block;
+        guard.lock();
         if ((addr & 0xff000000) == 0xef000000)
             fatal("guest used the code of import %s as an object; it's a data symbol that needs a B32_DATA definition",
                   rt_.thunks().nameOf(addr & 0xffffff).c_str());
