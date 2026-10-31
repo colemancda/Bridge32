@@ -300,6 +300,17 @@ B32_THUNK(_scalbn) {
     c.retF64(std::scalbn(x, c.args.i32()));
 }
 
+// The _FORTIFY_SOURCE forms carry the destination's size too.
+B32_THUNK(___strlcpy_chk) {
+    char *dst = hostPtr(c, c.args.ptr());
+    const char *src = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::strlcpy(dst, src, c.args.u32())));
+}
+B32_THUNK(___strlcat_chk) {
+    char *dst = hostPtr(c, c.args.ptr());
+    const char *src = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::strlcat(dst, src, c.args.u32())));
+}
 B32_THUNK(_strlcpy) {
     char *dst = hostPtr(c, c.args.ptr());
     const char *src = c.mem.cstr(c.args.ptr());
@@ -622,6 +633,32 @@ B32_THUNK(_fdopen) {
 }
 // int setvbuf(FILE *, char *buf, int mode, size_t size): the buffer is guest
 // memory, which never moves.
+// void setbuf(FILE *, char *buf): a BUFSIZ buffer, or none.
+B32_THUNK(_setbuf) {
+    FILE *f = hostFile(c, c.args.ptr());
+    GuestAddr buf = c.args.ptr();
+    std::setvbuf(f, buf ? c.mem.ptr<char>(buf) : nullptr, buf ? _IOFBF : _IONBF, BUFSIZ);
+}
+
+// int fscanf(FILE *, const char *format, ...): scans what follows in the
+// file, then leaves it positioned just after what the scan used.
+B32_THUNK(_fscanf) {
+    FILE *f = hostFile(c, c.args.ptr());
+    const char *format = c.mem.cstr(c.args.ptr());
+    long start = std::ftell(f);
+    char chunk[4096];
+    size_t got = std::fread(chunk, 1, sizeof chunk - 1, f);
+    chunk[got] = '\0';
+    if (got == 0) {
+        c.ret(uint32_t(-1));  // EOF
+        return;
+    }
+    size_t used = 0;
+    int result = scanGuest(c, c.args, chunk, format, &used);
+    std::fseek(f, start + long(used), SEEK_SET);
+    c.ret(uint32_t(result));
+}
+
 B32_THUNK(_setvbuf) {
     FILE *f = hostFile(c, c.args.ptr());
     char *buf = hostPtr(c, c.args.ptr());
