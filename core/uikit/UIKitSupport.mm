@@ -16,6 +16,7 @@
 #import <UIKit/UIKit.h>
 #include <algorithm>
 #include <crt_externs.h>
+#include <cstring>
 #include <objc/runtime.h>
 
 using namespace b32;
@@ -300,6 +301,21 @@ B32_OVERRIDE_WHEN(isScreen, "applicationFrame") {
     writeGuestRect(o.c.mem, o.retPtr, 0, kStatusBarHeight, screenWidth(), screenHeight() - kStatusBarHeight);
 }
 B32_OVERRIDE_WHEN(isScreen, "scale") { o.c.retF32(1.0f); }
+B32_OVERRIDE_WHEN(isScreen, "nativeBounds") { writeGuestRect(o.c.mem, o.retPtr, 0, 0, screenWidth(), screenHeight()); }
+B32_OVERRIDE_WHEN(isScreen, "nativeScale") { o.c.retF32(1.0f); }
+
+// The idiom follows the guest's device: Catalyst's own is iPad, which would
+// send iPhone games down their iPad paths.
+namespace {
+bool isDevice(id receiver) { return [receiver isKindOfClass:[UIDevice class]]; }
+bool isTraits(id receiver) { return [receiver isKindOfClass:[UITraitCollection class]]; }
+uint32_t guestIdiom() {
+    return std::strncmp(device::current().machine, "iPad", 4) == 0 ? uint32_t(UIUserInterfaceIdiomPad)
+                                                                    : uint32_t(UIUserInterfaceIdiomPhone);
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isDevice, "userInterfaceIdiom") { o.c.ret(guestIdiom()); }
+B32_OVERRIDE_WHEN(isTraits, "userInterfaceIdiom") { o.c.ret(guestIdiom()); }
 
 // --- the main bundle's files are in Contents/Resources ----------------------------------
 // iOS bundles are flat, so guest code builds paths from bundlePath.
