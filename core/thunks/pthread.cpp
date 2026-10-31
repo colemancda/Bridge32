@@ -323,6 +323,35 @@ B32_THUNK(_sleep) {
     std::this_thread::sleep_for(std::chrono::seconds(c.args.u32()));
     c.ret(0);
 }
+// struct timespec in the guest: two 32-bit words.
+B32_THUNK(_nanosleep) {
+    GuestAddr req = c.args.ptr(), rem = c.args.ptr();
+    auto duration = std::chrono::seconds(c.mem.read<int32_t>(req)) + std::chrono::nanoseconds(c.mem.read<int32_t>(req + 4));
+    std::this_thread::sleep_for(duration);
+    if (rem) {
+        c.mem.write<uint32_t>(rem, 0);
+        c.mem.write<uint32_t>(rem + 4, 0);
+    }
+    c.ret(0);
+}
+
+// Guest threads are never cancelled.
+B32_THUNK(_pthread_testcancel) {}
+B32_THUNK(_pthread_setcanceltype) {
+    c.args.i32();
+    if (GuestAddr old = c.args.ptr()) c.mem.write<uint32_t>(old, PTHREAD_CANCEL_DEFERRED);
+    c.ret(0);
+}
+B32_THUNK(_sched_get_priority_max) { c.ret(uint32_t(::sched_get_priority_max(c.args.i32()))); }
+B32_THUNK(_sched_get_priority_min) { c.ret(uint32_t(::sched_get_priority_min(c.args.i32()))); }
+// Guest signal handlers aren't installed, so there's nothing to mask.
+B32_THUNK(_sigprocmask) {
+    c.args.i32();
+    c.args.ptr();
+    if (GuestAddr old = c.args.ptr()) c.mem.write<uint32_t>(old, 0);
+    c.ret(0);
+}
+
 B32_THUNK(_sched_yield) {
     std::this_thread::yield();
     c.ret(0);
