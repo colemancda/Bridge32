@@ -90,6 +90,17 @@ public:
     id toHost(GuestAddr object);
     GuestAddr toGuest(id object);
 
+    // Makes a guest address that isn't a bridged object (a framework's global,
+    // like _dispatch_main_q) stand for a host object, both ways.
+    void aliasObject(GuestAddr guest, id host);
+
+    // Whether a class (guest or host) adopts the protocol named `protocol`,
+    // directly, through a protocol it adopts, or through a superclass.
+    bool conformsTo(ClassInfo *cls, const std::string &protocol);
+
+    // The app's own classes (not metaclasses), for objc_getClassList.
+    std::vector<GuestAddr> guestClasses();
+
     ClassInfo *classInfo(GuestAddr cls);
     ClassInfo *classOf(GuestAddr object);  // via the object's isa
     ClassInfo *stubFor(Class hostClass);
@@ -167,6 +178,7 @@ private:
     std::unordered_map<GuestAddr, id> cfstrings_;
 
     GuestAddr emptyCache_ = 0;
+    std::unordered_map<GuestAddr, id> aliases_;
     std::unordered_map<std::string, GuestAddr> hostConstants_;
 };
 
