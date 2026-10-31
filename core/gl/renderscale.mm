@@ -6,11 +6,15 @@
 // match, and every size the guest can query reads back unscaled, so the guest
 // never sees the difference. Offscreen framebuffers are left alone.
 //
-// The factor is B32RenderScale in Info.plist or B32_RENDER_SCALE (default 1,
-// which is off).
+// The factor follows the window: 1 at its smallest, and as it's enlarged the
+// guest renders at the zoom, rounded (up to 4x); the screen's renderbuffers
+// are reallocated just before the guest's next present. B32RenderScale in
+// Info.plist or B32_RENDER_SCALE pins it instead (1 turns scaling off).
 //
 // Not scaled: glReadPixels and glCopyTex[Sub]Image2D from the screen, and
 // ES2 shaders that use gl_FragCoord or gl_PointSize.
+
+#include "GLES.h"
 
 #include "core/Log.h"
 #include "core/Runtime.h"
@@ -24,9 +28,12 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <unordered_set>
+#include <vector>
 
 using namespace b32;
 
@@ -43,21 +50,42 @@ template <typename F> F glFunction(const char *name) {
     return reinterpret_cast<F>(dlsym(library, name));
 }
 
-int factor() {
+constexpr int kMaxFactor = 4;
+
+// The pinned factor, or 0 when it follows the window.
+int pinnedFactor() {
     static int value = [] {
         id setting = getenv("B32_RENDER_SCALE")
                          ? (id)[NSString stringWithUTF8String:getenv("B32_RENDER_SCALE")]
                          : [[NSBundle mainBundle] objectForInfoDictionaryKey:@"B32RenderScale"];
-        int v = setting ? [setting intValue] : 1;
+        if (!setting) return 0;
+        int v = [setting intValue];
         return v < 1 ? 1 : v;
     }();
     return value;
 }
+bool following() { return pinnedFactor() == 0; }
+
+std::atomic<int> currentFactor{0};  // what the screen's renderbuffers have now
+std::atomic<int> wantedFactor{1};   // what the window asks for
+
+int factor() {
+    int f = currentFactor.load();
+    if (f) return f;
+    f = following() ? 1 : pinnedFactor();
+    currentFactor = f;
+    return f;
+}
+// Whether to track the screen's buffers: always when following the window,
+// which may enlarge them later.
+bool tracking() { return following() || factor() > 1; }
 
 std::mutex lock;
 std::unordered_set<uint32_t> scaledRenderbuffers;
 std::unordered_set<uint32_t> scaledFramebuffers;
 int32_t drawableWidth = 0, drawableHeight = 0;  // the guest's own idea of the drawable's size
+uint32_t drawableRenderbuffer = 0;
+CALayer *drawableLayer = nil;
 uint32_t binding(uint32_t pname) {
     static auto getIntegerv = glFunction<void (*)(uint32_t, int32_t *)>("glGetIntegerv");
     int32_t name = 0;
@@ -111,12 +139,14 @@ B32_OVERRIDE_WHEN(isContext, "renderbufferStorage:fromDrawable:") {
         objc_setAssociatedObject(layer, &kGuestScale, @(guestScale), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (layer && factor() > 1) layer.contentsScale = guestScale * factor();
     BOOL ok = reinterpret_cast<BOOL (*)(id, SEL, NSUInteger, id)>(objc_msgSend)(o.receiver, o.sel, target, drawable);
-    if (ok && layer && factor() > 1) {
+    if (ok && layer && tracking()) {
         std::lock_guard<std::mutex> guard(lock);
         drawableWidth = int32_t(std::lround(layer.bounds.size.width * guestScale));
         drawableHeight = int32_t(std::lround(layer.bounds.size.height * guestScale));
-        scaledRenderbuffers.insert(boundRenderbuffer());
-        log("rendering the %dx%d screen at %dx", drawableWidth, drawableHeight, factor());
+        drawableRenderbuffer = boundRenderbuffer();
+        drawableLayer = [layer retain];
+        scaledRenderbuffers.insert(drawableRenderbuffer);
+        if (factor() > 1) log("rendering the %dx%d screen at %dx", drawableWidth, drawableHeight, factor());
     }
     o.c.ret(ok);
 }
@@ -128,7 +158,7 @@ namespace {
 int32_t storageScale(int32_t width, int32_t height) {
     uint32_t renderbuffer = boundRenderbuffer();
     std::lock_guard<std::mutex> guard(lock);
-    bool scale = factor() > 1 && width == drawableWidth && height == drawableHeight;
+    bool scale = tracking() && width == drawableWidth && height == drawableHeight;
     if (scale) scaledRenderbuffers.insert(renderbuffer);
     else scaledRenderbuffers.erase(renderbuffer);
     return scale ? factor() : 1;
@@ -260,3 +290,78 @@ B32_THUNK(_glGetIntegerv) {
     if ((pname == GL_VIEWPORT || pname == GL_SCISSOR_BOX) && scaling())
         for (int i = 0; i < 4; i++) values[i] /= factor();
 }
+
+// --- following the window --------------------------------------------------------------------------
+
+void b32::gl::setDisplayZoom(double zoom) {
+    if (!following()) return;
+    wantedFactor = std::clamp(int(std::lround(zoom)), 1, kMaxFactor);
+}
+
+namespace {
+
+constexpr uint32_t GL_RENDERBUFFER = 0x8D41, GL_RENDERBUFFER_INTERNAL_FORMAT = 0x8D44;
+constexpr uint32_t GL_RENDERBUFFER_SAMPLES = 0x8CAB;
+
+// Before a present, on the guest's GL thread with its context current: when
+// the window wants another factor, reallocate the screen's renderbuffers at
+// it, keeping the guest's bindings, and carry the viewport and scissor over.
+void followWindow(Call &) {
+    int wanted = wantedFactor.load(), old = factor();
+    if (wanted == old || !drawableLayer) return;
+    // EAGL has no headers in the Catalyst SDK.
+    id context = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(objc_getClass("EAGLContext"),
+                                                                 sel_registerName("currentContext"));
+    if (!context) return;
+    static auto getIntegerv = glFunction<void (*)(uint32_t, int32_t *)>("glGetIntegerv");
+    static auto bindRenderbuffer = glFunction<void (*)(uint32_t, uint32_t)>("glBindRenderbuffer");
+    static auto getParam = glFunction<void (*)(uint32_t, uint32_t, int32_t *)>("glGetRenderbufferParameteriv");
+    static auto storage = glFunction<void (*)(uint32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorage");
+    static auto storageMultisample =
+        glFunction<void (*)(uint32_t, int32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorageMultisampleAPPLE");
+    static auto viewport = glFunction<void (*)(int32_t, int32_t, int32_t, int32_t)>("glViewport");
+    static auto scissor = glFunction<void (*)(int32_t, int32_t, int32_t, int32_t)>("glScissor");
+
+    std::vector<uint32_t> renderbuffers;
+    int32_t width, height;
+    uint32_t drawable;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        renderbuffers.assign(scaledRenderbuffers.begin(), scaledRenderbuffers.end());
+        width = drawableWidth;
+        height = drawableHeight;
+        drawable = drawableRenderbuffer;
+    }
+    bool screenBound = scaling();
+    int32_t view[4], box[4];
+    getIntegerv(GL_VIEWPORT, view);
+    getIntegerv(GL_SCISSOR_BOX, box);
+    uint32_t previous = boundRenderbuffer();
+
+    NSNumber *guestScale = guestScaleOf(drawableLayer);
+    for (uint32_t rb : renderbuffers) {
+        bindRenderbuffer(GL_RENDERBUFFER, rb);
+        if (rb == drawable) {
+            drawableLayer.contentsScale = (guestScale ? guestScale.doubleValue : 1) * wanted;
+            reinterpret_cast<BOOL (*)(id, SEL, NSUInteger, id)>(objc_msgSend)(
+                context, sel_registerName("renderbufferStorage:fromDrawable:"), GL_RENDERBUFFER, drawableLayer);
+            continue;
+        }
+        int32_t format = 0, samples = 0;
+        getParam(GL_RENDERBUFFER, GL_RENDERBUFFER_INTERNAL_FORMAT, &format);
+        getParam(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &samples);
+        if (samples > 0) storageMultisample(GL_RENDERBUFFER, samples, uint32_t(format), width * wanted, height * wanted);
+        else storage(GL_RENDERBUFFER, uint32_t(format), width * wanted, height * wanted);
+    }
+    bindRenderbuffer(GL_RENDERBUFFER, previous);
+    currentFactor = wanted;
+    if (screenBound) {
+        viewport(view[0] / old * wanted, view[1] / old * wanted, view[2] / old * wanted, view[3] / old * wanted);
+        scissor(box[0] / old * wanted, box[1] / old * wanted, box[2] / old * wanted, box[3] / old * wanted);
+    }
+    log("rendering the %dx%d screen at %dx", width, height, wanted);
+}
+
+[[maybe_unused]] const int registered = (b32::gl::addPresentHook(followWindow), 0);
+
+}  // namespace
