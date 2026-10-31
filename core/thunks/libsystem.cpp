@@ -12,6 +12,8 @@
 #include <runetype.h>
 #include <sys/mount.h>
 #include <sys/sysctl.h>
+#include <mach/mach_error.h>
+#include <sys/resource.h>
 #include <sys/utsname.h>
 
 #include <algorithm>
@@ -92,6 +94,9 @@ bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr len
     } else if (name == "hw.physicalcpu_max" || name == "hw.logicalcpu_max") {
         int32_t n = 2;
         reply(&n, 4);
+    } else if (name == "kern.ostype" || name == "kern.osrelease") {
+        const char *value = name == "kern.ostype" ? "Darwin" : "13.0.0";  // the kernel of iOS 6
+        reply(value, uint32_t(std::strlen(value) + 1));
     } else if (name == "kern.osversion") {
         const char *build = "10B329";  // iOS 6.1.3
         reply(build, uint32_t(std::strlen(build) + 1));
@@ -137,6 +142,8 @@ B32_THUNK(_sysctl) {
         {int64_t(CTL_HW) << 32 | HW_USERMEM, "hw.usermem"}, {int64_t(CTL_HW) << 32 | HW_MEMSIZE, "hw.memsize"},
         {int64_t(CTL_HW) << 32 | HW_PAGESIZE, "hw.pagesize"}, {int64_t(CTL_HW) << 32 | HW_CPU_FREQ, "hw.cpufrequency"},
         {int64_t(CTL_KERN) << 32 | KERN_BOOTTIME, "kern.boottime"},
+        {int64_t(CTL_KERN) << 32 | KERN_OSTYPE, "kern.ostype"}, {int64_t(CTL_KERN) << 32 | KERN_OSRELEASE, "kern.osrelease"},
+        {int64_t(CTL_KERN) << 32 | KERN_OSVERSION, "kern.osversion"},
     };
     if (auto it = names.find(int64_t(top) << 32 | uint32_t(second)); it != names.end() && sysctlAnswer(c, it->second, out, lenp)) {
         c.ret(0);
@@ -351,6 +358,14 @@ B32_THUNK(_modff) {
     c.mem.write<float>(ip, whole);
     c.retF32(frac);
 }
+B32_THUNK(_modf) {
+    double x = c.args.f64();
+    GuestAddr ip = c.args.ptr();
+    double whole;
+    double frac = std::modf(x, &whole);
+    c.mem.write<double>(ip, whole);
+    c.retF64(frac);
+}
 B32_THUNK(_frexp) {
     double x = c.args.f64();
     GuestAddr exp = c.args.ptr();
@@ -409,3 +424,51 @@ B32_THUNK(_CC_SHA256) {
     CC_SHA256(c.mem.ptr<void>(data), length, c.mem.ptr<unsigned char>(md));
     c.ret(md);
 }
+
+// --- odds and ends ---------------------------------------------------------------------------
+
+// Page-aligned allocation from the guest heap.
+B32_THUNK(_valloc) {
+    uint32_t size = c.args.u32();
+    c.ret(c.heap.alloc(size, 4096));
+}
+
+B32_THUNK(_lrint) { c.ret(uint32_t(int32_t(std::lrint(c.args.f64())))); }
+B32_THUNK(_lrintf) { c.ret(uint32_t(int32_t(std::lrint(c.args.f32())))); }
+B32_THUNK(_srandomdev) { ::srandomdev(); }
+
+// int getrusage(int who, struct rusage *): two 32-bit timevals and fourteen longs.
+B32_THUNK(_getrusage) {
+    int who = c.args.i32();
+    GuestAddr out = c.args.ptr();
+    struct rusage usage{};
+    int r = ::getrusage(who, &usage);
+    if (r == 0 && out) {
+        int32_t words[18] = {int32_t(usage.ru_utime.tv_sec), usage.ru_utime.tv_usec, int32_t(usage.ru_stime.tv_sec),
+                             usage.ru_stime.tv_usec, int32_t(usage.ru_maxrss)};
+        const long rest[] = {usage.ru_ixrss, usage.ru_idrss, usage.ru_isrss, usage.ru_minflt, usage.ru_majflt,
+                             usage.ru_nswap, usage.ru_inblock, usage.ru_oublock, usage.ru_msgsnd, usage.ru_msgrcv,
+                             usage.ru_nsignals, usage.ru_nvcsw, usage.ru_nivcsw};
+        for (int i = 0; i < 13; i++) words[5 + i] = int32_t(rest[i]);
+        c.mem.copyIn(out, words, sizeof words);
+    }
+    c.ret(uint32_t(r));
+}
+
+// size_t confstr(int name, char *buf, size_t len)
+B32_THUNK(_confstr) {
+    int name = c.args.i32();
+    GuestAddr buf = c.args.ptr();
+    uint32_t len = c.args.u32();
+    c.ret(uint32_t(::confstr(name, buf ? c.mem.ptr<char>(buf) : nullptr, len)));
+}
+
+B32_THUNK(_mach_error) {
+    const char *message = c.mem.cstr(c.args.ptr());
+    log("mach_error: %s %s", message, ::mach_error_string(c.args.i32()));
+}
+// Scheduling hints for guest threads aren't passed on.
+B32_THUNK(_thread_policy_set) { c.ret(0); }
+// Guest memory isn't described by host VM regions; engines asking for their
+// own stack bounds fall back to pthread_get_stackaddr_np.
+B32_THUNK(_vm_region_64) { c.ret(1 /* KERN_INVALID_ADDRESS */); }
