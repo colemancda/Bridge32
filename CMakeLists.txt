@@ -32,7 +32,7 @@ add_library(b32core OBJECT
     core/thunks/cxxabi.cpp
     core/thunks/corefoundation.mm
     core/thunks/coregraphics.mm
-    core/thunks/libc.cpp
+    core/thunks/libc.cpp core/thunks/locale.cpp core/thunks/network.cpp
     core/thunks/libstdcxx.cpp
     core/thunks/libsystem.cpp
     core/thunks/posix.cpp
@@ -71,7 +71,7 @@ if(B32_CATALYST)
         message(FATAL_ERROR "The Catalyst shell needs dynarmic in external/dynarmic")
     endif()
     target_sources(b32core PRIVATE core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/gl/gles.mm core/gl/renderscale.mm
-        core/audio/audio.mm core/audio/audioqueue.mm)
+        core/audio/audio.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
     target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore"
         "-framework CoreLocation")
 
