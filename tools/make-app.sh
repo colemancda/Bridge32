@@ -3,7 +3,10 @@
 # Catalyst app that runs it through Bridge32.
 #
 #   tools/make-app.sh [--orientation landscape-right|landscape-left|portrait] [--guest-libs DIR]
-#                     [--controller tilt|swipe] Game.ipa [Out.app]
+#                     [--controller tilt|swipe] [--fps] Game.ipa [Out.app]
+#
+# --fps shows a frame rate counter and logs slow frames (or run with
+# B32_SHOW_FPS=1).
 #
 # --controller maps a game controller's right stick and D-pad: "tilt" fakes
 # the accelerometer (racing games), "swipe" swipes from the middle of the
@@ -24,11 +27,13 @@ shell_app="${B32_SHELL_APP:-$root/build/catalyst/Bridge32.app}"
 orientation=""
 guest_libs="${B32_GUEST_LIBS:-}"
 controller=""
+fps=""
 while :; do
     case "${1:-}" in
     --orientation) orientation=$2; shift 2 ;;
     --guest-libs) guest_libs=$2; shift 2 ;;
     --controller) controller=$2; shift 2 ;;
+    --fps) fps=1; shift ;;
     *) break ;;
     esac
 done
@@ -72,6 +77,7 @@ fi
 python3 -I "$here/merge-plist.py" "$guest/Info.plist" "$root/app/Info.plist" "$out/Contents/Info.plist" "$(basename "$guest")" $orientation
 
 [ -n "$controller" ] && /usr/libexec/PlistBuddy -c "Add :B32Controller string $controller" "$out/Contents/Info.plist"
+[ -n "$fps" ] && /usr/libexec/PlistBuddy -c "Add :B32ShowFPS bool true" "$out/Contents/Info.plist"
 
 codesign --force --sign - --entitlements "$root/app/Bridge32.entitlements" "$out"
 echo "$out"
