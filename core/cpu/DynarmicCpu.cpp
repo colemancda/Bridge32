@@ -7,8 +7,10 @@
 #include <dynarmic/interface/A32/config.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <cstdio>
 #include <cstdlib>
 #include <optional>
+#include <string>
 
 namespace b32 {
 
@@ -25,8 +27,24 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
     explicit Callbacks(GuestMemory &m) : mem(m) {}
 
     uint8_t *at(VAddr addr, size_t size, const char *what) {
-        if (!mem.isMapped(addr) || !mem.isMapped(addr + uint32_t(size) - 1))
-            fatal("guest %s of unmapped 0x%08x (pc=0x%08x lr=0x%08x)", what, addr, jit->Regs()[15], jit->Regs()[14]);
+        if (!mem.isMapped(addr) || !mem.isMapped(addr + uint32_t(size) - 1)) {
+            const auto &r = jit->Regs();
+            log("guest registers: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x", r[0], r[1], r[2],
+                r[3], r[4], r[5], r[6], r[7]);
+            // iOS code keeps a frame chain in r7: { saved r7, saved lr }.
+            std::string frames;
+            uint32_t fp = r[7];
+            for (int i = 0; i < 16 && fp && (fp & 3) == 0 && mem.isMapped(fp) && mem.isMapped(fp + 7); i++) {
+                char frame[16];
+                std::snprintf(frame, sizeof frame, " %08x", mem.read<uint32_t>(fp + 4));
+                frames += frame;
+                uint32_t next = mem.read<uint32_t>(fp);
+                if (next <= fp) break;
+                fp = next;
+            }
+            log("guest return addresses:%s", frames.c_str());
+            fatal("guest %s of unmapped 0x%08x (pc=0x%08x lr=0x%08x)", what, addr, r[15], r[14]);
+        }
         return mem.ptr<uint8_t>(addr);
     }
     template <typename T> T load(VAddr addr) {
