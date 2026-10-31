@@ -19,6 +19,7 @@
 #include <sys/uio.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
+#include <utime.h>
 #include <zlib.h>
 
 #include <cerrno>
@@ -291,6 +292,16 @@ B32_THUNK(_strftime) {
     c.ret(uint32_t(std::strftime(out, max, format, &t)));
 }
 
+// size_t strftime_l(char *, size_t, const char *, const struct tm *, locale_t):
+// always the C locale.
+B32_THUNK(_strftime_l) {
+    char *out = c.mem.ptr<char>(c.args.ptr());
+    size_t max = c.args.u32();
+    const char *format = c.mem.cstr(c.args.ptr());
+    struct tm t = hostTm(c, c.args.ptr());
+    c.ret(uint32_t(std::strftime(out, max, format, &t)));
+}
+
 // size_t wcsftime(wchar_t *s, size_t max, const wchar_t *format, const struct tm *tm)
 B32_THUNK(_wcsftime) {
     wchar_t *out = c.mem.ptr<wchar_t>(c.args.ptr());
@@ -476,9 +487,10 @@ B32_THUNK(_inflateReset) {
 // Each conversion runs through the host's sscanf on its own (with %n to see
 // how much it consumed) and the result is stored through the guest pointer.
 
-B32_THUNK(_sscanf) {
-    const char *input = c.mem.cstr(c.args.ptr());
-    const char *format = c.mem.cstr(c.args.ptr());
+namespace {
+// Scans `input` by `format`, storing through the guest pointers `args`
+// supplies; returns sscanf's result.
+int scanGuest(Call &c, Args &args, const char *input, const char *format) {
     const char *pos = input;
     int assigned = 0;
 
@@ -533,7 +545,7 @@ B32_THUNK(_sscanf) {
             std::sscanf(pos, (piece + "%n").c_str(), &used);
             matched = used >= 0 ? 0 : -1;
         } else if (conv == 'n') {
-            c.mem.write<int32_t>(c.args.ptr(), int32_t(pos - input));
+            c.mem.write<int32_t>(args.ptr(), int32_t(pos - input));
             continue;
         } else {
             matched = std::sscanf(pos, (piece + "%n").c_str(), &value, &used);
@@ -543,7 +555,7 @@ B32_THUNK(_sscanf) {
         pos += used;
         if (suppress) continue;
 
-        GuestAddr out = c.args.ptr();
+        GuestAddr out = args.ptr();
         switch (conv) {
         case 'd': case 'i': case 'u': case 'x': case 'X': case 'o':
             if (wide)
@@ -568,7 +580,30 @@ B32_THUNK(_sscanf) {
         }
         assigned++;
     }
-    c.ret(uint32_t(assigned == 0 && *pos == '\0' && *input == '\0' ? -1 : assigned));
+    return assigned == 0 && *pos == '\0' && *input == '\0' ? -1 : assigned;
+}
+}  // namespace
+
+B32_THUNK(_sscanf) {
+    const char *input = c.mem.cstr(c.args.ptr());
+    const char *format = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(scanGuest(c, c.args, input, format)));
+}
+
+// int vsscanf(const char *, const char *format, va_list)
+B32_THUNK(_vsscanf) {
+    const char *input = c.mem.cstr(c.args.ptr());
+    const char *format = c.mem.cstr(c.args.ptr());
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    c.ret(uint32_t(scanGuest(c, va, input, format)));
+}
+
+// int sscanf_l(const char *, locale_t, const char *format, ...): always the C locale.
+B32_THUNK(_sscanf_l) {
+    const char *input = c.mem.cstr(c.args.ptr());
+    c.args.ptr();
+    const char *format = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(scanGuest(c, c.args, input, format)));
 }
 
 // --- memory and descriptors ------------------------------------------------------------------
@@ -696,3 +731,33 @@ B32_THUNK(_syslog) {
     c.args.i32();  // priority
     log("syslog: %s", formatGuest(c, c.mem.cstr(c.args.ptr()), c.args).c_str());
 }
+
+// --- process and system -------------------------------------------------------------------------
+
+B32_THUNK(__Exit) { c.rt.exit(c.args.i32()); }
+
+// long sysconf(int): long is 32-bit in the guest, and pages are 4 KB there.
+B32_THUNK(_sysconf) {
+    int name = c.args.i32();
+    long value = name == _SC_PAGESIZE ? 4096 : ::sysconf(name);
+    c.ret(uint32_t(int32_t(std::min<long>(value, INT32_MAX))));
+}
+
+// double difftime(time_t, time_t): time_t is 32-bit in the guest.
+B32_THUNK(_difftime) {
+    int32_t end = c.args.i32();
+    c.retF64(double(end) - double(c.args.i32()));
+}
+
+// int utime(const char *, const struct utimbuf *): { time_t actime, modtime } of 32-bit words.
+B32_THUNK(_utime) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr times = c.args.ptr();
+    struct utimbuf host = {};
+    if (times) host = {c.mem.read<int32_t>(times), c.mem.read<int32_t>(times + 4)};
+    c.ret(uint32_t(::utime(path, times ? &host : nullptr)));
+}
+
+// bool __availability_version_check(uint32_t count, dyld_build_version_t versions[]):
+// behind @available, which the guest's OS versions always satisfy.
+B32_THUNK(___availability_version_check) { c.ret(1); }
