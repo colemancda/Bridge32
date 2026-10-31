@@ -185,7 +185,17 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 // UIKit would: the initial view controller in a window that becomes the
 // app delegate's and key.
 static void loadMainStoryboard() {
-    NSString *name = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UIMainStoryboardFile"];
+// The value of an Info.plist key for the guest's device (`key~iphone` or
+// `key~ipad`), else the plain key. Read from the plist itself: NSBundle
+// applies the Mac's own (iPad) suffix to the plain key.
+static NSString *deviceInfoValue(NSString *key) {
+    static NSDictionary *info = [[NSDictionary alloc]
+        initWithContentsOfURL:[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Contents/Info.plist"]];
+    NSString *suffix = std::strncmp(device::current().machine, "iPad", 4) == 0 ? @"~ipad" : @"~iphone";
+    return info[[key stringByAppendingString:suffix]] ?: info[key];
+}
+
+    NSString *name = deviceInfoValue(@"UIMainStoryboardFile");
     if (!name) return;
     UIStoryboard *storyboard = [UIStoryboard storyboardWithName:name bundle:NSBundle.mainBundle];
     UIViewController *root = [storyboard instantiateInitialViewController];
