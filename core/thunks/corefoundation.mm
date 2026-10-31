@@ -3,6 +3,7 @@
 // the guest ('z'), and CFRange and the number types need hand conversion.
 
 #include "CTable.h"
+#include "Format.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
@@ -10,6 +11,9 @@
 #import <Foundation/Foundation.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <objc/runtime.h>
+
+#include <cstring>
 
 using namespace b32;
 
@@ -19,13 +23,14 @@ void *coreFoundation() { return RTLD_DEFAULT; }
 
 constexpr CFunction kCoreFoundation[] = {
     {"CFAbsoluteTimeGetCurrent", "d:"},
-    {"CFArrayGetCount", "z:o"}, {"CFArrayGetValueAtIndex", "o:oz"},
+    {"CFArrayGetCount", "z:o"}, 
     {"CFDataGetLength", "z:o"}, {"CFDataCreate", "o:opz"},
-    {"CFDictionaryGetValue", "o:oo"}, {"CFDictionaryGetCount", "z:o"},
-    {"CFDictionarySetValue", "v:ooo"}, {"CFDictionaryRemoveValue", "v:oo"},
+    {"CFDictionaryGetCount", "z:o"},
+    
     {"CFPreferencesAppSynchronize", "B:o"}, {"CFPreferencesCopyAppValue", "o:oo"},
     {"CFPreferencesSetAppValue", "v:ooo"},
-    {"CFRunLoopGetCurrent", "o:"}, {"CFRunLoopGetMain", "o:"},
+    {"CFRunLoopGetCurrent", "o:"}, {"CFRunLoopGetMain", "o:"}, {"CFRunLoopPerformBlock", "v:ooo"},
+    {"CFRunLoopWakeUp", "v:o"}, {"CFRunLoopRun", "v:"},
     {"CFRunLoopAddTimer", "v:ooo"}, {"CFRunLoopTimerInvalidate", "v:o"},
     {"CFStringAppendCharacters", "v:opz"}, {"CFStringAppendCString", "v:opu"},
     {"CFStringCreateWithCString", "o:opu"}, {"CFStringGetCString", "B:opzu"},
@@ -37,7 +42,26 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFBooleanGetValue", "B:o"}, {"CFEqual", "B:oo"}, {"CFHash", "z:o"},
     {"CFURLCreateWithFileSystemPath", "o:ooiu"}, {"CFBundleGetMainBundle", "o:"},
     {"CFBundleCopyResourceURL", "o:oooo"}, {"CFBundleGetValueForInfoDictionaryKey", "o:oo"},
-    {"CFLocaleCopyCurrent", "o:"}, {"CFLocaleGetIdentifier", "o:o"},
+    {"CFLocaleCopyCurrent", "o:"}, {"CFLocaleGetIdentifier", "o:o"}, {"CFLocaleGetSystem", "o:"},
+    {"CFStringGetFastestEncoding", "u:o"}, {"CFStringGetSmallestEncoding", "u:o"},
+    {"CFStringGetMaximumSizeForEncoding", "z:zu"}, {"CFStringGetCStringPtr", "s:ou"},
+    {"CFStringConvertEncodingToNSStringEncoding", "z:u"}, {"CFStringConvertNSStringEncodingToEncoding", "u:z"},
+    {"CFStringConvertEncodingToIANACharSetName", "o:u"}, {"CFStringConvertIANACharSetNameToEncoding", "u:o"},
+    {"CFStringCreateMutableCopy", "o:ozo"}, {"CFStringCreateWithSubstring", "o:oozz"},
+    {"CFStringHasPrefix", "B:oo"}, {"CFStringHasSuffix", "B:oo"}, {"CFStringLowercase", "v:oo"},
+    {"CFStringUppercase", "v:oo"}, {"CFStringCreateArrayBySeparatingStrings", "o:ooo"},
+    {"CFStringFind", "z:oou"}, {"CFStringAppend", "v:oo"},
+    {"CFCopyDescription", "o:o"}, {"CFDateCompare", "z:oop"},
+    {"CFArrayAppendArray", "v:oozz"}, {"CFArrayRemoveValueAtIndex", "v:oz"},
+    
+    {"CFArrayRemoveAllValues", "v:o"}, 
+    {"CFBundleGetIdentifier", "o:o"}, {"CFBundleGetInfoDictionary", "o:o"},
+    {"CFNotificationCenterGetLocalCenter", "o:"}, {"CFNotificationCenterGetDarwinNotifyCenter", "o:"},
+    {"CFRunLoopContainsTimer", "B:ooo"},
+    {"CFURLCreateStringByAddingPercentEscapes", "o:oooou"},
+    {"CFURLCreateStringByReplacingPercentEscapes", "o:ooo"},
+    {"CFURLCreateStringByReplacingPercentEscapesUsingEncoding", "o:ooou"},
+    {"CFAttributedStringSetAttribute", "v:ozzoo"}, {"CFAttributedStringRemoveAttribute", "v:ozzo"},
 };
 
 B32_C_FUNCTIONS(kCoreFoundation, coreFoundation);
@@ -52,15 +76,39 @@ CFRange range(Call &c) {
 
 }  // namespace
 
+// --- collections -----------------------------------------------------------------------------------
+// A CF collection made with the kCFType callbacks holds objects; one made
+// with NULL callbacks holds plain pointer-sized values (the guest's malloc'd
+// buffers, small integers), which pass through unconverted. The latter are
+// marked with an associated object.
+
+namespace {
+char rawKey;
+constexpr int kRawValues = 1, kRawKeys = 2;
+
+void markRaw(id collection, int flags) {
+    if (flags) objc_setAssociatedObject(collection, &rawKey, @(flags), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+int rawFlags(id collection) { return [objc_getAssociatedObject(collection, &rawKey) intValue]; }
+
+const void *hostValue(Call &c, bool raw, GuestAddr value) {
+    return raw ? reinterpret_cast<const void *>(uintptr_t(value)) : (const void *)bridge(c).toHost(value);
+}
+GuestAddr guestValue(Call &c, bool raw, const void *value) {
+    return raw ? GuestAddr(uintptr_t(value)) : bridge(c).toGuest((id)value);
+}
+}  // namespace
+
 // CFArrayRef CFArrayCreate(CFAllocatorRef, const void **values, CFIndex count, const CFArrayCallBacks *)
-// The values are guest objects (the callbacks are kCFTypeArrayCallBacks in practice).
 B32_THUNK(_CFArrayCreate) {
     c.args.ptr();
     GuestAddr values = c.args.ptr();
     int32_t count = c.args.i32();
-    std::vector<id> objects(size_t(std::max(count, 0)));
-    for (int32_t i = 0; i < count; i++) objects[i] = bridge(c).toHost(c.mem.read<uint32_t>(values + i * 4));
-    CFArrayRef array = CFArrayCreate(nullptr, (const void **)objects.data(), count, &kCFTypeArrayCallBacks);
+    bool raw = c.args.ptr() == 0;
+    std::vector<const void *> items(size_t(std::max(count, 0)));
+    for (int32_t i = 0; i < count; i++) items[size_t(i)] = hostValue(c, raw, c.mem.read<uint32_t>(values + uint32_t(i) * 4));
+    CFArrayRef array = CFArrayCreate(nullptr, items.data(), count, raw ? nullptr : &kCFTypeArrayCallBacks);
+    markRaw((id)array, raw ? kRawValues : 0);
     c.ret(bridge(c).toGuest((id)array));
 }
 
@@ -68,17 +116,86 @@ B32_THUNK(_CFArrayCreate) {
 B32_THUNK(_CFArrayCreateMutable) {
     c.args.ptr();
     CFIndex capacity = c.args.i32();
-    c.ret(bridge(c).toGuest((id)CFArrayCreateMutable(nullptr, capacity, &kCFTypeArrayCallBacks)));
+    bool raw = c.args.ptr() == 0;
+    CFMutableArrayRef array = CFArrayCreateMutable(nullptr, capacity, raw ? nullptr : &kCFTypeArrayCallBacks);
+    markRaw((id)array, raw ? kRawValues : 0);
+    c.ret(bridge(c).toGuest((id)array));
+}
+
+// CFMutableDictionaryRef CFDictionaryCreateMutable(CFAllocatorRef, CFIndex capacity,
+//     const CFDictionaryKeyCallBacks *, const CFDictionaryValueCallBacks *)
+B32_THUNK(_CFDictionaryCreateMutable) {
+    c.args.ptr();
+    CFIndex capacity = c.args.i32();
+    bool rawKeys = c.args.ptr() == 0, rawValues = c.args.ptr() == 0;
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(nullptr, capacity,
+                                                            rawKeys ? nullptr : &kCFTypeDictionaryKeyCallBacks,
+                                                            rawValues ? nullptr : &kCFTypeDictionaryValueCallBacks);
+    markRaw((id)dict, (rawKeys ? kRawKeys : 0) | (rawValues ? kRawValues : 0));
+    c.ret(bridge(c).toGuest((id)dict));
+}
+
+B32_THUNK(_CFArrayGetValueAtIndex) {
+    id array = bridge(c).toHost(c.args.ptr());
+    c.ret(guestValue(c, rawFlags(array) & kRawValues, CFArrayGetValueAtIndex((CFArrayRef)array, c.args.i32())));
+}
+B32_THUNK(_CFArrayAppendValue) {
+    id array = bridge(c).toHost(c.args.ptr());
+    CFArrayAppendValue((CFMutableArrayRef)array, hostValue(c, rawFlags(array) & kRawValues, c.args.ptr()));
+}
+B32_THUNK(_CFArraySetValueAtIndex) {
+    id array = bridge(c).toHost(c.args.ptr());
+    CFIndex index = c.args.i32();
+    CFArraySetValueAtIndex((CFMutableArrayRef)array, index, hostValue(c, rawFlags(array) & kRawValues, c.args.ptr()));
+}
+B32_THUNK(_CFArrayInsertValueAtIndex) {
+    id array = bridge(c).toHost(c.args.ptr());
+    CFIndex index = c.args.i32();
+    CFArrayInsertValueAtIndex((CFMutableArrayRef)array, index, hostValue(c, rawFlags(array) & kRawValues, c.args.ptr()));
+}
+// CFIndex CFArrayGetFirstIndexOfValue(CFArrayRef, CFRange, const void *value)
+B32_THUNK(_CFArrayGetFirstIndexOfValue) {
+    id array = bridge(c).toHost(c.args.ptr());
+    CFRange r = range(c);
+    c.ret(uint32_t(CFArrayGetFirstIndexOfValue((CFArrayRef)array, r, hostValue(c, rawFlags(array) & kRawValues, c.args.ptr()))));
 }
 
 // void CFArrayGetValues(CFArrayRef, CFRange, const void **values)
 B32_THUNK(_CFArrayGetValues) {
-    CFArrayRef array = (CFArrayRef)bridge(c).toHost(c.args.ptr());
+    id array = bridge(c).toHost(c.args.ptr());
     CFRange r = range(c);
     GuestAddr out = c.args.ptr();
+    bool raw = rawFlags(array) & kRawValues;
     std::vector<const void *> values(size_t(r.length));
-    CFArrayGetValues(array, r, values.data());
-    for (CFIndex i = 0; i < r.length; i++) c.mem.write<uint32_t>(out + uint32_t(i) * 4, bridge(c).toGuest((id)values[i]));
+    CFArrayGetValues((CFArrayRef)array, r, values.data());
+    for (CFIndex i = 0; i < r.length; i++) c.mem.write<uint32_t>(out + uint32_t(i) * 4, guestValue(c, raw, values[size_t(i)]));
+}
+
+B32_THUNK(_CFDictionaryGetValue) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    int flags = rawFlags(dict);
+    const void *key = hostValue(c, flags & kRawKeys, c.args.ptr());
+    c.ret(guestValue(c, flags & kRawValues, CFDictionaryGetValue((CFDictionaryRef)dict, key)));
+}
+B32_THUNK(_CFDictionarySetValue) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    int flags = rawFlags(dict);
+    const void *key = hostValue(c, flags & kRawKeys, c.args.ptr());
+    CFDictionarySetValue((CFMutableDictionaryRef)dict, key, hostValue(c, flags & kRawValues, c.args.ptr()));
+}
+B32_THUNK(_CFDictionaryAddValue) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    int flags = rawFlags(dict);
+    const void *key = hostValue(c, flags & kRawKeys, c.args.ptr());
+    CFDictionaryAddValue((CFMutableDictionaryRef)dict, key, hostValue(c, flags & kRawValues, c.args.ptr()));
+}
+B32_THUNK(_CFDictionaryRemoveValue) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    CFDictionaryRemoveValue((CFMutableDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawKeys, c.args.ptr()));
+}
+B32_THUNK(_CFDictionaryContainsKey) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    c.ret(CFDictionaryContainsKey((CFDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawKeys, c.args.ptr())));
 }
 
 // CFDataRef CFDataCreateWithBytesNoCopy(CFAllocatorRef, const UInt8 *, CFIndex, CFAllocatorRef deallocator)
@@ -219,3 +336,74 @@ B32_THUNK(_CFRunLoopTimerCreate) {
     t->timer = bridge(c).toGuest((id)timer);
     c.ret(t->timer);
 }
+
+// --- the rest of CFString and CFArray -----------------------------------------------------------------
+
+// The characters live in host memory; "no direct pointer" is always allowed.
+B32_THUNK(_CFStringGetCharactersPtr) { c.ret(0); }
+B32_THUNK(_CFBundleGetDataPointerForName) { c.ret(0); }
+
+// CFStringRef CFStringCreateWithFormat(CFAllocatorRef, CFDictionaryRef options, CFStringRef format, ...)
+B32_THUNK(_CFStringCreateWithFormat) {
+    c.args.ptr();
+    c.args.ptr();
+    NSString *format = (NSString *)bridge(c).toHost(c.args.ptr());
+    std::string s = formatGuest(c, format.UTF8String, c.args, objc::describeObject);
+    c.ret(bridge(c).toGuest([[NSString alloc] initWithUTF8String:s.c_str()]));
+}
+
+// void CFStringAppendFormat(CFMutableStringRef, CFDictionaryRef options, CFStringRef format, ...)
+B32_THUNK(_CFStringAppendFormat) {
+    auto *string = (NSMutableString *)bridge(c).toHost(c.args.ptr());
+    c.args.ptr();
+    NSString *format = (NSString *)bridge(c).toHost(c.args.ptr());
+    std::string s = formatGuest(c, format.UTF8String, c.args, objc::describeObject);
+    [string appendString:[NSString stringWithUTF8String:s.c_str()]];
+}
+
+// Boolean CFStringTransform(CFMutableStringRef, CFRange *range, CFStringRef transform, Boolean reverse):
+// the guest's CFRange is two 32-bit words.
+B32_THUNK(_CFStringTransform) {
+    auto string = (CFMutableStringRef)bridge(c).toHost(c.args.ptr());
+    GuestAddr rangeAddr = c.args.ptr();
+    auto transform = (CFStringRef)bridge(c).toHost(c.args.ptr());
+    Boolean reverse = c.args.u32() != 0;
+    CFRange range;
+    if (rangeAddr) range = CFRangeMake(c.mem.read<int32_t>(rangeAddr), c.mem.read<int32_t>(rangeAddr + 4));
+    Boolean ok = CFStringTransform(string, rangeAddr ? &range : nullptr, transform, reverse);
+    if (rangeAddr) {
+        c.mem.write<int32_t>(rangeAddr, int32_t(range.location));
+        c.mem.write<int32_t>(rangeAddr + 4, int32_t(range.length));
+    }
+    c.ret(ok);
+}
+
+// void CFArrayApplyFunction(CFArrayRef, CFRange, void (*applier)(const void *value, void *context), void *context)
+B32_THUNK(_CFArrayApplyFunction) {
+    auto array = (CFArrayRef)bridge(c).toHost(c.args.ptr());
+    CFIndex location = c.args.i32(), length = c.args.i32();
+    GuestAddr applier = c.args.ptr(), context = c.args.ptr();
+    for (CFIndex i = location; i < location + length; i++)
+        c.cpu.call(applier, {guestValue(c, rawFlags((id)array) & kRawValues, CFArrayGetValueAtIndex(array, i)), context});
+}
+
+// CFUUIDBytes is 16 bytes: four words in, through r0 out.
+B32_THUNK(_CFUUIDCreateFromUUIDBytes) {
+    c.args.ptr();
+    CFUUIDBytes bytes;
+    for (int i = 0; i < 4; i++) {
+        uint32_t w = c.args.u32();
+        std::memcpy(reinterpret_cast<uint8_t *>(&bytes) + i * 4, &w, 4);
+    }
+    c.ret(bridge(c).toGuest((id)CFUUIDCreateFromUUIDBytes(nullptr, bytes)));
+}
+B32_THUNK(_CFUUIDGetUUIDBytes) {
+    GuestAddr out = c.args.ptr();
+    CFUUIDBytes bytes = CFUUIDGetUUIDBytes((CFUUIDRef)bridge(c).toHost(c.args.ptr()));
+    c.mem.copyIn(out, &bytes, sizeof bytes);
+}
+
+// Darwin and local notifications aren't delivered to guest callbacks yet.
+B32_THUNK(_CFNotificationCenterAddObserver) {}
+B32_THUNK(_CFNotificationCenterRemoveObserver) {}
+B32_THUNK(_CFNotificationCenterRemoveEveryObserver) {}
