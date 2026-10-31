@@ -4,8 +4,37 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 namespace b32 {
+
+namespace {
+// Appends UTF-16 text as UTF-8 (unpaired surrogates become U+FFFD).
+void appendUTF16(std::string &out, const std::u16string &text) {
+    for (size_t i = 0; i < text.size(); i++) {
+        uint32_t cp = text[i];
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < text.size() && text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF)
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (text[++i] - 0xDC00);
+        else if (cp >= 0xD800 && cp <= 0xDFFF)
+            cp = 0xFFFD;
+        if (cp < 0x80) {
+            out += char(cp);
+        } else if (cp < 0x800) {
+            out += char(0xC0 | cp >> 6);
+            out += char(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += char(0xE0 | cp >> 12);
+            out += char(0x80 | ((cp >> 6) & 0x3F));
+            out += char(0x80 | (cp & 0x3F));
+        } else {
+            out += char(0xF0 | cp >> 18);
+            out += char(0x80 | ((cp >> 12) & 0x3F));
+            out += char(0x80 | ((cp >> 6) & 0x3F));
+            out += char(0x80 | (cp & 0x3F));
+        }
+    }
+}
+}  // namespace
 
 std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber describe) {
     std::string out;
@@ -83,6 +112,17 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             std::snprintf(piece, sizeof piece, (spec + "#x").c_str(), args.u32());
             out += piece;
             break;
+        case 'C':  // a unichar (UTF-16 code unit), as UTF-8
+            appendUTF16(out, [&] { uint16_t ch = uint16_t(args.u32()); return std::u16string(1, char16_t(ch)); }());
+            break;
+        case 'S': {  // a NUL-terminated unichar string
+            GuestAddr s = args.ptr();
+            std::u16string text;
+            if (s)
+                for (GuestAddr q = s; uint16_t ch = c.mem.read<uint16_t>(q); q += 2) text += char16_t(ch);
+            appendUTF16(out, text);
+            break;
+        }
         case 'n': args.ptr(); break;  // never write back through %n
         case '@':
             if (!describe) fatal("%%@ in a C format string: %s", format);
