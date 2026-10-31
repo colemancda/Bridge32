@@ -13,9 +13,9 @@
 # screen (maze games like PAC-MAN); see core/uikit/Controller.mm.
 #
 # --guest-libs (or $B32_GUEST_LIBS) names a folder of armv6/armv7 builds of
-# libstdc++, libgcc_s and libxml2, such as an old iPhoneOS SDK's /usr/lib;
-# they're copied into the app and run as guest code for the games that link
-# them.
+# libstdc++, libgcc_s, libc++, libc++abi and libxml2, such as an old iPhoneOS
+# SDK's /usr/lib; they're copied into the app and run as guest code for the
+# games that link them.
 #
 # The guest's files go in Out.app/Contents/Resources, so the game's
 # NSBundle mainBundle, nibs and resources resolve as on the device.
@@ -69,7 +69,8 @@ mkdir -p "$resources"
 
 if [ -n "$guest_libs" ]; then
     mkdir -p "$resources/B32GuestLibraries"
-    for lib in "$guest_libs"/libstdc++*.dylib "$guest_libs"/libgcc_s*.dylib "$guest_libs"/libxml2*.dylib; do
+    for lib in "$guest_libs"/libstdc++*.dylib "$guest_libs"/libgcc_s*.dylib "$guest_libs"/libxml2*.dylib \
+               "$guest_libs"/libc++*.dylib; do
         [ -f "$lib" ] && cp "$lib" "$resources/B32GuestLibraries/"
     done
 fi
