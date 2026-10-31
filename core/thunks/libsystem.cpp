@@ -17,6 +17,7 @@
 #include <sys/utsname.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -472,3 +473,24 @@ B32_THUNK(_thread_policy_set) { c.ret(0); }
 // Guest memory isn't described by host VM regions; engines asking for their
 // own stack bounds fall back to pthread_get_stackaddr_np.
 B32_THUNK(_vm_region_64) { c.ret(1 /* KERN_INVALID_ADDRESS */); }
+
+// Guest threads run with the host's scheduling.
+B32_THUNK(_pthread_attr_setschedpolicy) { c.ret(0); }
+
+// bool OSAtomicTestAndSet[Barrier](uint32_t n, volatile void *address) and the
+// Clear forms: bit n counts from the top bit of the first byte.
+namespace {
+uint32_t testAndChangeBit(Call &c, bool set) {
+    uint32_t n = c.args.u32();
+    GuestAddr address = c.args.ptr();
+    auto *byte = c.mem.ptr<uint8_t>(address + (n >> 3));
+    uint8_t mask = uint8_t(0x80u >> (n & 7));
+    std::atomic_ref<uint8_t> value(*byte);
+    uint8_t old = set ? value.fetch_or(mask) : value.fetch_and(uint8_t(~mask));
+    return (old & mask) != 0;
+}
+}  // namespace
+B32_THUNK(_OSAtomicTestAndSet) { c.ret(testAndChangeBit(c, true)); }
+B32_THUNK(_OSAtomicTestAndSetBarrier) { c.ret(testAndChangeBit(c, true)); }
+B32_THUNK(_OSAtomicTestAndClear) { c.ret(testAndChangeBit(c, false)); }
+B32_THUNK(_OSAtomicTestAndClearBarrier) { c.ret(testAndChangeBit(c, false)); }
