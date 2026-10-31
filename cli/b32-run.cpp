@@ -21,6 +21,8 @@ int main(int argc, char **argv) {
         return std::make_unique<b32::DynarmicCpu>(mem, std::move(handler), b32::DynarmicCpu::Arch::V7,
                                                   monitor.get(), nextProcessor++);
     });
+    // Guest builds of libraries like libstdc++ (see Runtime::addGuestLibraryDir).
+    if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
     rt.load(argv[1]);
 
     std::vector<std::string> guestArgv(argv + 1, argv + argc);
