@@ -90,6 +90,7 @@ private:
     std::unique_ptr<objc::Bridge> bridge_;
     Image image_;
     std::vector<std::string> guestLibraryDirs_;
+    std::string mainDir_;  // the executable's folder, for @rpath and @executable_path
     std::vector<Image> libraries_;  // guest libraries, dependencies first
     std::unordered_map<std::string, bool> librariesSeen_;  // by install name
     std::unordered_map<std::string, GuestAddr> libraryExports_;
