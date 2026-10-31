@@ -12,4 +12,9 @@ namespace b32 {
 using ObjectDescriber = std::string (*)(Call &, GuestAddr object);
 std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber describe = nullptr);
 
+// Scans `input` by a scanf-style format, storing through the guest pointers
+// `args` supplies; returns scanf's result, and how much input it used in
+// *consumed (posix.cpp).
+int scanGuest(Call &c, Args &args, const char *input, const char *format, size_t *consumed = nullptr);
+
 }  // namespace b32
