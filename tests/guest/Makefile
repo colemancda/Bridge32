@@ -7,7 +7,7 @@ CC      := xcrun clang
 # -marm: Xcode 27's linker writes an even LC_MAIN entry offset for Thumb code.
 CFLAGS  := -arch armv7 -isysroot $(SDK) -miphoneos-version-min=9.0 -marm -O1 -Wall
 
-TESTS   := hello cxx objc UIKitTest.app
+TESTS   := hello cxx objc UIKitTest.app GLES1Test.app
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
@@ -32,6 +32,12 @@ $(OUT)/UIKitTest.app: uikit/main.m uikit/Info.plist
 	@mkdir -p $@
 	$(CC) $(CFLAGS) -fno-objc-arc -o $@/UIKitTest uikit/main.m -framework UIKit -framework Foundation -framework CoreGraphics
 	cp uikit/Info.plist $@/Info.plist
+
+$(OUT)/GLES1Test.app: gles1/main.m gles1/Info.plist
+	@mkdir -p $@
+	$(CC) $(CFLAGS) -fno-objc-arc -o $@/GLES1Test gles1/main.m -framework UIKit -framework Foundation \
+		-framework OpenGLES -framework QuartzCore
+	cp gles1/Info.plist $@/Info.plist
 
 clean:
 	rm -rf $(OUT)

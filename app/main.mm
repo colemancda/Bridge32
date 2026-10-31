@@ -6,6 +6,7 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/cpu/DynarmicCpu.h"
+#include "core/gl/GLES.h"
 #include "core/uikit/UIKitSupport.h"
 
 #include <dynarmic/interface/exclusive_monitor.h>
@@ -35,6 +36,7 @@ int main(int argc, char **argv) {
         setvbuf(stdout, nullptr, _IOLBF, 0);
 
         b32::uikit::configureHost();
+        b32::gl::loadHostOpenGLES();
 
         static auto monitor = b32::DynarmicCpu::makeMonitor();
         static b32::Runtime rt([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {

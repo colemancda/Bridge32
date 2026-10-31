@@ -26,6 +26,7 @@ add_library(b32core OBJECT
     core/mem/GuestMemory.cpp
     core/thunks/Format.cpp
     core/thunks/Thunks.cpp
+    core/thunks/CTable.mm
     core/thunks/compiler_rt.cpp
     core/thunks/cxxabi.cpp
     core/thunks/coregraphics.mm
@@ -60,8 +61,8 @@ if(B32_CATALYST)
     if(NOT B32_HAVE_DYNARMIC)
         message(FATAL_ERROR "The Catalyst shell needs dynarmic in external/dynarmic")
     endif()
-    target_sources(b32core PRIVATE core/uikit/UIKitSupport.mm)
-    target_link_libraries(b32core PUBLIC "-framework UIKit")
+    target_sources(b32core PRIVATE core/uikit/UIKitSupport.mm core/gl/gles.mm core/audio/audio.mm)
+    target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox")
 
     add_executable(Bridge32 MACOSX_BUNDLE app/main.mm)
     target_link_libraries(Bridge32 PRIVATE b32core)

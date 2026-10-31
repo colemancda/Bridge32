@@ -6,9 +6,14 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <sys/time.h>
+
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 using namespace b32;
 
@@ -214,3 +219,143 @@ B32_THUNK(_dlsym) {
 
 B32_THUNK(_dlclose) { c.ret(0); }
 B32_THUNK(_dlerror) { c.ret(0); }
+
+// --- stdio streams ------------------------------------------------------------
+// A guest FILE * is a zeroed guest block (sizeof(FILE) on 32-bit iOS) that
+// stands for a host FILE *. Paths need no translation: the guest builds them
+// from host NSBundle and NSSearchPath results.
+
+namespace {
+constexpr uint32_t kGuestFileSize = 88;
+std::mutex filesLock;
+std::unordered_map<GuestAddr, FILE *> files;
+
+GuestAddr wrapFile(Call &c, FILE *host) {
+    if (!host) return 0;
+    GuestAddr f = c.heap.calloc(1, kGuestFileSize);
+    std::lock_guard guard(filesLock);
+    files[f] = host;
+    return f;
+}
+
+FILE *hostFile(Call &c, GuestAddr f) {
+    std::lock_guard guard(filesLock);
+    auto it = files.find(f);
+    if (it == files.end()) fatal("0x%08x is not an open FILE (from 0x%08x)", f, c.cpu.reg(Cpu::LR));
+    return it->second;
+}
+
+void standardStream(Runtime &rt, GuestAddr variable, FILE *host) {
+    GuestAddr f = rt.heap().calloc(1, kGuestFileSize);
+    {
+        std::lock_guard guard(filesLock);
+        files[f] = host;
+    }
+    rt.mem().write<uint32_t>(variable, f);
+}
+}  // namespace
+
+B32_DATA(___stdinp, 4) { standardStream(rt, addr, stdin); }
+B32_DATA(___stdoutp, 4) { standardStream(rt, addr, stdout); }
+B32_DATA(___stderrp, 4) { standardStream(rt, addr, stderr); }
+
+B32_THUNK(_fopen) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    const char *mode = c.mem.cstr(c.args.ptr());
+    FILE *f = std::fopen(path, mode);
+    if (!f) log("fopen(%s, %s) failed: %s", path, mode, std::strerror(errno));
+    c.ret(wrapFile(c, f));
+}
+
+B32_THUNK(_fclose) {
+    GuestAddr f = c.args.ptr();
+    FILE *host = hostFile(c, f);
+    {
+        std::lock_guard guard(filesLock);
+        files.erase(f);
+    }
+    c.heap.free(f);
+    c.ret(uint32_t(std::fclose(host)));
+}
+
+// size_t fread(void *ptr, size_t size, size_t nitems, FILE *stream)
+B32_THUNK(_fread) {
+    GuestAddr buf = c.args.ptr();
+    uint32_t size = c.args.u32(), count = c.args.u32();
+    c.ret(uint32_t(std::fread(c.mem.ptr<void>(buf), size, count, hostFile(c, c.args.ptr()))));
+}
+
+B32_THUNK(_fwrite) {
+    GuestAddr buf = c.args.ptr();
+    uint32_t size = c.args.u32(), count = c.args.u32();
+    c.ret(uint32_t(std::fwrite(c.mem.ptr<void>(buf), size, count, hostFile(c, c.args.ptr()))));
+}
+
+// int fseek(FILE *stream, long offset, int whence)
+B32_THUNK(_fseek) {
+    FILE *f = hostFile(c, c.args.ptr());
+    long offset = c.args.i32();
+    c.ret(uint32_t(std::fseek(f, offset, c.args.i32())));
+}
+
+B32_THUNK(_ftell) { c.ret(uint32_t(std::ftell(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_rewind) { std::rewind(hostFile(c, c.args.ptr())); }
+B32_THUNK(_feof) { c.ret(uint32_t(std::feof(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_ferror) { c.ret(uint32_t(std::ferror(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_fflush) {
+    GuestAddr f = c.args.ptr();
+    c.ret(uint32_t(std::fflush(f ? hostFile(c, f) : nullptr)));
+}
+B32_THUNK(_fgetc) { c.ret(uint32_t(std::fgetc(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_getc) { c.ret(uint32_t(std::fgetc(hostFile(c, c.args.ptr())))); }
+
+B32_THUNK(_fputc) {
+    int ch = c.args.i32();
+    c.ret(uint32_t(std::fputc(ch, hostFile(c, c.args.ptr()))));
+}
+
+B32_THUNK(_fputs) {
+    const char *s = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(std::fputs(s, hostFile(c, c.args.ptr()))));
+}
+
+// char *fgets(char *str, int size, FILE *stream)
+B32_THUNK(_fgets) {
+    GuestAddr buf = c.args.ptr();
+    int size = c.args.i32();
+    char *r = std::fgets(c.mem.ptr<char>(buf), size, hostFile(c, c.args.ptr()));
+    c.ret(r ? buf : 0);
+}
+
+B32_THUNK(_fprintf) {
+    FILE *f = hostFile(c, c.args.ptr());
+    std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
+    c.ret(uint32_t(std::fwrite(s.data(), 1, s.size(), f)));
+}
+
+// --- misc used by games ---------------------------------------------------------
+
+B32_THUNK(_strcat) {
+    GuestAddr dst = c.args.ptr();
+    std::strcat(hostPtr(c, dst), c.mem.cstr(c.args.ptr()));
+    c.ret(dst);
+}
+
+B32_THUNK(_srand) { std::srand(c.args.u32()); }
+B32_THUNK(_rand) { c.ret(uint32_t(std::rand())); }
+B32_THUNK(_atan2f) {
+    float y = c.args.f32();
+    c.retF32(std::atan2(y, c.args.f32()));
+}
+
+// int gettimeofday(struct timeval *tp, void *tzp): 32-bit time_t and suseconds_t.
+B32_THUNK(_gettimeofday) {
+    GuestAddr tv = c.args.ptr();
+    struct timeval now;
+    ::gettimeofday(&now, nullptr);
+    if (tv) {
+        c.mem.write<int32_t>(tv, int32_t(now.tv_sec));
+        c.mem.write<int32_t>(tv + 4, int32_t(now.tv_usec));
+    }
+    c.ret(0);
+}
