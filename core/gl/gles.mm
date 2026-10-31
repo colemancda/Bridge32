@@ -223,16 +223,37 @@ namespace {
 constexpr uint32_t GL_RENDERBUFFER = 0x8D41, GL_RENDERBUFFER_WIDTH = 0x8D42, GL_RENDERBUFFER_HEIGHT = 0x8D43;
 constexpr uint32_t GL_RGBA = 0x1908, GL_UNSIGNED_BYTE = 0x1401;
 
+// Reads the renderbuffer being presented through a framebuffer of its own
+// (the guest's may be a multisampled one it resolves from), then puts the
+// guest's bindings back and drains any GL error it caused, which the guest
+// would otherwise see from its next glGetError.
 void dumpFrame() {
-    static auto getParam = glFunction<void (*)(uint32_t, uint32_t, int32_t *)>("glGetRenderbufferParameteriv");
+    static auto getParam = glFunction<void (*)(uint32_t, uint32_t, int32_t *)>("glGetRenderbufferParameterivOES");
+    static auto getIntegerv = glFunction<void (*)(uint32_t, int32_t *)>("glGetIntegerv");
+    static auto genFramebuffers = glFunction<void (*)(int32_t, uint32_t *)>("glGenFramebuffersOES");
+    static auto deleteFramebuffers = glFunction<void (*)(int32_t, const uint32_t *)>("glDeleteFramebuffersOES");
+    static auto bindFramebuffer = glFunction<void (*)(uint32_t, uint32_t)>("glBindFramebufferOES");
+    static auto attach = glFunction<void (*)(uint32_t, uint32_t, uint32_t, uint32_t)>("glFramebufferRenderbufferOES");
+    static auto getError = glFunction<uint32_t (*)()>("glGetError");
     static auto readPixels =
         glFunction<void (*)(int32_t, int32_t, int32_t, int32_t, uint32_t, uint32_t, void *)>("glReadPixels");
-    int32_t width = 0, height = 0;
+    constexpr uint32_t GL_FRAMEBUFFER = 0x8D40, GL_FRAMEBUFFER_BINDING = 0x8CA6, GL_RENDERBUFFER_BINDING = 0x8CA7;
+    constexpr uint32_t GL_COLOR_ATTACHMENT0 = 0x8CE0;
+    int32_t width = 0, height = 0, previousFramebuffer = 0, renderbuffer = 0;
     getParam(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &width);
     getParam(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &height);
+    getIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+    getIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
     if (width <= 0 || height <= 0) return;
     std::vector<uint8_t> pixels(size_t(width) * height * 4);
+    uint32_t framebuffer = 0;
+    genFramebuffers(1, &framebuffer);
+    bindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    attach(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, uint32_t(renderbuffer));
     readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    bindFramebuffer(GL_FRAMEBUFFER, uint32_t(previousFramebuffer));
+    deleteFramebuffers(1, &framebuffer);
+    while (getError()) {}
     // GL rows run bottom-up.
     std::vector<uint8_t> flipped(pixels.size());
     for (int32_t y = 0; y < height; y++)
