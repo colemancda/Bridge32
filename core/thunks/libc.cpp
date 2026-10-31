@@ -327,6 +327,23 @@ B32_THUNK(_dlsym) {
 }
 
 B32_THUNK(_dlclose) { c.ret(0); }
+
+// int dladdr(const void *addr, Dl_info *info): answers for the app's own
+// image, which is what games ask about (to find their bundle). Guest
+// Dl_info is { dli_fname, dli_fbase, dli_sname, dli_saddr }.
+B32_THUNK(_dladdr) {
+    GuestAddr addr = c.args.ptr(), info = c.args.ptr();
+    const Image &image = c.rt.image();
+    if (!info || addr < image.base || addr >= image.end) {
+        c.ret(0);
+        return;
+    }
+    c.mem.write<uint32_t>(info, c.rt.internString(image.path));
+    c.mem.write<uint32_t>(info + 4, image.base);
+    c.mem.write<uint32_t>(info + 8, 0);
+    c.mem.write<uint32_t>(info + 12, 0);
+    c.ret(1);
+}
 B32_THUNK(_dlerror) { c.ret(0); }
 
 // --- stdio streams ------------------------------------------------------------
