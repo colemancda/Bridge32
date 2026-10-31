@@ -154,6 +154,8 @@ HostCall &hostCall(const std::string &types, const char *selName, const std::str
 namespace {
 // The guest encoding of the method behind a trampoline IMP, or null.
 const std::string *trampolineGuestTypes(IMP imp);
+// The guest IMP behind a trampoline IMP, or 0.
+GuestAddr trampolineGuestImp(IMP imp);
 }  // namespace
 
 void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
@@ -219,6 +221,20 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     if (trace)
         log("guest -> host %c[%s %s]%s (thread %x)", object_isClass(recv) ? '+' : '-', object_getClassName(recv), name,
             superInfo ? " (super)" : "", pthread_mach_thread_np(pthread_self()));
+
+    // A guest method behind a trampoline (a guest category on a host class)
+    // runs here in the guest, as the guest's own runtime would run it, rather
+    // than through the host and back: that would hand it host pointers for
+    // its out-parameters (NSError **).
+    if (recv) {
+        IMP target = direct ? direct
+                            : class_getMethodImplementation(superInfo ? superInfo->host : object_getClass(recv), hsel);
+        if (GuestAddr guestImp = trampolineGuestImp(target)) {
+            c.cpu.setReg(stret ? 1 : 0, receiver);
+            c.cpu.jump(guestImp);
+            return;
+        }
+    }
 
     Args args(c.cpu);
     GuestAddr retPtr = stret ? args.ptr() : 0;
@@ -422,6 +438,11 @@ const std::string *trampolineGuestTypes(IMP imp) {
     std::lock_guard guard(trampolinesLock);
     auto it = trampolines.find(reinterpret_cast<void *>(imp));
     return it == trampolines.end() ? nullptr : &it->second->guestTypes;
+}
+GuestAddr trampolineGuestImp(IMP imp) {
+    std::lock_guard guard(trampolinesLock);
+    auto it = trampolines.find(reinterpret_cast<void *>(imp));
+    return it == trampolines.end() ? 0 : it->second->imp;
 }
 }  // namespace
 
