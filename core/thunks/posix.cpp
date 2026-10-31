@@ -3,6 +3,7 @@
 // layout differs from the host's (stat, statvfs, tm, z_stream) are converted
 // field by field.
 
+#include "Format.h"
 #include "Thunks.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
@@ -12,18 +13,24 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/semaphore.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <zlib.h>
 
 #include <cerrno>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <cwchar>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 using namespace b32;
 
@@ -261,6 +268,37 @@ GuestAddr guestTm(Call &c, const struct tm &t) {
     return tmBuffer;
 }
 }  // namespace
+
+namespace {
+struct tm hostTm(Call &c, GuestAddr p) {
+    struct tm t{};
+    int32_t ints[9];
+    std::memcpy(ints, c.mem.ptr<void>(p), sizeof ints);
+    t.tm_sec = ints[0], t.tm_min = ints[1], t.tm_hour = ints[2], t.tm_mday = ints[3], t.tm_mon = ints[4];
+    t.tm_year = ints[5], t.tm_wday = ints[6], t.tm_yday = ints[7], t.tm_isdst = ints[8];
+    t.tm_gmtoff = c.mem.read<int32_t>(p + 36);
+    if (GuestAddr zone = c.mem.read<uint32_t>(p + 40)) t.tm_zone = const_cast<char *>(c.mem.cstr(zone));
+    return t;
+}
+}  // namespace
+
+// size_t strftime(char *s, size_t max, const char *format, const struct tm *tm)
+B32_THUNK(_strftime) {
+    char *out = c.mem.ptr<char>(c.args.ptr());
+    size_t max = c.args.u32();
+    const char *format = c.mem.cstr(c.args.ptr());
+    struct tm t = hostTm(c, c.args.ptr());
+    c.ret(uint32_t(std::strftime(out, max, format, &t)));
+}
+
+// size_t wcsftime(wchar_t *s, size_t max, const wchar_t *format, const struct tm *tm)
+B32_THUNK(_wcsftime) {
+    wchar_t *out = c.mem.ptr<wchar_t>(c.args.ptr());
+    size_t max = c.args.u32();
+    const wchar_t *format = c.mem.ptr<wchar_t>(c.args.ptr());
+    struct tm t = hostTm(c, c.args.ptr());
+    c.ret(uint32_t(std::wcsftime(out, max, format, &t)));
+}
 
 B32_THUNK(_localtime) {
     time_t t = c.mem.read<int32_t>(c.args.ptr());
@@ -531,4 +569,130 @@ B32_THUNK(_sscanf) {
         assigned++;
     }
     c.ret(uint32_t(assigned == 0 && *pos == '\0' && *input == '\0' ? -1 : assigned));
+}
+
+// --- memory and descriptors ------------------------------------------------------------------
+
+// Guest memory is always readable, writable and executable.
+B32_THUNK(_mprotect) { c.ret(0); }
+B32_THUNK(_getpagesize) { c.ret(4096); }
+
+// Only the int-argument requests sockets and streams use: non-blocking mode
+// (FIONBIO) and bytes waiting (FIONREAD). Both have the same values on both.
+B32_THUNK(_ioctl) {
+    int fd = c.args.i32();
+    unsigned long request = c.args.u32();
+    GuestAddr arg = c.args.ptr();
+    if ((request == FIONBIO || request == FIONREAD) && arg) {
+        int r = ::ioctl(fd, request, c.mem.ptr<int>(arg));
+        if (r < 0) setGuestErrno(c, errno);
+        c.ret(uint32_t(r));
+        return;
+    }
+    setGuestErrno(c, ENOTTY);
+    c.ret(uint32_t(-1));
+}
+
+// struct pollfd { int fd; short events, revents; } matches the host's.
+B32_THUNK(_poll) {
+    auto *fds = c.mem.ptr<struct pollfd>(c.args.ptr());
+    nfds_t count = c.args.u32();
+    c.ret(uint32_t(::poll(fds, count, c.args.i32())));
+}
+
+// ssize_t writev(int fd, const struct iovec *iov, int count): guest iovecs
+// are pairs of 32-bit words.
+B32_THUNK(_writev) {
+    int fd = c.args.i32();
+    GuestAddr iov = c.args.ptr();
+    int count = c.args.i32();
+    std::vector<struct iovec> host(size_t(std::max(count, 0)));
+    for (int i = 0; i < count; i++) {
+        GuestAddr base = c.mem.read<uint32_t>(iov + i * 8);
+        host[size_t(i)] = {base ? c.mem.ptr<void>(base) : nullptr, c.mem.read<uint32_t>(iov + i * 8 + 4)};
+    }
+    c.ret(uint32_t(::writev(fd, host.data(), count)));
+}
+
+// --- Mach-O ------------------------------------------------------------------------------------
+
+// char *getsectdatafromheader(const struct mach_header *mhp, const char *segname,
+//                             const char *sectname, uint32_t *size)
+// Walks a guest image's 32-bit load commands; like the original, it returns
+// the section's unslid address.
+B32_THUNK(_getsectdatafromheader) {
+    GuestAddr header = c.args.ptr();
+    std::string segname = c.mem.cstr(c.args.ptr()), sectname = c.mem.cstr(c.args.ptr());
+    GuestAddr sizeOut = c.args.ptr();
+    uint32_t ncmds = c.mem.read<uint32_t>(header + 16);
+    GuestAddr cmd = header + 28;  // sizeof(struct mach_header)
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t type = c.mem.read<uint32_t>(cmd), size = c.mem.read<uint32_t>(cmd + 4);
+        if (type == 0x1 /* LC_SEGMENT */) {
+            uint32_t nsects = c.mem.read<uint32_t>(cmd + 48);
+            for (uint32_t k = 0; k < nsects; k++) {
+                GuestAddr sect = cmd + 56 + k * 68;  // section: sectname[16], segname[16], addr, size...
+                if (strncmp(c.mem.cstr(sect), sectname.c_str(), 16) == 0 &&
+                    strncmp(c.mem.cstr(sect + 16), segname.c_str(), 16) == 0) {
+                    if (sizeOut) c.mem.write<uint32_t>(sizeOut, c.mem.read<uint32_t>(sect + 36));
+                    c.ret(c.mem.read<uint32_t>(sect + 32));
+                    return;
+                }
+            }
+        }
+        cmd += size;
+    }
+    if (sizeOut) c.mem.write<uint32_t>(sizeOut, 0);
+    c.ret(0);
+}
+
+// --- paths and terminals ------------------------------------------------------------------------
+
+B32_THUNK(_getcwd) {
+    GuestAddr buf = c.args.ptr();
+    uint32_t size = c.args.u32();
+    if (!buf) fatal("getcwd(NULL) isn't supported");
+    c.ret(::getcwd(c.mem.ptr<char>(buf), size) ? buf : 0);
+}
+
+// char *realpath(const char *path, char *resolved): resolved holds PATH_MAX
+// (1024) bytes, or is allocated when NULL.
+B32_THUNK(_realpath$DARWIN_EXTSN) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    char resolved[PATH_MAX];
+    if (!::realpath(path, resolved)) {
+        c.ret(0);
+        return;
+    }
+    if (!out) out = c.heap.alloc(uint32_t(std::strlen(resolved) + 1));
+    c.mem.copyIn(out, resolved, std::strlen(resolved) + 1);
+    c.ret(out);
+}
+
+// No terminal behind the guest's descriptors.
+B32_THUNK(_tcgetattr) {
+    errno = ENOTTY;
+    c.ret(uint32_t(-1));
+}
+B32_THUNK(_tcsetattr) {
+    errno = ENOTTY;
+    c.ret(uint32_t(-1));
+}
+
+// --- environment and syslog --------------------------------------------------------------------
+
+B32_THUNK(_setenv) {
+    const char *name = c.mem.cstr(c.args.ptr());
+    const char *value = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::setenv(name, value, c.args.i32())));
+}
+B32_THUNK(_unsetenv) { c.ret(uint32_t(::unsetenv(c.mem.cstr(c.args.ptr())))); }
+
+// syslog goes to Bridge32's log.
+B32_THUNK(_openlog) {}
+B32_THUNK(_closelog) {}
+B32_THUNK(_syslog) {
+    c.args.i32();  // priority
+    log("syslog: %s", formatGuest(c, c.mem.cstr(c.args.ptr()), c.args).c_str());
 }
