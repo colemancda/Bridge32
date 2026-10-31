@@ -3,7 +3,10 @@
 
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
+#include "core/objc/Dispatch.h"
 #include "core/thunks/CTable.h"
+
+#include <CommonCrypto/CommonDigest.h>
 
 #import <CoreLocation/CoreLocation.h>
 #import <MapKit/MapKit.h>
@@ -68,3 +71,19 @@ B32_THUNK(_UIGraphicsGetImageFromCurrentImageContext) {
     c.ret(c.rt.bridge().toGuest(UIGraphicsGetImageFromCurrentImageContext()));
 }
 B32_THUNK(_UIGraphicsEndImageContext) { UIGraphicsEndImageContext(); }
+
+// -[UIDevice uniqueIdentifier] (the UDID, removed in iOS 7): 40 hex digits,
+// stable for this Mac, derived from the vendor identifier.
+namespace {
+bool isDevice(id receiver) { return [receiver isKindOfClass:[UIDevice class]]; }
+}  // namespace
+
+B32_OVERRIDE_WHEN(isDevice, "uniqueIdentifier") {
+    NSString *vendor = UIDevice.currentDevice.identifierForVendor.UUIDString ?: @"bridge32";
+    NSData *bytes = [vendor dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
+    CC_SHA1(bytes.bytes, CC_LONG(bytes.length), digest);
+    NSMutableString *udid = [NSMutableString string];
+    for (unsigned char byte : digest) [udid appendFormat:@"%02x", byte];
+    o.c.ret(o.bridge.toGuest(udid));
+}
