@@ -391,4 +391,30 @@ B32_OVERRIDE_WHEN(isTraits, "userInterfaceIdiom") { o.c.ret(guestIdiom()); }
 // --- the main bundle's files are in Contents/Resources ----------------------------------
 // iOS bundles are flat, so guest code builds paths from bundlePath.
 
+// A view controller presented before the scene connects (a launch dialog
+// shown from main) has no window to appear in yet, and UIKit would drop it:
+// it's presented once the scene has attached the guest's windows, with the
+// guest's completion block called after.
+namespace {
+bool presentsBeforeScene(id receiver) { return !guestScene && [receiver isKindOfClass:[UIViewController class]]; }
+}  // namespace
+B32_OVERRIDE_WHEN(presentsBeforeScene, "presentViewController:animated:completion:") {
+    UIViewController *presenter = o.receiver;
+    UIViewController *presented = o.bridge.toHost(o.args.ptr());
+    BOOL animated = o.args.u32() != 0;
+    GuestAddr completion = o.args.ptr();
+    [presenter retain];
+    [presented retain];
+    if (!heldLaunchWork) heldLaunchWork = [[NSMutableArray alloc] init];
+    [heldLaunchWork addObject:[[^{
+        [presenter presentViewController:presented animated:animated completion:^{
+            // block_layout { isa, flags, reserved, invoke, ... }
+            if (completion) Runtime::threadCpu().call(Runtime::threadCpu().mem().read<uint32_t>(completion + 12), {completion});
+        }];
+        [presenter release];
+        [presented release];
+    } copy] autorelease]];
+    log("holding the presentation of %s until the scene connects", object_getClassName(presented));
+}
+
 B32_OVERRIDE_WHEN(isMainBundle, "bundlePath") { o.c.ret(o.bridge.toGuest([o.receiver resourcePath])); }
