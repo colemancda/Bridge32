@@ -80,7 +80,7 @@ constexpr CFunction kFunctions[] = {
     {"glTexCoordPointer", "v:iuia"},
     {"glTexEnvf", "v:uuf"}, {"glTexEnvfv", "v:uup"}, {"glTexEnvi", "v:uui"}, {"glTexEnviv", "v:uup"},
     {"glTexEnvx", "v:uui"}, {"glTexEnvxv", "v:uup"},
-    {"glTexImage2D", "v:uiiiiiuup"},
+    {"glTexImage2D", "v:uiiiiiuup"}, {"glTexImage3D", "v:uiiiiiiuup"}, {"glFramebufferTextureLayer", "v:uuuii"},
     {"glTexParameterf", "v:uuf"}, {"glTexParameterfv", "v:uup"}, {"glTexParameteri", "v:uui"},
     {"glTexParameteriv", "v:uup"}, {"glTexParameterx", "v:uui"}, {"glTexParameterxv", "v:uup"},
     {"glTexSubImage2D", "v:uiiiiiuup"},
