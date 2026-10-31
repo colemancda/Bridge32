@@ -76,7 +76,7 @@ if(B32_CATALYST)
     if(NOT B32_HAVE_DYNARMIC)
         message(FATAL_ERROR "The Catalyst shell needs dynarmic in external/dynarmic")
     endif()
-    target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
+    target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/uikit/eventloop.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
         core/audio/audio.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
     target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework CoreData" "-framework Security" "-framework GameController"
         "-framework CoreLocation")
