@@ -94,6 +94,7 @@ B32_THUNK(_AudioSessionSetActive) { c.ret(0); }
 B32_THUNK(_AudioSessionSetProperty) { c.ret(0); }
 B32_THUNK(_AudioSessionAddPropertyListener) { c.ret(0); }
 B32_THUNK(_AudioSessionRemovePropertyListener) { c.ret(0); }
+B32_THUNK(_AudioSessionRemovePropertyListenerWithUserData) { c.ret(0); }
 
 // OSStatus AudioSessionGetProperty(AudioSessionPropertyID, UInt32 *ioDataSize, void *outData)
 // Every property reads as zero (no other audio playing, no headphones...).
