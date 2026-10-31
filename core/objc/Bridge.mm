@@ -403,7 +403,9 @@ void Bridge::addGuestMethods(ClassInfo *info, GuestAddr list) {
     for (uint32_t i = 0; i < count; i++) {
         GuestAddr m = list + 8 + i * entsize;
         GuestAddr sel = guestSel(mem.cstr(mem.read<uint32_t>(m)));
-        info->methods[sel] = GuestMethod{mem.read<uint32_t>(m + 8), mem.cstr(mem.read<uint32_t>(m + 4)), m};
+        // Swift 4 leaves some methods' type encodings out (NULL).
+        GuestAddr types = mem.read<uint32_t>(m + 4);
+        info->methods[sel] = GuestMethod{mem.read<uint32_t>(m + 8), types ? mem.cstr(types) : "", m};
         methodOwners_[m] = {info, sel};
     }
 }
