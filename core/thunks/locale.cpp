@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <clocale>
+#include <fnmatch.h>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
@@ -493,3 +494,55 @@ B32_THUNK(_wcslcat) {
     const wchar_t *src = hostWide(c, c.args.ptr());
     c.ret(uint32_t(::wcslcat(dst, src, c.args.u32())));
 }
+
+B32_THUNK(_wcschr) {
+    GuestAddr s = c.args.ptr();
+    wchar_t ch = wchar_t(c.args.u32());
+    c.ret(guestWide(s, hostWide(c, s), std::wcschr(hostWide(c, s), ch)));
+}
+B32_THUNK(_wcsncpy) {
+    GuestAddr dst = c.args.ptr();
+    const wchar_t *src = hostWide(c, c.args.ptr());
+    std::wcsncpy(hostWide(c, dst), src, c.args.u32());
+    c.ret(dst);
+}
+// size_t mbstowcs(wchar_t *, const char *, size_t) and wcstombs: the C locale.
+B32_THUNK(_mbstowcs) {
+    wchar_t *dst = hostWide(c, c.args.ptr());
+    const char *src = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(std::mbstowcs(dst, src, c.args.u32())));
+}
+B32_THUNK(_wcstombs) {
+    char *dst = hostPtr(c, c.args.ptr());
+    const wchar_t *src = hostWide(c, c.args.ptr());
+    c.ret(uint32_t(std::wcstombs(dst, src, c.args.u32())));
+}
+
+// int fnmatch(const char *pattern, const char *string, int flags)
+B32_THUNK(_fnmatch) {
+    const char *pattern = c.mem.cstr(c.args.ptr());
+    const char *string = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::fnmatch(pattern, string, c.args.i32())));
+}
+
+// char *ecvt(double, int ndigit, int *decpt, int *sign) and fcvt: the digits
+// go in a static buffer, here one in guest memory per thread.
+namespace {
+void convertDigits(Call &c, char *(*convert)(double, int, int *, int *)) {
+    static thread_local GuestAddr buffer = 0;
+    if (!buffer) buffer = c.heap.alloc(512);
+    double value = c.args.f64();
+    int digits = c.args.i32();
+    GuestAddr decpt = c.args.ptr(), sign = c.args.ptr();
+    int point = 0, negative = 0;
+    const char *s = convert(value, digits, &point, &negative);
+    size_t n = std::min<size_t>(std::strlen(s), 511);
+    c.mem.copyIn(buffer, s, n);
+    c.mem.write<char>(buffer + uint32_t(n), '\0');
+    if (decpt) c.mem.write<int32_t>(decpt, point);
+    if (sign) c.mem.write<int32_t>(sign, negative);
+    c.ret(buffer);
+}
+}  // namespace
+B32_THUNK(_ecvt) { convertDigits(c, ::ecvt); }
+B32_THUNK(_fcvt) { convertDigits(c, ::fcvt); }
