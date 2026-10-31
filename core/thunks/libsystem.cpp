@@ -320,6 +320,29 @@ B32_MATH1(log1p) B32_MATH1(expm1) B32_MATH1(rint) B32_MATH1(nearbyint)
 B32_MATH2(hypot) B32_MATH2(fmax) B32_MATH2(fmin) B32_MATH2(copysign)
 
 B32_THUNK(_lroundf) { c.ret(uint32_t(int32_t(std::lround(c.args.f32())))); }
+B32_THUNK(_lround) { c.ret(uint32_t(int32_t(std::lround(c.args.f64())))); }
+
+// struct tm *localtime_r(const time_t *, struct tm *) and gmtime_r: time_t is
+// 32-bit, and the guest's struct tm is nine ints, then long tm_gmtoff and
+// char *tm_zone (44 bytes).
+namespace {
+void timeToGuestTm(Call &c, bool local) {
+    time_t t = c.mem.read<int32_t>(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    struct tm r;
+    if (!(local ? ::localtime_r(&t, &r) : ::gmtime_r(&t, &r))) {
+        c.ret(0);
+        return;
+    }
+    const int32_t ints[] = {r.tm_sec, r.tm_min, r.tm_hour, r.tm_mday, r.tm_mon, r.tm_year, r.tm_wday, r.tm_yday, r.tm_isdst};
+    c.mem.copyIn(out, ints, sizeof ints);
+    c.mem.write<int32_t>(out + 36, int32_t(r.tm_gmtoff));
+    c.mem.write<uint32_t>(out + 40, r.tm_zone ? c.rt.internString(r.tm_zone) : 0);
+    c.ret(out);
+}
+}  // namespace
+B32_THUNK(_localtime_r) { timeToGuestTm(c, true); }
+B32_THUNK(_gmtime_r) { timeToGuestTm(c, false); }
 B32_THUNK(_modff) {
     float x = c.args.f32();
     GuestAddr ip = c.args.ptr();
