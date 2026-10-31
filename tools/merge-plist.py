@@ -59,6 +59,9 @@ def main():
                      or guest.get("UISupportedInterfaceOrientations") or [])
         if supported and not any("Portrait" in o for o in supported):
             merged["B32Orientation"] = supported[0]
+    # Apps from before iOS 13 never saw dark mode: they set light backgrounds
+    # and leave text in the default label color, which dark mode turns white.
+    merged.setdefault("UIUserInterfaceStyle", "Light")
     # macOS asks why an app uses Bluetooth before CoreBluetooth works; iOS 9
     # and earlier apps only had the peripheral key, or none.
     if "NSBluetoothAlwaysUsageDescription" not in merged:
