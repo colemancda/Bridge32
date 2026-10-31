@@ -1,5 +1,5 @@
 // Loads a 32-bit ARM Mach-O executable into guest memory at its preferred
-// address and binds its imports. Handles both eras of binaries:
+// address, or a dylib at a given base (sliding it), and binds its imports. Handles both eras of binaries:
 //  - iPhone OS 2-3: LC_UNIXTHREAD, a __dyld section, external relocations
 //  - iOS 4+: LC_MAIN and LC_DYLD_INFO bind opcodes
 // Lazy and non-lazy symbol pointers are bound eagerly through the indirect
@@ -9,6 +9,7 @@
 #include "core/mem/GuestMemory.h"
 
 #include <functional>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,9 @@ struct Section {
 
 struct Image {
     std::string path;
+    std::string installName;  // LC_ID_DYLIB, for dylibs
+    uint32_t slide = 0;
+    GuestAddr end = 0;        // first address past the image
     uint32_t cpuSubtype = 0;
     std::vector<Section> sections;
     std::vector<std::string> dylibs;
@@ -32,6 +36,8 @@ struct Image {
     GuestAddr dyldSection = 0;  // __DATA,__dyld if present
     std::vector<GuestAddr> initializers;  // __mod_init_func contents
     uint32_t bindCount = 0;
+    // External definitions (slid), which other images bind to.
+    std::unordered_map<std::string, GuestAddr> exports;
 
     const Section *section(const char *segment, const char *name) const;
 };
@@ -44,7 +50,9 @@ public:
 
     MachOLoader(GuestMemory &mem, Resolver resolver) : mem_(mem), resolve_(std::move(resolver)) {}
 
-    Image load(const std::string &path);
+    // Executables load at their own addresses; dylibs (linked at 0 on iOS)
+    // are slid to `dylibBase`.
+    Image load(const std::string &path, GuestAddr dylibBase = 0);
 
     // Called with the image's linked libraries after its load commands are
     // read and before anything is bound.
