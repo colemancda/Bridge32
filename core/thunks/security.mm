@@ -108,3 +108,38 @@ B32_THUNK(_SecTrustCreateWithCertificates) {
     if (out) c.mem.write<uint32_t>(out, trust ? c.rt.bridge().toGuest((id)trust) : 0);
     c.ret(uint32_t(status));
 }
+
+// --- incremental digests and HMAC: the contexts are arrays of 32-bit words in both ABIs ---------
+
+B32_THUNK(_CC_SHA1_Init) { c.ret(uint32_t(CC_SHA1_Init(c.mem.ptr<CC_SHA1_CTX>(c.args.ptr())))); }
+B32_THUNK(_CC_SHA1_Update) {
+    auto *ctx = c.mem.ptr<CC_SHA1_CTX>(c.args.ptr());
+    GuestAddr data = c.args.ptr();
+    c.ret(uint32_t(CC_SHA1_Update(ctx, c.mem.ptr<void>(data), c.args.u32())));
+}
+B32_THUNK(_CC_SHA1_Final) {
+    GuestAddr md = c.args.ptr();
+    c.ret(uint32_t(CC_SHA1_Final(c.mem.ptr<unsigned char>(md), c.mem.ptr<CC_SHA1_CTX>(c.args.ptr()))));
+}
+B32_THUNK(_CC_SHA384) {
+    GuestAddr data = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr md = c.args.ptr();
+    CC_SHA384(c.mem.ptr<void>(data), length, c.mem.ptr<unsigned char>(md));
+    c.ret(md);
+}
+B32_THUNK(_CCHmacInit) {
+    auto *ctx = c.mem.ptr<CCHmacContext>(c.args.ptr());
+    CCHmacAlgorithm algorithm = c.args.u32();
+    GuestAddr key = c.args.ptr();
+    CCHmacInit(ctx, algorithm, key ? c.mem.ptr<void>(key) : nullptr, c.args.u32());
+}
+B32_THUNK(_CCHmacUpdate) {
+    auto *ctx = c.mem.ptr<CCHmacContext>(c.args.ptr());
+    GuestAddr data = c.args.ptr();
+    CCHmacUpdate(ctx, c.mem.ptr<void>(data), c.args.u32());
+}
+B32_THUNK(_CCHmacFinal) {
+    auto *ctx = c.mem.ptr<CCHmacContext>(c.args.ptr());
+    CCHmacFinal(ctx, c.mem.ptr<void>(c.args.ptr()));
+}
