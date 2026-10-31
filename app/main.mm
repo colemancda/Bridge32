@@ -54,6 +54,10 @@ int main(int argc, char **argv) {
             return std::make_unique<b32::DynarmicCpu>(mem, std::move(handler), b32::DynarmicCpu::Arch::V7,
                                                       monitor.get(), nextProcessor++);
         });
+        // make-app.sh copies guest libraries (--guest-libs) into the bundle.
+        rt.addGuestLibraryDir([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"B32GuestLibraries"]
+                                  .fileSystemRepresentation);
+        if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
         rt.load(path.fileSystemRepresentation);
         b32::log("loaded %s", path.fileSystemRepresentation);
 
