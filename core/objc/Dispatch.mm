@@ -179,12 +179,18 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             return;
         }
         start = classOf(receiver);
-        if (!start && blocks::isGuestBlock(*this, receiver)) {
-            // Blocks answer copy, retain, release... as their host blocks.
+        if (!start && (blocks::isGuestBlock(*this, receiver) || isAlias(receiver))) {
+            // Blocks answer copy, retain, release... as their host blocks, and
+            // framework globals (&_dispatch_main_q) as the host objects they stand for.
             hostDispatch(c, receiver, sel, nullptr, stret);
             return;
         }
-        if (!start) fatal("-%s sent to 0x%08x, which is not an object (from 0x%08x)", selName(sel), receiver, cpu.reg(Cpu::LR));
+        if (!start) {
+            GuestAddr isa = mem.isMapped(receiver) ? mem.read<uint32_t>(receiver) : 0;
+            ClassInfo *asClass = classInfo(receiver);
+            fatal("-%s sent to 0x%08x, which is not an object (isa 0x%08x; as a class: %s; from 0x%08x)", selName(sel),
+                  receiver, isa, asClass ? asClass->name.c_str() : "unknown", cpu.reg(Cpu::LR));
+        }
         if (!start->initialized && start->isGuest) ensureInitialized(start);
     }
 
@@ -420,6 +426,16 @@ const std::string *trampolineGuestTypes(IMP imp) {
 }  // namespace
 
 void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &method, ClassInfo *owner) {
+    // A guest +resolveInstanceMethod: would be called by the host runtime from
+    // the method lookups that set up later classes, running guest code before
+    // the image is ready; resolvers go in once setupImage is done.
+    if (settingUp_ && owner->isMeta) {
+        std::string name = selName(sel);
+        if (name == "resolveInstanceMethod:" || name == "resolveClassMethod:") {
+            deferredResolvers_.push_back({target, sel, method, owner});
+            return;
+        }
+    }
     SEL hsel = hostSel(sel);
     std::string types = hostTypesFor(target, hsel, owner, method.types);
     HostCall &hc = hostCall(types, sel_getName(hsel), &method.types);
@@ -438,6 +454,7 @@ void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &m
 }
 
 void Bridge::runLoadMethods(Cpu &cpu) {
+    running_ = true;  // from here on, +initialize runs as classes are first used
     for (auto [cls, imp] : loadMethods_) cpu.call(imp, {cls->addr, guestSel("load")});
     loadMethods_.clear();
 }
