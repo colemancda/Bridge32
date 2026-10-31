@@ -85,7 +85,13 @@ B32_OVERRIDE_WHEN(isContext, "renderbufferStorage:fromDrawable:") {
     NSUInteger target = o.args.u32();
     id drawable = o.bridge.toHost(o.args.ptr());
     CALayer *layer = [drawable isKindOfClass:[CALayer class]] ? (CALayer *)drawable : nil;
-    CGFloat guestScale = layer ? layer.contentsScale : 1;
+    // The scale the guest gave the layer, remembered: a guest that sets up
+    // its drawable again finds the layer already scaled.
+    static char kGuestScale;
+    NSNumber *remembered = layer ? objc_getAssociatedObject(layer, &kGuestScale) : nil;
+    CGFloat guestScale = remembered ? remembered.doubleValue : layer ? layer.contentsScale : 1;
+    if (layer && !remembered)
+        objc_setAssociatedObject(layer, &kGuestScale, @(guestScale), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (layer && factor() > 1) layer.contentsScale = guestScale * factor();
     BOOL ok = reinterpret_cast<BOOL (*)(id, SEL, NSUInteger, id)>(objc_msgSend)(o.receiver, o.sel, target, drawable);
     if (ok && layer && factor() > 1) {
@@ -100,23 +106,37 @@ B32_OVERRIDE_WHEN(isContext, "renderbufferStorage:fromDrawable:") {
 
 namespace {
 
-// glRenderbufferStorage[OES](target, internalformat, width, height): storage
-// the size of the drawable is the screen's depth or stencil buffer.
+// Storage the size of the drawable is the screen's depth, stencil or
+// multisample buffer, and grows with it.
+int32_t storageScale(int32_t width, int32_t height) {
+    uint32_t renderbuffer = boundRenderbuffer();
+    std::lock_guard<std::mutex> guard(lock);
+    bool scale = factor() > 1 && width == drawableWidth && height == drawableHeight;
+    if (scale) scaledRenderbuffers.insert(renderbuffer);
+    else scaledRenderbuffers.erase(renderbuffer);
+    return scale ? factor() : 1;
+}
+
+// glRenderbufferStorage[OES](target, internalformat, width, height)
 void renderbufferStorage(Call &c, const char *name) {
     static auto storageOES = glFunction<void (*)(uint32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorageOES");
     static auto storage = glFunction<void (*)(uint32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorage");
     uint32_t target = c.args.u32(), format = c.args.u32();
     int32_t width = c.args.i32(), height = c.args.i32();
-    uint32_t renderbuffer = boundRenderbuffer();
-    bool scale;
-    {
-        std::lock_guard<std::mutex> guard(lock);
-        scale = factor() > 1 && width == drawableWidth && height == drawableHeight;
-        if (scale) scaledRenderbuffers.insert(renderbuffer);
-        else scaledRenderbuffers.erase(renderbuffer);
-    }
-    int32_t f = scale ? factor() : 1;
+    int32_t f = storageScale(width, height);
     (std::strcmp(name, "OES") == 0 ? storageOES : storage)(target, format, width * f, height * f);
+}
+
+// glRenderbufferStorageMultisampleAPPLE(target, samples, internalformat, width, height)
+void renderbufferStorageMultisample(Call &c) {
+    static auto storage =
+        glFunction<void (*)(uint32_t, int32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorageMultisampleAPPLE");
+    uint32_t target = c.args.u32();
+    int32_t samples = c.args.i32();
+    uint32_t format = c.args.u32();
+    int32_t width = c.args.i32(), height = c.args.i32();
+    int32_t f = storageScale(width, height);
+    storage(target, samples, format, width * f, height * f);
 }
 
 // glGetRenderbufferParameteriv[OES](target, pname, params)
@@ -181,6 +201,7 @@ void widthFixed(Call &c, const char *name) {
 
 B32_THUNK(_glRenderbufferStorageOES) { renderbufferStorage(c, "OES"); }
 B32_THUNK(_glRenderbufferStorage) { renderbufferStorage(c, ""); }
+B32_THUNK(_glRenderbufferStorageMultisampleAPPLE) { renderbufferStorageMultisample(c); }
 B32_THUNK(_glGetRenderbufferParameterivOES) { getRenderbufferParameter(c, true); }
 B32_THUNK(_glGetRenderbufferParameteriv) { getRenderbufferParameter(c, false); }
 B32_THUNK(_glFramebufferRenderbufferOES) { framebufferRenderbuffer(c, true); }
