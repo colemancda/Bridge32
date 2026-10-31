@@ -652,3 +652,29 @@ B32_THUNK(_CGContextShowGlyphsAtPoint) {
     }
     CGContextShowGlyphsAtPositions(ctx, glyphs, positions.data(), count);
 }
+
+// --- transparency layers, masks, shadings, transformed paths ---------------------------------------
+
+B32_THUNK(_CGContextBeginTransparencyLayer) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextBeginTransparencyLayer(ctx, ref<CFDictionaryRef>(c));
+}
+B32_THUNK(_CGContextEndTransparencyLayer) { CGContextEndTransparencyLayer(ref<CGContextRef>(c)); }
+// void CGContextClipToMask(CGContextRef, CGRect, CGImageRef mask)
+B32_THUNK(_CGContextClipToMask) {
+    auto ctx = ref<CGContextRef>(c);
+    CGRect r = rect(c);
+    CGContextClipToMask(ctx, r, ref<CGImageRef>(c));
+}
+B32_THUNK(_CGContextDrawShading) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextDrawShading(ctx, ref<CGShadingRef>(c));
+}
+B32_THUNK(_CGShadingRelease) { CGShadingRelease(ref<CGShadingRef>(c)); }
+// CGPathRef CGPathCreateCopyByTransformingPath(CGPathRef, const CGAffineTransform *)
+B32_THUNK(_CGPathCreateCopyByTransformingPath) {
+    auto path = ref<CGPathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    c.ret(c.rt.bridge().toGuest((id)CGPathCreateCopyByTransformingPath(path, has ? &t : nullptr)));
+}
