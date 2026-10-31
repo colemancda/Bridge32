@@ -35,3 +35,7 @@ B32_THUNK(_SCNetworkReachabilityCreateWithAddress) {
 B32_THUNK(_SCNetworkReachabilitySetCallback) { c.ret(1); }
 B32_THUNK(_SCNetworkReachabilityScheduleWithRunLoop) { c.ret(1); }
 B32_THUNK(_SCNetworkReachabilityUnscheduleFromRunLoop) { c.ret(1); }
+
+// Reachability changes aren't delivered to the guest yet, so there's no
+// queue to schedule them on; accepting it is enough.
+B32_THUNK(_SCNetworkReachabilitySetDispatchQueue) { c.ret(1); }
