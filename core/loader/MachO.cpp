@@ -85,6 +85,30 @@ int64_t readSleb(const uint8_t *&p, const uint8_t *end) {
 
 }  // namespace
 
+uint32_t MachOLoader::span(const std::string &path) {
+    std::vector<uint8_t> file = readFile(path);
+    auto [sliceOffset, sliceSize] = pickSlice(file);
+    const uint8_t *slice = file.data() + sliceOffset;
+    mach_header header;
+    std::memcpy(&header, slice, sizeof header);
+    uint32_t start = UINT32_MAX, end = 0;
+    const uint8_t *cmd = slice + sizeof header;
+    for (uint32_t i = 0; i < header.ncmds; i++) {
+        load_command lc;
+        std::memcpy(&lc, cmd, sizeof lc);
+        if (lc.cmd == LC_SEGMENT) {
+            segment_command seg;
+            std::memcpy(&seg, cmd, sizeof seg);
+            if (seg.vmsize) {
+                start = std::min(start, seg.vmaddr);
+                end = std::max(end, seg.vmaddr + seg.vmsize);
+            }
+        }
+        cmd += lc.cmdsize;
+    }
+    return end > start ? end - start : 0;
+}
+
 Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     std::vector<uint8_t> file = readFile(path);
     auto [sliceOffset, sliceSize] = pickSlice(file);
