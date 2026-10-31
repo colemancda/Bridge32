@@ -193,6 +193,84 @@ B32_THUNK(_vm_deallocate) {
     c.ret(KERN_SUCCESS);
 }
 B32_THUNK(_vm_protect) { c.ret(KERN_SUCCESS); }
+
+// void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset)
+// Guest memory is one fixed region, so mappings come from the guest heap:
+// anonymous ones zeroed, file ones as a private copy of the file's bytes.
+// Shared file mappings aren't written back.
+namespace {
+struct Mapping {
+    GuestAddr raw;  // the heap allocation behind it
+    uint32_t size;
+};
+std::unordered_map<GuestAddr, Mapping> mappings;  // under vmLock
+}  // namespace
+namespace {
+// The mapping that holds [addr, addr + length), or none. Under vmLock.
+const Mapping *mappingHolding(GuestAddr addr, uint32_t length) {
+    for (const auto &[start, m] : mappings)
+        if (addr >= start && uint64_t(addr) + length <= uint64_t(start) + m.size) return &m;
+    return nullptr;
+}
+}  // namespace
+B32_THUNK(_mmap) {
+    GuestAddr addr = c.args.ptr();  // a hint, unless MAP_FIXED
+    uint32_t length = c.args.u32();
+    c.args.i32();  // protection: guest memory is always read/write/execute
+    int flags = c.args.i32();
+    int fd = c.args.i32();
+    off_t offset = off_t(c.args.u64());
+    if (flags & MAP_FIXED) {
+        // Garbage collectors reserve a region with one mmap and commit pages
+        // in it with MAP_FIXED. The region is already real guest memory, so
+        // committing gives fresh pages at the same address.
+        std::lock_guard guard(vmLock);
+        if (!mappingHolding(addr, length)) {
+            setGuestErrno(c, ENOMEM);
+            c.ret(uint32_t(-1));  // MAP_FAILED
+            return;
+        }
+        if ((flags & MAP_ANON) || fd < 0) std::memset(c.mem.ptr<void>(addr), 0, length);
+        else if (::pread(fd, c.mem.ptr<void>(addr), length, offset) < 0) {
+            setGuestErrno(c, errno);
+            c.ret(uint32_t(-1));
+            return;
+        }
+        c.ret(addr);
+        return;
+    }
+    GuestAddr raw = c.heap.calloc(1, length + 4096);
+    if (!raw) {
+        setGuestErrno(c, ENOMEM);
+        c.ret(uint32_t(-1));
+        return;
+    }
+    GuestAddr aligned = (raw + 4095) & ~4095u;
+    if (!(flags & MAP_ANON) && fd >= 0) {
+        ssize_t read = ::pread(fd, c.mem.ptr<void>(aligned), length, offset);
+        if (read < 0) {
+            setGuestErrno(c, errno);
+            c.heap.free(raw);
+            c.ret(uint32_t(-1));
+            return;
+        }
+    }
+    std::lock_guard guard(vmLock);
+    mappings[aligned] = {raw, length};
+    c.ret(aligned);
+}
+// int munmap(void *addr, size_t len): whole mappings are freed; trimming or
+// decommitting part of one leaves the memory in place.
+B32_THUNK(_munmap) {
+    GuestAddr addr = c.args.ptr();
+    uint32_t length = c.args.u32();
+    std::lock_guard guard(vmLock);
+    if (auto it = mappings.find(addr); it != mappings.end() && length >= it->second.size) {
+        c.heap.free(it->second.raw);
+        mappings.erase(it);
+    }
+    c.ret(0);
+}
 // kern_return_t vm_read_overwrite(vm_map_t, vm_address_t address, vm_size_t size,
 //                                 vm_address_t data, vm_size_t *outsize)
 B32_THUNK(_vm_read_overwrite) {
