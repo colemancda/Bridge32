@@ -17,4 +17,9 @@ void loadHostOpenGLES();
 using PresentHook = void (*)(Call &c);
 void addPresentHook(PresentHook hook);
 
+// How much the Mac window enlarges the guest's screen (1 at its smallest).
+// Unless the app pins a render scale, the guest renders at this, rounded
+// (1x to 4x), from its next frame on (renderscale.mm).
+void setDisplayZoom(double zoom);
+
 }  // namespace b32::gl
