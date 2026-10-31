@@ -6,6 +6,7 @@
 #include "core/Runtime.h"
 
 #import <Foundation/Foundation.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 
 using namespace b32;
@@ -51,7 +52,7 @@ char buffersKey;
 // Guest 32-bit runtime structures (objc4's class_t, class_ro_t, ...).
 namespace layout32 {
 constexpr uint32_t kClassIsa = 0, kClassSuper = 4, kClassData = 16, kClassSize = 20;
-constexpr uint32_t kRoFlags = 0, kRoInstanceStart = 4, kRoInstanceSize = 8, kRoName = 16, kRoMethods = 20,
+constexpr uint32_t kRoFlags = 0, kRoInstanceSize = 8, kRoName = 16, kRoMethods = 20,
                    kRoProtocols = 24, kRoIvars = 28;
 constexpr uint32_t kRoMeta = 1;
 constexpr uint32_t kCategoryName = 0, kCategoryClass = 4, kCategoryInstanceMethods = 8, kCategoryClassMethods = 12;
@@ -61,7 +62,52 @@ bool isTaggedPointer(id object) { return (reinterpret_cast<uintptr_t>(object) & 
 
 }  // namespace
 
+namespace {
+Bridge *sharedBridge = nullptr;
+
+// Host KVC falls back to this when a key matches no method or host ivar.
+// Guest ivars live in guest memory, so outlets connected to them land here.
+void shadowSetValueForUndefinedKey(id self, SEL _cmd, id value, NSString *key) {
+    Bridge &bridge = *Bridge::shared();
+    GuestAddr guestSelf = bridge.toGuest(self);
+    ClassInfo *cls = bridge.classOf(guestSelf);
+    const GuestIvar *ivar = bridge.ivarForKey(cls, [key UTF8String]);
+    if (!ivar || ivar->type.empty() || ivar->type[0] != '@') {
+        // Not ours: let the first real host superclass raise as usual.
+        Class super = object_getClass(self);
+        while (bridge.isShadowClass(super)) super = class_getSuperclass(super);
+        struct objc_super sup{self, super};
+        reinterpret_cast<void (*)(struct objc_super *, SEL, id, NSString *)>(objc_msgSendSuper)(&sup, _cmd, value, key);
+        return;
+    }
+    GuestMemory &mem = bridge.runtime().mem();
+    GuestAddr slot = guestSelf + mem.read<uint32_t>(ivar->offsetVar);
+    GuestAddr old = mem.read<uint32_t>(slot);
+    GuestAddr fresh = bridge.toGuest(value);
+    // KVC's direct ivar access retains the new value, as on iOS.
+    [value retain];
+    mem.write<uint32_t>(slot, fresh);
+    if (old) [bridge.toHost(old) release];
+}
+}  // namespace
+
+Bridge *Bridge::shared() { return sharedBridge; }
+
+bool Bridge::isShadowClass(Class c) {
+    std::lock_guard guard(lock_);
+    auto it = byHostClass_.find(c);
+    return it != byHostClass_.end() && it->second->isGuest;
+}
+
+const GuestIvar *Bridge::ivarForKey(ClassInfo *cls, const std::string &key) {
+    for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
+        for (const auto &ivar : c->ivars)
+            if (ivar.name == key || ivar.name == "_" + key) return &ivar;
+    return nullptr;
+}
+
 Bridge::Bridge(Runtime &rt) : rt_(rt) {
+    sharedBridge = this;
     handleObjects_.push_back(nil);  // handle 0 is never valid
     handleGuests_.push_back(0);
     emptyCache_ = rt_.heap().calloc(1, 16);
@@ -259,6 +305,15 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
     // offsets past NSObject), so the guest half is the guest's instance size;
     // bytes for host superclass ivars just go unused.
     cls->instanceSize = std::max(mem.read<uint32_t>(ro + layout32::kRoInstanceSize), kObjectHeaderSize);
+    if (GuestAddr ivars = mem.read<uint32_t>(ro + layout32::kRoIvars)) {
+        // ivar_list_t { entsize, count, ivar_t { offset *, name, type, alignment, size } }
+        uint32_t entsize = mem.read<uint32_t>(ivars), count = mem.read<uint32_t>(ivars + 4);
+        for (uint32_t i = 0; i < count; i++) {
+            GuestAddr ivar = ivars + 8 + i * entsize;
+            GuestAddr name = mem.read<uint32_t>(ivar + 4), type = mem.read<uint32_t>(ivar + 8);
+            cls->ivars.push_back({name ? mem.cstr(name) : "", mem.read<uint32_t>(ivar), type ? mem.cstr(type) : ""});
+        }
+    }
 
     if (GuestAddr methods = mem.read<uint32_t>(ro + layout32::kRoMethods)) addGuestMethods(cls, methods);
     if (GuestAddr methods = mem.read<uint32_t>(metaRo + layout32::kRoMethods)) addGuestMethods(meta, methods);
@@ -298,11 +353,17 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     Class shadow = objc_allocateClassPair(super->host, name.c_str(), 0);
     cls->host = shadow;
     cls->meta->host = object_getClass(shadow);
-    for (auto &[sel, method] : cls->methods) installTrampoline(shadow, sel, method, cls);
-    for (auto &[sel, method] : cls->meta->methods) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
+    // Register first: method lookups on an unregistered class pair abort, and
+    // the trampolines look up the inherited host method's encoding.
     objc_registerClassPair(shadow);
     byHostClass_[shadow] = cls;
     byHostClass_[cls->meta->host] = cls->meta;
+    for (auto &[sel, method] : cls->methods) installTrampoline(shadow, sel, method, cls);
+    for (auto &[sel, method] : cls->meta->methods) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
+    // Subclasses of guest classes inherit this from their guest superclass.
+    if (!super->isGuest && !cls->methods.count(guestSel("setValue:forUndefinedKey:")))
+        class_addMethod(shadow, @selector(setValue:forUndefinedKey:), reinterpret_cast<IMP>(shadowSetValueForUndefinedKey),
+                        "v@:@@");
 }
 
 std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const std::string &guestTypes) {

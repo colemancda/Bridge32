@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Each wrapped game gets its own container, like an iOS app sandbox. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- dynarmic generates code at run time. -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

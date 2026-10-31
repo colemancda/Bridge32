@@ -28,6 +28,7 @@ add_library(b32core OBJECT
     core/thunks/Thunks.cpp
     core/thunks/compiler_rt.cpp
     core/thunks/cxxabi.cpp
+    core/thunks/coregraphics.mm
     core/thunks/libc.cpp
     core/objc/Bridge.mm
     core/objc/Dispatch.mm
@@ -39,7 +40,7 @@ target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # The bridge manages host object lifetimes by hand.
 target_compile_options(b32core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fno-objc-arc>)
-target_link_libraries(b32core PUBLIC "-framework Foundation" ffi)
+target_link_libraries(b32core PUBLIC "-framework Foundation" "-framework CoreGraphics" ffi)
 
 if(B32_HAVE_DYNARMIC)
     target_sources(b32core PRIVATE core/cpu/DynarmicCpu.cpp)
@@ -52,6 +53,27 @@ endif()
 
 add_executable(b32-inspect cli/b32-inspect.cpp)
 target_link_libraries(b32-inspect PRIVATE b32core)
+
+# The Mac Catalyst shell (configure with -DCMAKE_TOOLCHAIN_FILE=cmake/catalyst.cmake).
+# Games are wrapped into copies of it by tools/make-app.sh.
+if(B32_CATALYST)
+    if(NOT B32_HAVE_DYNARMIC)
+        message(FATAL_ERROR "The Catalyst shell needs dynarmic in external/dynarmic")
+    endif()
+    target_sources(b32core PRIVATE core/uikit/UIKitSupport.mm)
+    target_link_libraries(b32core PUBLIC "-framework UIKit")
+
+    add_executable(Bridge32 MACOSX_BUNDLE app/main.mm)
+    target_link_libraries(Bridge32 PRIVATE b32core)
+    target_compile_options(Bridge32 PRIVATE -fno-objc-arc)
+    set_target_properties(Bridge32 PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/app/Info.plist"
+        OUTPUT_NAME Bridge32)
+    add_custom_command(TARGET Bridge32 POST_BUILD
+        COMMAND codesign --force --sign - --entitlements "${CMAKE_SOURCE_DIR}/app/Bridge32.entitlements"
+                "$<TARGET_BUNDLE_DIR:Bridge32>"
+        COMMENT "Signing Bridge32.app (ad hoc)")
+endif()
 
 # Guest tests: armv7 binaries built by tests/guest/Makefile.
 enable_testing()

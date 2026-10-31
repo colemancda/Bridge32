@@ -39,15 +39,21 @@ bool passesThrough(const Type &t) {
     return p.code == 'v' || p.code == '?' || p.sameLayout();
 }
 
-std::unordered_map<std::string, OverrideFn> &overrides() {
-    static std::unordered_map<std::string, OverrideFn> table;
+struct Override {
+    OverrideFn fn;
+    OverrideCondition when;
+};
+
+std::unordered_multimap<std::string, Override> &overrides() {
+    static std::unordered_multimap<std::string, Override> table;
     return table;
 }
 
 }  // namespace
 
-OverrideRegistry::OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn) {
-    for (const char *s : selectors) overrides().emplace(s, fn);
+OverrideRegistry::OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn,
+                                   OverrideCondition when) {
+    for (const char *s : selectors) overrides().emplace(s, Override{fn, when});
 }
 
 // --- host call descriptions ---------------------------------------------------
@@ -144,10 +150,11 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     args.u32();  // self or objc_super
     args.u32();  // _cmd
 
-    if (auto it = overrides().find(name); it != overrides().end()) {
+    for (auto [it, end] = overrides().equal_range(name); it != end; ++it) {
+        if (it->second.when && !it->second.when(recv)) continue;
         if (superInfo) fatal("super send of overridden selector %s is not supported yet", name);
         OverrideCall oc{c, *this, recv, receiver, hsel, name, args, retPtr};
-        it->second(oc);
+        it->second.fn(oc);
         return;
     }
 

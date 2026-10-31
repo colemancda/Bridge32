@@ -7,7 +7,7 @@ CC      := xcrun clang
 # -marm: Xcode 27's linker writes an even LC_MAIN entry offset for Thumb code.
 CFLAGS  := -arch armv7 -isysroot $(SDK) -miphoneos-version-min=9.0 -marm -O1 -Wall
 
-TESTS   := hello cxx objc
+TESTS   := hello cxx objc UIKitTest.app
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
@@ -26,6 +26,12 @@ $(OUT)/cxx: cxx/cxx.cpp
 $(OUT)/objc: objc/objc.m
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fno-objc-arc -o $@ $< -framework Foundation
+
+# An app bundle, for tools/make-app.sh to wrap into the Catalyst shell.
+$(OUT)/UIKitTest.app: uikit/main.m uikit/Info.plist
+	@mkdir -p $@
+	$(CC) $(CFLAGS) -fno-objc-arc -o $@/UIKitTest uikit/main.m -framework UIKit -framework Foundation -framework CoreGraphics
+	cp uikit/Info.plist $@/Info.plist
 
 clean:
 	rm -rf $(OUT)

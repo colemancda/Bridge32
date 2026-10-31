@@ -44,6 +44,12 @@ struct GuestMethod {
     std::string types;  // the guest's own (32-bit) encoding
 };
 
+struct GuestIvar {
+    std::string name;
+    GuestAddr offsetVar;  // the guest's OBJC_IVAR_$ variable
+    std::string type;
+};
+
 struct ClassInfo {
     GuestAddr addr = 0;     // guest class_t
     std::string name;
@@ -55,6 +61,7 @@ struct ClassInfo {
     Class host = nullptr;   // shadow class for guest classes; the host class for stubs
     uint32_t instanceSize = kObjectHeaderSize;
     std::unordered_map<GuestAddr, GuestMethod> methods;  // guest SEL -> method
+    std::vector<GuestIvar> ivars;  // guest classes only
 };
 
 class Bridge {
@@ -104,6 +111,13 @@ public:
 
     // Called by the sentinel when a host object with a guest side deallocates.
     void forget(uint32_t handle);
+
+    // The guest ivar named `key` or `_key` in the class chain of a guest
+    // object, for KVC (nib outlets connected straight to ivars).
+    const GuestIvar *ivarForKey(ClassInfo *cls, const std::string &key);
+
+    static Bridge *shared();  // the process's bridge, for host callbacks
+    bool isShadowClass(Class c);
 
     Runtime &runtime() { return rt_; }
 

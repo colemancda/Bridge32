@@ -191,3 +191,26 @@ B32_THUNK(__dyld_func_lookup) {
 B32_THUNK(__dyld_lazy_symbol_binding_entry_point) {
     fatal("lazy binding requested, but every symbol pointer is bound at load time");
 }
+
+// --- dlfcn: system libraries resolve into the thunk table --------------------
+
+namespace {
+constexpr GuestAddr kDlHandle = 0xD1000000;  // any non-null value; never dereferenced
+}  // namespace
+
+B32_THUNK(_dlopen) {
+    GuestAddr path = c.args.ptr();
+    log("dlopen(%s)", path ? c.mem.cstr(path) : "NULL");
+    c.ret(kDlHandle);
+}
+
+B32_THUNK(_dlsym) {
+    c.args.ptr();  // handle: every library shares the one thunk table
+    std::string name = std::string("_") + c.mem.cstr(c.args.ptr());
+    bool known = ThunkRegistry::all().count(name) != 0;
+    log("dlsym(%s) -> %s", name.c_str(), known ? "thunk" : "not found");
+    c.ret(known ? c.rt.thunks().stubFor(name) : 0);
+}
+
+B32_THUNK(_dlclose) { c.ret(0); }
+B32_THUNK(_dlerror) { c.ret(0); }

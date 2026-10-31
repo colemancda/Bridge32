@@ -20,9 +20,12 @@ struct OverrideCall {
 };
 
 using OverrideFn = void (*)(OverrideCall &);
+// Decides from the receiver alone (without reading arguments) whether the
+// override applies, e.g. -bounds only for UIScreen.
+using OverrideCondition = bool (*)(id receiver);
 
 struct OverrideRegistry {
-    OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn);
+    OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn, OverrideCondition when = nullptr);
 };
 
 #define B32_OVERRIDE_CONCAT2(a, b) a##b
@@ -32,6 +35,14 @@ struct OverrideRegistry {
 #define B32_OVERRIDE_IMPL(fn, ...)                                                    \
     static void fn(::b32::objc::OverrideCall &o);                                     \
     static ::b32::objc::OverrideRegistry B32_OVERRIDE_CONCAT(fn, _registry)({__VA_ARGS__}, fn); \
+    static void fn(::b32::objc::OverrideCall &o)
+
+// B32_OVERRIDE_WHEN(condition, "sel") { ... } applies only when
+// condition(receiver) is true; other receivers take the generic path.
+#define B32_OVERRIDE_WHEN(condition, ...) B32_OVERRIDE_WHEN_IMPL(B32_OVERRIDE_CONCAT(override_, __LINE__), condition, __VA_ARGS__)
+#define B32_OVERRIDE_WHEN_IMPL(fn, condition, ...)                                    \
+    static void fn(::b32::objc::OverrideCall &o);                                     \
+    static ::b32::objc::OverrideRegistry B32_OVERRIDE_CONCAT(fn, _registry)({__VA_ARGS__}, fn, condition); \
     static void fn(::b32::objc::OverrideCall &o)
 
 }  // namespace b32::objc
