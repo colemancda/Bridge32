@@ -103,8 +103,40 @@ GuestAddr Runtime::internString(const std::string &s) {
     return addr;
 }
 
+namespace {
+// Itanium-mangled complete and base constructors and destructors (C1, C2,
+// D1, D2): the ones Apple's armv7 C++ ABI has return `this`.
+bool isConstructorOrDestructor(const std::string &symbol) {
+    if (symbol.rfind("__Z", 0) != 0) return false;
+    for (size_t i = 0; i + 2 < symbol.size(); i++) {
+        if (symbol[i + 2] != 'E') continue;
+        if ((symbol[i] == 'C' || symbol[i] == 'D') && (symbol[i + 1] == '1' || symbol[i + 1] == '2')) return true;
+    }
+    return false;
+}
+}  // namespace
+
+// Apple's armv7 ABI has constructors and destructors return `this`, and
+// clang-built apps use the result; the GCC-built guest libstdc++ returns
+// nothing. Apps bind to a shim that keeps r0:
+//     push {r0, lr}
+//     ldr  r12, [pc, #4]
+//     blx  r12
+//     pop  {r0, pc}
+//     .word target
+GuestAddr Runtime::thisReturning(GuestAddr target) {
+    std::lock_guard guard(attachLock_);
+    if (auto it = thisShims_.find(target); it != thisShims_.end()) return it->second;
+    GuestAddr shim = heap_->alloc(20);
+    const uint32_t code[5] = {0xe92d4001, 0xe59fc004, 0xe12fff3c, 0xe8bd8001, target};
+    mem_->copyIn(shim, code, sizeof code);
+    thisShims_[target] = shim;
+    return shim;
+}
+
 GuestAddr Runtime::resolve(const std::string &symbol) {
-    if (auto it = libraryExports_.find(symbol); it != libraryExports_.end()) return it->second;
+    if (auto it = libraryExports_.find(symbol); it != libraryExports_.end())
+        return isConstructorOrDestructor(symbol) ? thisReturning(it->second) : it->second;
     if (GuestAddr data = dataSymbol(symbol)) return data;
     if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
     // Object constants (notification names, keys...) the host exports.
