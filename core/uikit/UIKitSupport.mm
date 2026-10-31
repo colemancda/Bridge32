@@ -248,6 +248,17 @@ void b32::uikit::configureHost() {
     originalInitWithCoder = method_setImplementation(coder, reinterpret_cast<IMP>(windowInitWithCoder));
     Method key = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
     originalMakeKeyAndVisible = method_setImplementation(key, reinterpret_cast<IMP>(windowMakeKeyAndVisible));
+
+    // Private classes old nibs name that UIKit has since dropped, each
+    // standing in as a plain subclass of what it was.
+    static const char *const kRetiredClasses[][2] = {
+        {"UIRoundedRectButton", "UIButton"},  // UIButtonTypeRoundedRect before iOS 7
+    };
+    for (auto &retired : kRetiredClasses) {
+        if (objc_getClass(retired[0])) continue;
+        Class cls = objc_allocateClassPair(objc_getClass(retired[1]), retired[0], 0);
+        objc_registerClassPair(cls);
+    }
 }
 
 // int UIApplicationMain(int argc, char *argv[], NSString *principalClassName, NSString *delegateClassName)
