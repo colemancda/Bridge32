@@ -20,17 +20,24 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 using namespace b32;
 
 namespace {
 
-struct Unit {
-    AudioUnit host;
-    uint32_t handle;
+// A guest AURenderCallback: the render callback, or a render notification.
+struct Callback {
     GuestAddr proc = 0, refCon = 0;
     GuestAddr scratch = 0;  // the callback's guest arguments
     uint32_t scratchSize = 0;
+};
+
+struct Unit {
+    AudioUnit host;
+    uint32_t handle;
+    Callback render;
+    std::vector<Callback *> notifications;
 };
 
 std::mutex lock;
@@ -48,9 +55,9 @@ GuestHeap &guestHeap() { return objc::Bridge::shared()->runtime().heap(); }
 
 constexpr uint32_t kTimeStampOffset = 4, kBufferListOffset = 4 + 64;
 
-OSStatus render(void *data, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *timeStamp, UInt32 bus,
-                UInt32 frames, AudioBufferList *ioData) {
-    auto *unit = static_cast<Unit *>(data);
+OSStatus callGuest(void *data, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *timeStamp, UInt32 bus,
+                   UInt32 frames, AudioBufferList *ioData) {
+    auto *unit = static_cast<Callback *>(data);
     GuestMemory &mem = guestMemory();
     uint32_t count = ioData ? ioData->mNumberBuffers : 0;
     uint32_t bytes = 0;
@@ -125,7 +132,11 @@ B32_THUNK(_AudioComponentInstanceDispose) {
         units.erase(unit->handle);
     }
     forgetHostHandle(unit->host);
-    if (unit->scratch) c.heap.free(unit->scratch);
+    if (unit->render.scratch) c.heap.free(unit->render.scratch);
+    for (Callback *n : unit->notifications) {
+        if (n->scratch) c.heap.free(n->scratch);
+        delete n;
+    }
     delete unit;
     c.ret(uint32_t(status));
 }
@@ -146,9 +157,9 @@ B32_THUNK(_AudioUnitSetProperty) {
     UInt32 size = c.args.u32();
     if (property == kAudioUnitProperty_SetRenderCallback) {
         // AURenderCallbackStruct { proc, refCon }: two guest words.
-        unit->proc = data ? c.mem.read<uint32_t>(data) : 0;
-        unit->refCon = data ? c.mem.read<uint32_t>(data + 4) : 0;
-        AURenderCallbackStruct callback = {unit->proc ? render : nullptr, unit};
+        unit->render.proc = data ? c.mem.read<uint32_t>(data) : 0;
+        unit->render.refCon = data ? c.mem.read<uint32_t>(data + 4) : 0;
+        AURenderCallbackStruct callback = {unit->render.proc ? callGuest : nullptr, &unit->render};
         c.ret(uint32_t(AudioUnitSetProperty(unit->host, property, scope, element, &callback, sizeof callback)));
         return;
     }
@@ -170,4 +181,38 @@ B32_THUNK(_AudioUnitGetProperty) {
     GuestAddr data = c.args.ptr(), size = c.args.ptr();
     c.ret(uint32_t(AudioUnitGetProperty(unit->host, property, scope, element, data ? c.mem.ptr<void>(data) : nullptr,
                                         size ? c.mem.ptr<UInt32>(size) : nullptr)));
+}
+
+// OSStatus AudioUnitAddRenderNotify(AudioUnit, AURenderCallback, void *refCon): a guest
+// function called before and after each render, with the same arguments.
+B32_THUNK(_AudioUnitAddRenderNotify) {
+    Unit *unit = unitFor(c.args.u32());
+    auto *notification = new Callback{c.args.ptr(), c.args.ptr()};
+    unit->notifications.push_back(notification);
+    c.ret(uint32_t(AudioUnitAddRenderNotify(unit->host, callGuest, notification)));
+}
+
+// AudioUnitParameterValue (a float) AudioUnitGetParameter / SetParameter.
+// OSStatus AudioUnitGetParameter(AudioUnit, AudioUnitParameterID, AudioUnitScope, AudioUnitElement,
+//     AudioUnitParameterValue *)
+B32_THUNK(_AudioUnitGetParameter) {
+    Unit *unit = unitFor(c.args.u32());
+    AudioUnitParameterID id = c.args.u32();
+    AudioUnitScope scope = c.args.u32();
+    AudioUnitElement element = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    AudioUnitParameterValue value = 0;
+    OSStatus status = AudioUnitGetParameter(unit->host, id, scope, element, &value);
+    if (out) c.mem.write<float>(out, value);
+    c.ret(uint32_t(status));
+}
+// OSStatus AudioUnitSetParameter(AudioUnit, AudioUnitParameterID, AudioUnitScope, AudioUnitElement,
+//     AudioUnitParameterValue, UInt32 bufferOffsetInFrames)
+B32_THUNK(_AudioUnitSetParameter) {
+    Unit *unit = unitFor(c.args.u32());
+    AudioUnitParameterID id = c.args.u32();
+    AudioUnitScope scope = c.args.u32();
+    AudioUnitElement element = c.args.u32();
+    float value = c.args.f32();
+    c.ret(uint32_t(AudioUnitSetParameter(unit->host, id, scope, element, value, c.args.u32())));
 }
