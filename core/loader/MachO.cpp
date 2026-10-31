@@ -299,6 +299,11 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                     uint32_t indirect;
                     std::memcpy(&indirect, slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4, 4);
                     if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
+                    // A symbol the linker made private to this image (a template
+                    // instantiation): the pointer already holds its address.
+                    struct nlist sym;
+                    std::memcpy(&sym, slice + symtab.symoff + indirect * sizeof sym, sizeof sym);
+                    if ((sym.n_type & N_TYPE) == N_SECT && !(sym.n_type & N_EXT)) continue;
                     bind(sect.addr + slide + k * 4, symbolName(indirect), 0);
                 }
             }
