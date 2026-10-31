@@ -61,10 +61,14 @@ using namespace b32;
     _playing = YES;
     log("skipping movie %s", _contentURL.lastPathComponent.UTF8String ?: "?");
     _finished = NO;
-    [self retain];
+    // A player that has played stays alive for the rest of the run: games
+    // release it in their "finished" handler and still send it -stop
+    // afterwards, which the real player, kept alive by MediaPlayer, survived.
+    // (THPS2 does.) It's one small object per movie.
+    static NSMutableSet *played = [[NSMutableSet alloc] init];
+    [played addObject:self];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self finish];
-        [self release];
     });
 }
 
