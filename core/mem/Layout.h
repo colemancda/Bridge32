@@ -7,7 +7,7 @@
 namespace b32::layout {
 
 constexpr GuestAddr kLibraryBase = 0x10000000;  // guest libraries (libstdc++...), up to the heap
-constexpr uint32_t kLibraryWindow = 0x01000000;  // address space for each
+constexpr uint32_t kLibraryAlignment = 0x00100000;  // each library's window is whole megabytes
 constexpr GuestAddr kHeapBase = 0x20000000;
 constexpr GuestAddr kHeapEnd = 0xC0000000;
 constexpr GuestAddr kStackBase = 0xD0000000;  // stacks grow down from the top of each slot
