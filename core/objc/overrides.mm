@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #include <objc/message.h>
+#include <objc/runtime.h>
 
 using namespace b32;
 using namespace b32::objc;
@@ -127,4 +128,67 @@ B32_OVERRIDE("countByEnumeratingWithState:objects:count:") {
     mem.write<uint32_t>(state + 4, buffer);
     if (n == 0) snapshots.erase(state);
     o.c.ret(n);
+}
+
+// --- NSData's bytes --------------------------------------------------------------------------
+// The guest gets a copy in guest memory, freed with the data. An immutable
+// object's bytes never change, so its copy is made once; a mutable one's is
+// made on every call, and the guest's writes through it stay in the copy.
+
+namespace {
+bool isData(id receiver) { return [receiver isKindOfClass:[NSData class]]; }
+char immutableCopyKey;
+
+GuestAddr guestCopyOfBytes(OverrideCall &o) {
+    NSData *data = o.receiver;
+    bool isMutable = [data isKindOfClass:[NSMutableData class]];
+    if (!isMutable)
+        if (NSNumber *cached = objc_getAssociatedObject(data, &immutableCopyKey)) return cached.unsignedIntValue;
+    GuestAddr copy = o.bridge.guestBytes(data.bytes, uint32_t(data.length), data);
+    if (!isMutable) objc_setAssociatedObject(data, &immutableCopyKey, @(copy), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return copy;
+}
+}  // namespace
+
+B32_OVERRIDE_WHEN(isData, "bytes") { o.c.ret(guestCopyOfBytes(o)); }
+B32_OVERRIDE_WHEN(isData, "mutableBytes") {
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        log("-[NSMutableData mutableBytes]: the guest writes to a copy");
+    }
+    o.c.ret(guestCopyOfBytes(o));
+}
+
+// --- method lookup ------------------------------------------------------------------------------
+// An IMP the guest can call: a guest class's own method, or else
+// objc_msgSend itself, which reaches the method (on the host) for any
+// receiver of the class.
+
+namespace {
+GuestAddr guestImp(Bridge &bridge, ClassInfo *cls, GuestAddr sel) {
+    for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
+        if (auto it = c->methods.find(sel); it != c->methods.end()) return it->second.imp;
+    return bridge.runtime().thunks().stubFor("_objc_msgSend");
+}
+}  // namespace
+
+// - (IMP)methodForSelector:(SEL)
+B32_OVERRIDE("methodForSelector:") {
+    GuestAddr sel = o.args.u32();
+    ClassInfo *cls = o.bridge.classOf(o.guestReceiver);
+    o.c.ret(guestImp(o.bridge, cls, sel));
+}
+
+// + (IMP)instanceMethodForSelector:(SEL)
+B32_OVERRIDE("instanceMethodForSelector:") {
+    GuestAddr sel = o.args.u32();
+    ClassInfo *cls = o.bridge.classInfo(o.guestReceiver);
+    o.c.ret(guestImp(o.bridge, cls, sel));
+}
+
+// IMP class_getMethodImplementation(Class, SEL)
+B32_THUNK(_class_getMethodImplementation) {
+    ClassInfo *cls = c.rt.bridge().classInfo(c.args.ptr());
+    c.ret(guestImp(c.rt.bridge(), cls, c.args.u32()));
 }
