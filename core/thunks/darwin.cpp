@@ -484,6 +484,8 @@ B32_THUNK(___vsprintf_chk) {
 B32_THUNK(_asl_open) { c.ret(1); }
 B32_THUNK(_asl_new) { c.ret(1); }
 B32_THUNK(_asl_free) {}
+B32_THUNK(_asl_set_filter) { c.ret(0); }
+B32_THUNK(_asl_add_output_file) { c.ret(0); }
 B32_THUNK(_asl_set) { c.ret(0); }
 B32_THUNK(_asl_set_query) { c.ret(0); }
 B32_THUNK(_asl_get) { c.ret(0); }
