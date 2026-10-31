@@ -13,6 +13,9 @@
 	<!-- CoreBluetooth apps. -->
 	<key>com.apple.security.device.bluetooth</key>
 	<true/>
+	<!-- CoreLocation, for apps that ask where the device is. -->
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
 	<!-- dynarmic generates code at run time. -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
