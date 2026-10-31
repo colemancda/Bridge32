@@ -70,15 +70,33 @@ uint32_t binding(uint32_t pname) {
 uint32_t boundRenderbuffer() { return binding(GL_RENDERBUFFER_BINDING); }
 uint32_t boundFramebuffer() { return binding(GL_FRAMEBUFFER_BINDING); }
 
-bool scaling() {
-    uint32_t framebuffer = boundFramebuffer();
+bool isScaled(uint32_t framebuffer) {
     std::lock_guard<std::mutex> guard(lock);
     return scaledFramebuffers.count(framebuffer) != 0;
 }
 
+bool scaling() { return isScaled(boundFramebuffer()); }
+
 bool isContext(id receiver) { return [receiver isKindOfClass:objc_getClass("EAGLContext")]; }
 
 }  // namespace
+
+// The scale the guest gave a layer we render at a multiple of, kept on the layer.
+namespace {
+char kGuestScale;
+NSNumber *guestScaleOf(CALayer *layer) { return layer ? objc_getAssociatedObject(layer, &kGuestScale) : nil; }
+bool isScaledLayer(id receiver) { return [receiver isKindOfClass:[CALayer class]] && guestScaleOf(receiver); }
+bool hasScaledLayer(id receiver) {
+    return [receiver respondsToSelector:@selector(layer)] && [receiver isKindOfClass:objc_getClass("UIView")] &&
+           guestScaleOf([receiver layer]);
+}
+}  // namespace
+
+// Guests size their 2D overlays by the scale they asked for; they get it back.
+B32_OVERRIDE_WHEN(isScaledLayer, "contentsScale") { o.c.retF32(float(guestScaleOf(o.receiver).doubleValue)); }
+B32_OVERRIDE_WHEN(hasScaledLayer, "contentScaleFactor") {
+    o.c.retF32(float(guestScaleOf([o.receiver layer]).doubleValue));
+}
 
 // - (BOOL)renderbufferStorage:(NSUInteger)target fromDrawable:(id<EAGLDrawable>)drawable
 B32_OVERRIDE_WHEN(isContext, "renderbufferStorage:fromDrawable:") {
@@ -87,8 +105,7 @@ B32_OVERRIDE_WHEN(isContext, "renderbufferStorage:fromDrawable:") {
     CALayer *layer = [drawable isKindOfClass:[CALayer class]] ? (CALayer *)drawable : nil;
     // The scale the guest gave the layer, remembered: a guest that sets up
     // its drawable again finds the layer already scaled.
-    static char kGuestScale;
-    NSNumber *remembered = layer ? objc_getAssociatedObject(layer, &kGuestScale) : nil;
+    NSNumber *remembered = guestScaleOf(layer);
     CGFloat guestScale = remembered ? remembered.doubleValue : layer ? layer.contentsScale : 1;
     if (layer && !remembered)
         objc_setAssociatedObject(layer, &kGuestScale, @(guestScale), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -127,10 +144,9 @@ void renderbufferStorage(Call &c, const char *name) {
     (std::strcmp(name, "OES") == 0 ? storageOES : storage)(target, format, width * f, height * f);
 }
 
-// glRenderbufferStorageMultisampleAPPLE(target, samples, internalformat, width, height)
-void renderbufferStorageMultisample(Call &c) {
-    static auto storage =
-        glFunction<void (*)(uint32_t, int32_t, uint32_t, int32_t, int32_t)>("glRenderbufferStorageMultisampleAPPLE");
+// glRenderbufferStorageMultisample[APPLE](target, samples, internalformat, width, height)
+void renderbufferStorageMultisample(Call &c, const char *name) {
+    auto storage = glFunction<void (*)(uint32_t, int32_t, uint32_t, int32_t, int32_t)>(name);
     uint32_t target = c.args.u32();
     int32_t samples = c.args.i32();
     uint32_t format = c.args.u32();
@@ -201,7 +217,24 @@ void widthFixed(Call &c, const char *name) {
 
 B32_THUNK(_glRenderbufferStorageOES) { renderbufferStorage(c, "OES"); }
 B32_THUNK(_glRenderbufferStorage) { renderbufferStorage(c, ""); }
-B32_THUNK(_glRenderbufferStorageMultisampleAPPLE) { renderbufferStorageMultisample(c); }
+B32_THUNK(_glRenderbufferStorageMultisampleAPPLE) {
+    renderbufferStorageMultisample(c, "glRenderbufferStorageMultisampleAPPLE");
+}
+B32_THUNK(_glRenderbufferStorageMultisample) { renderbufferStorageMultisample(c, "glRenderbufferStorageMultisample"); }
+
+// glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter):
+// each rectangle is in its own framebuffer's pixels (OpenGL ES 3).
+B32_THUNK(_glBlitFramebuffer) {
+    static auto blit = glFunction<void (*)(int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t,
+                                           uint32_t, uint32_t)>("glBlitFramebuffer");
+    constexpr uint32_t GL_READ_FRAMEBUFFER_BINDING = 0x8CAA, GL_DRAW_FRAMEBUFFER_BINDING = 0x8CA6;
+    int32_t v[8];
+    for (auto &x : v) x = c.args.i32();
+    uint32_t mask = c.args.u32(), filter = c.args.u32();
+    int32_t src = isScaled(binding(GL_READ_FRAMEBUFFER_BINDING)) ? factor() : 1;
+    int32_t dst = isScaled(binding(GL_DRAW_FRAMEBUFFER_BINDING)) ? factor() : 1;
+    blit(v[0] * src, v[1] * src, v[2] * src, v[3] * src, v[4] * dst, v[5] * dst, v[6] * dst, v[7] * dst, mask, filter);
+}
 B32_THUNK(_glGetRenderbufferParameterivOES) { getRenderbufferParameter(c, true); }
 B32_THUNK(_glGetRenderbufferParameteriv) { getRenderbufferParameter(c, false); }
 B32_THUNK(_glFramebufferRenderbufferOES) { framebufferRenderbuffer(c, true); }
