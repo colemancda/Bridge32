@@ -14,6 +14,7 @@
 #include <mach/mach_time.h>
 #include <mach/semaphore.h>
 #include <poll.h>
+#include <pwd.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -489,10 +490,9 @@ B32_THUNK(_inflateReset) {
 // Each conversion runs through the host's sscanf on its own (with %n to see
 // how much it consumed) and the result is stored through the guest pointer.
 
-namespace {
 // Scans `input` by `format`, storing through the guest pointers `args`
-// supplies; returns sscanf's result.
-int scanGuest(Call &c, Args &args, const char *input, const char *format) {
+// supplies; returns sscanf's result, and how much input it used in *consumed.
+int b32::scanGuest(Call &c, Args &args, const char *input, const char *format, size_t *consumed) {
     const char *pos = input;
     int assigned = 0;
 
@@ -582,9 +582,9 @@ int scanGuest(Call &c, Args &args, const char *input, const char *format) {
         }
         assigned++;
     }
+    if (consumed) *consumed = size_t(pos - input);
     return assigned == 0 && *pos == '\0' && *input == '\0' ? -1 : assigned;
 }
-}  // namespace
 
 B32_THUNK(_sscanf) {
     const char *input = c.mem.cstr(c.args.ptr());
@@ -841,6 +841,38 @@ B32_THUNK(_getfsstat) {
     c.ret(uint32_t(-1));
 }
 B32_THUNK(_fsctl) {
+    setGuestErrno(c, ENOTSUP);
+    c.ret(uint32_t(-1));
+}
+
+// --- users and processes --------------------------------------------------------------------------
+
+B32_THUNK(_geteuid) { c.ret(::geteuid()); }
+
+// struct passwd *getpwuid(uid_t): the guest's is ten words { pw_name, pw_passwd,
+// pw_uid, pw_gid, pw_change, pw_class, pw_gecos, pw_dir, pw_shell, pw_expire },
+// built once from the host's entry, with the app's own home directory.
+B32_THUNK(_getpwuid) {
+    static GuestAddr entry = 0;
+    if (!entry) {
+        const struct passwd *pw = ::getpwuid(::getuid());
+        entry = c.heap.calloc(1, 40);
+        GuestAddr empty = c.rt.internString("");
+        uint32_t words[10] = {c.rt.internString(pw ? pw->pw_name : "mobile"), empty, ::getuid(), ::getgid(), 0,
+                              empty, c.rt.internString(pw ? pw->pw_gecos : "Mobile User"),
+                              c.rt.internString(getenv("HOME") ? getenv("HOME") : "/"), c.rt.internString("/bin/sh"), 0};
+        c.mem.copyIn(entry, words, sizeof words);
+    }
+    c.args.u32();
+    c.ret(entry);
+}
+
+// A guest can't start other programs.
+B32_THUNK(_execv) {
+    setGuestErrno(c, ENOTSUP);
+    c.ret(uint32_t(-1));
+}
+B32_THUNK(_execvp) {
     setGuestErrno(c, ENOTSUP);
     c.ret(uint32_t(-1));
 }
