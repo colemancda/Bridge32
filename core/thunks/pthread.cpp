@@ -8,7 +8,9 @@
 #include "core/Runtime.h"
 #include "core/mem/Layout.h"
 
+#include <fcntl.h>
 #include <pthread.h>
+#include <semaphore.h>
 
 #include <cerrno>
 #include <cstdlib>
@@ -288,6 +290,70 @@ B32_THUNK(_pthread_cond_timedwait) {
     auto deadline = std::chrono::system_clock::time_point(
         std::chrono::duration_cast<std::chrono::system_clock::duration>(since));
     c.ret(condAt(cv).wait_until(m, deadline) == std::cv_status::timeout ? ETIMEDOUT : 0);
+}
+
+// int pthread_cond_timedwait_relative_np(pthread_cond_t *, pthread_mutex_t *, const struct timespec *reltime)
+B32_THUNK(_pthread_cond_timedwait_relative_np) {
+    GuestAddr cv = c.args.ptr();
+    GuestMutex &m = mutexAt(c, c.args.ptr());
+    GuestAddr ts = c.args.ptr();
+    auto wait = std::chrono::seconds(c.mem.read<int32_t>(ts)) + std::chrono::nanoseconds(c.mem.read<int32_t>(ts + 4));
+    c.ret(condAt(cv).wait_for(m, wait) == std::cv_status::timeout ? ETIMEDOUT : 0);
+}
+
+// void *pthread_get_stackaddr_np(pthread_t): the top of the calling thread's
+// guest stack. Every guest stack is one kStackSize slot from kStackBase.
+B32_THUNK(_pthread_get_stackaddr_np) {
+    c.args.u32();
+    GuestAddr sp = c.cpu.reg(Cpu::SP);
+    GuestAddr slot = (sp - layout::kStackBase) / layout::kStackSize;
+    c.ret(layout::kStackBase + (slot + 1) * layout::kStackSize);
+}
+
+// --- named semaphores: host ones, as guest handles ------------------------------------------
+
+namespace {
+std::mutex semaphoresLock;
+std::unordered_map<uint32_t, sem_t *> semaphores;
+uint32_t nextSemaphore = 1;
+sem_t *semaphoreAt(uint32_t handle) {
+    std::lock_guard guard(semaphoresLock);
+    auto it = semaphores.find(handle);
+    return it == semaphores.end() ? nullptr : it->second;
+}
+}  // namespace
+
+// sem_t *sem_open(const char *name, int oflag, ...): mode and value follow with O_CREAT.
+B32_THUNK(_sem_open) {
+    const char *name = c.mem.cstr(c.args.ptr());
+    int flags = c.args.i32();
+    mode_t mode = mode_t(c.args.u32());
+    unsigned value = c.args.u32();
+    sem_t *sem = (flags & O_CREAT) ? ::sem_open(name, flags, mode, value) : ::sem_open(name, flags);
+    if (sem == SEM_FAILED) {
+        c.ret(uint32_t(-1));  // SEM_FAILED
+        return;
+    }
+    std::lock_guard guard(semaphoresLock);
+    semaphores[nextSemaphore] = sem;
+    c.ret(nextSemaphore++);
+}
+B32_THUNK(_sem_close) {
+    uint32_t handle = c.args.u32();
+    sem_t *sem = semaphoreAt(handle);
+    {
+        std::lock_guard guard(semaphoresLock);
+        semaphores.erase(handle);
+    }
+    c.ret(uint32_t(sem ? ::sem_close(sem) : -1));
+}
+B32_THUNK(_sem_post) {
+    sem_t *sem = semaphoreAt(c.args.u32());
+    c.ret(uint32_t(sem ? ::sem_post(sem) : -1));
+}
+B32_THUNK(_sem_wait) {
+    sem_t *sem = semaphoreAt(c.args.u32());
+    c.ret(uint32_t(sem ? ::sem_wait(sem) : -1));
 }
 
 // --- thread-specific data ------------------------------------------------------------------
