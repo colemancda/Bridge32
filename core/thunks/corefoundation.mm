@@ -43,7 +43,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFUUIDCreate", "o:o"}, {"CFUUIDCreateString", "o:oo"},
     {"CFGetTypeID", "z:o"}, {"CFStringGetTypeID", "z:"}, {"CFNumberGetTypeID", "z:"},
     {"CFArrayGetTypeID", "z:"}, {"CFDictionaryGetTypeID", "z:"}, {"CFDataGetTypeID", "z:"},
-    {"CFBooleanGetValue", "B:o"}, {"CFEqual", "B:oo"}, {"CFHash", "z:o"},
+    {"CFBooleanGetValue", "B:o"}, {"CFNumberIsFloatType", "B:o"}, {"CFEqual", "B:oo"}, {"CFHash", "z:o"},
     {"CFURLCreateWithFileSystemPath", "o:ooiu"}, {"CFBundleGetMainBundle", "o:"},
     {"CFBundleCopyResourceURL", "o:oooo"}, {"CFBundleGetValueForInfoDictionaryKey", "o:oo"},
     {"CFLocaleCopyCurrent", "o:"}, {"CFLocaleGetIdentifier", "o:o"}, {"CFLocaleGetSystem", "o:"},
