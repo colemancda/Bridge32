@@ -213,6 +213,88 @@ B32_THUNK(_class_getMethodImplementation) {
     c.ret(guestImp(c.rt.bridge(), cls, c.args.u32()));
 }
 
+// --- NSPredicate formats -----------------------------------------------------------------------
+// The format's arguments are read in the guest's calling convention and
+// handed to the host as an argument array: %@ and %K are objects, integer
+// conversions numbers, floating point doubles.
+
+namespace {
+NSArray *predicateArguments(OverrideCall &o, NSString *format, Args &args) {
+    NSMutableArray *values = [NSMutableArray array];
+    const char *p = format.UTF8String;
+    while (p && *p) {
+        if (*p++ != '%') continue;
+        if (*p == '%') {
+            p++;
+            continue;
+        }
+        bool wide = false;
+        while (*p == 'l' || *p == 'h' || *p == 'q') {
+            if (*p == 'q' || (p[0] == 'l' && p[1] == 'l')) wide = true;
+            p += (p[0] == 'l' && p[1] == 'l') ? 2 : 1;
+        }
+        switch (*p++) {
+        case '@': case 'K': {
+            id value = o.bridge.toHost(args.ptr());
+            [values addObject:value ?: [NSNull null]];
+            break;
+        }
+        case 'd': case 'i': case 'c':
+            [values addObject:wide ? @(int64_t(args.u64())) : @(args.i32())];
+            break;
+        case 'u': case 'x': case 'X': case 'o':
+            [values addObject:wide ? @(args.u64()) : @(args.u32())];
+            break;
+        case 'f': case 'e': case 'g': case 'E': case 'G':
+            [values addObject:@(args.f64())];
+            break;
+        case 's': {
+            GuestAddr str = args.ptr();
+            [values addObject:str ? @(o.c.mem.cstr(str)) : [NSNull null]];
+            break;
+        }
+        default: break;
+        }
+    }
+    return values;
+}
+}  // namespace
+
+// + (NSPredicate *)predicateWithFormat:(NSString *)format, ...
+B32_OVERRIDE("predicateWithFormat:") {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    NSArray *values = predicateArguments(o, format, o.args);
+    returnObject(o, [NSPredicate predicateWithFormat:format argumentArray:values]);
+}
+// + (NSPredicate *)predicateWithFormat:(NSString *)format arguments:(va_list)
+B32_OVERRIDE("predicateWithFormat:arguments:") {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    Args va = Args::fromVaList(o.c.cpu, o.args.ptr());
+    returnObject(o, [NSPredicate predicateWithFormat:format argumentArray:predicateArguments(o, format, va)]);
+}
+// + (NSExpression *)expressionWithFormat:(NSString *)format, ...
+B32_OVERRIDE("expressionWithFormat:") {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    NSArray *values = predicateArguments(o, format, o.args);
+    returnObject(o, [NSExpression expressionWithFormat:format argumentArray:values]);
+}
+
+// --- conformsToProtocol: ------------------------------------------------------------------------
+// The protocols a guest class adopts are in its guest metadata (shadow
+// classes don't adopt them on the host).
+
+// - (BOOL)conformsToProtocol:(Protocol *) and the class method
+B32_OVERRIDE("conformsToProtocol:") {
+    GuestAddr protocol = o.args.ptr();
+    ClassInfo *cls = o.bridge.classOf(o.guestReceiver);
+    if (cls && cls->isMeta) cls = cls->instance;
+    bool conforms = false;
+    if (cls && protocol) conforms = o.bridge.conformsTo(cls, o.c.mem.cstr(o.c.mem.read<uint32_t>(protocol + 4)));
+    if (!conforms && protocol)
+        conforms = reinterpret_cast<BOOL (*)(id, SEL, id)>(objc_msgSend)(o.receiver, o.sel, o.bridge.toHost(protocol));
+    o.c.ret(conforms ? 1 : 0);
+}
+
 // --- performSelector: -------------------------------------------------------------------------
 // Run as an ordinary guest message send: the result comes back as the
 // guest's raw r0, as on iOS, where callers cast performSelector: results
