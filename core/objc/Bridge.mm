@@ -1,6 +1,7 @@
 // Classes, selectors and object identity. Message dispatch is in Dispatch.mm.
 
 #include "Bridge.h"
+#include "Blocks.h"
 
 #include "core/Log.h"
 #include "core/Runtime.h"
@@ -57,7 +58,7 @@ char buffersKey;
 // Guest 32-bit runtime structures (objc4's class_t, class_ro_t, ...).
 namespace layout32 {
 constexpr uint32_t kClassIsa = 0, kClassSuper = 4, kClassData = 16, kClassSize = 20;
-constexpr uint32_t kRoFlags = 0, kRoInstanceSize = 8, kRoName = 16, kRoMethods = 20,
+constexpr uint32_t kRoFlags = 0, kRoInstanceStart = 4, kRoInstanceSize = 8, kRoName = 16, kRoMethods = 20,
                    kRoProtocols = 24, kRoIvars = 28;
 constexpr uint32_t kRoMeta = 1;
 constexpr uint32_t kCategoryName = 0, kCategoryClass = 4, kCategoryInstanceMethods = 8, kCategoryClassMethods = 12;
@@ -214,7 +215,13 @@ bool looksLikeObject(void *p) {
     Dl_info info;
     bool inImage = dladdr(p, &info) != 0;
     if (!inImage && !malloc_zone_from_ptr(p)) return false;
-    return isRegisteredClass(object_getClass((id)p));
+    // Code (a function pointer variable such as libxml2's xmlFree) isn't an object.
+    if (inImage && !inDataSegment(p)) return false;
+    // The class from the isa word, masked as the arm64 runtime does, checked
+    // before the runtime is asked anything about it.
+    constexpr uintptr_t kIsaMask = 0x0000000ffffffff8;
+    auto cls = reinterpret_cast<Class>(*static_cast<uintptr_t *>(p) & kIsaMask);
+    return isRegisteredClass(cls);
 }
 }  // namespace
 
@@ -410,10 +417,28 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
     // Ivars stay where the guest compiler put them (newer compilers hardcode
     // offsets past NSObject), so the guest half is the guest's instance size;
     // bytes for host superclass ivars just go unused.
-    cls->instanceSize = std::max(mem.read<uint32_t>(ro + layout32::kRoInstanceSize), kObjectHeaderSize);
-    if (GuestAddr ivars = mem.read<uint32_t>(ro + layout32::kRoIvars)) {
-        // ivar_list_t { entsize, count, ivar_t { offset *, name, type, alignment, size } }
-        uint32_t entsize = mem.read<uint32_t>(ivars), count = mem.read<uint32_t>(ivars + 4);
+    uint32_t instanceSize = mem.read<uint32_t>(ro + layout32::kRoInstanceSize);
+    GuestAddr ivars = mem.read<uint32_t>(ro + layout32::kRoIvars);
+    // ivar_list_t { entsize, count, ivar_t { offset *, name, type, alignment (log2), size } }
+    uint32_t entsize = ivars ? mem.read<uint32_t>(ivars) : 0, count = ivars ? mem.read<uint32_t>(ivars + 4) : 0;
+    // A guest superclass may be bigger than this class's compiler knew (its
+    // ivars were private to its own file): slide this class's ivars past it,
+    // as the iOS runtime does when it realizes the class.
+    uint32_t instanceStart = mem.read<uint32_t>(ro + layout32::kRoInstanceStart);
+    if (super && super->isGuest && super->instanceSize > instanceStart) {
+        uint32_t align = 1;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t log2 = mem.read<uint32_t>(ivars + 8 + i * entsize + 12);
+            align = std::max(align, log2 == ~0u ? 4u : 1u << log2);
+        }
+        uint32_t slide = (super->instanceSize - instanceStart + align - 1) / align * align;
+        for (uint32_t i = 0; i < count; i++)
+            if (GuestAddr offset = mem.read<uint32_t>(ivars + 8 + i * entsize))
+                mem.write<uint32_t>(offset, mem.read<uint32_t>(offset) + slide);
+        instanceSize += slide;
+    }
+    cls->instanceSize = std::max(instanceSize, kObjectHeaderSize);
+    if (ivars) {
         for (uint32_t i = 0; i < count; i++) {
             GuestAddr ivar = ivars + 8 + i * entsize;
             GuestAddr name = mem.read<uint32_t>(ivar + 4), type = mem.read<uint32_t>(ivar + 8);
@@ -574,6 +599,7 @@ GuestAddr Bridge::toGuest(id object) {
         return stubFor(c)->addr;
     }
     if (auto it = guestByHost_.find(object); it != guestByHost_.end()) return it->second;
+    if (GuestAddr block = blocks::toGuest(*this, object)) return block;
 
     // An instance of a guest class gets its guest half (with the guest's
     // ivars) the first time it crosses over; otherwise it's a plain proxy.
@@ -608,9 +634,40 @@ id Bridge::cfstringToHost(GuestAddr addr) {
     return s;
 }
 
+bool Bridge::conformsTo(ClassInfo *cls, const std::string &protocol) {
+    for (ClassInfo *c = cls; c; c = c->super) {
+        if (!c->isGuest) {
+            Protocol *p = objc_getProtocol(protocol.c_str());
+            return p && c->host && class_conformsToProtocol(c->host, p);
+        }
+        std::vector<std::string> names;
+        {
+            std::lock_guard guard(lock_);
+            for (GuestAddr list : guestClassProtocols_[c->addr]) collectProtocols(list, names);
+        }
+        if (std::find(names.begin(), names.end(), protocol) != names.end()) return true;
+    }
+    return false;
+}
+
+std::vector<GuestAddr> Bridge::guestClasses() {
+    std::lock_guard guard(lock_);
+    std::vector<GuestAddr> result;
+    for (const auto &[addr, info] : classes_)
+        if (info->isGuest && !info->isMeta) result.push_back(addr);
+    return result;
+}
+
+void Bridge::aliasObject(GuestAddr guest, id host) {
+    std::lock_guard guard(lock_);
+    aliases_[guest] = host;
+    guestByHost_[host] = guest;
+}
+
 id Bridge::toHost(GuestAddr addr) {
     if (!addr) return nil;
     std::lock_guard guard(lock_);
+    if (auto it = aliases_.find(addr); it != aliases_.end()) return it->second;
     if (auto it = classes_.find(addr); it != classes_.end()) {
         if (!it->second->host) fatal("class %s doesn't exist on the host", it->second->name.c_str());
         return (id)it->second->host;
@@ -622,12 +679,18 @@ id Bridge::toHost(GuestAddr addr) {
     if (it == handleByGuest_.end()) {
         // An SVC instruction: the guest loaded a stub's code as data, so a
         // data import (a constant or variable) was bound as a function.
+        if (id block = blocks::toHost(*this, addr)) return block;
         if ((addr & 0xff000000) == 0xef000000)
             fatal("guest used the code of import %s as an object; it's a data symbol that needs a B32_DATA definition",
                   rt_.thunks().nameOf(addr & 0xffffff).c_str());
         GuestMemory &mem = rt_.mem();
         ClassInfo *isa = mem.isMapped(addr) ? classInfo(mem.read<uint32_t>(addr)) : nullptr;
-        fatal("0x%08x is not a live object (isa %s)", addr, isa ? isa->name.c_str() : "unknown");
+        if (mem.isMapped(addr))
+            fatal("0x%08x is not a live object (from 0x%08x; isa %s; words %08x %08x %08x %08x)", addr,
+                  Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
+                  isa ? isa->name.c_str() : "unknown", mem.read<uint32_t>(addr), mem.read<uint32_t>(addr + 4),
+                  mem.read<uint32_t>(addr + 8), mem.read<uint32_t>(addr + 12));
+        fatal("0x%08x is not a live object (unmapped)", addr);
     }
     uint32_t handle = it->second;
     return handleObjects_[handle];
