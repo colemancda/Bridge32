@@ -75,6 +75,14 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFWriteStreamCanAcceptBytes", "B:o"}, {"CFWriteStreamSetProperty", "B:ooo"}, {"CFWriteStreamCopyError", "o:o"},
     {"CFRunLoopAddSource", "v:ooo"}, {"CFRunLoopRemoveSource", "v:ooo"}, {"CFRunLoopAddObserver", "v:ooo"},
     {"CFRunLoopRemoveObserver", "v:ooo"}, {"CFRunLoopObserverInvalidate", "v:o"},
+    // CFError, more CFString, CFHTTPMessage and stream calls (PopCap games).
+    {"CFStringCreateExternalRepresentation", "o:oouu"}, {"CFStringCreateFromExternalRepresentation", "o:oou"},
+    {"CFStringCreateWithCStringNoCopy", "o:opuo"}, {"CFURLCopyScheme", "o:o"},
+    {"CFErrorCopyDescription", "o:o"}, {"CFErrorCopyUserInfo", "o:o"}, {"CFErrorGetCode", "z:o"},
+    {"CFErrorGetDomain", "o:o"}, {"CFHTTPMessageCopyHeaderFieldValue", "o:oo"},
+    {"CFHTTPMessageCopyRequestURL", "o:o"}, {"CFHTTPMessageCopyResponseStatusLine", "o:o"},
+    {"CFHTTPMessageCopySerializedMessage", "o:o"}, {"CFReadStreamUnscheduleFromRunLoop", "v:ooo"},
+    {"CFRunLoopTimerSetNextFireDate", "v:od"},
     {"CFStringGetFastestEncoding", "u:o"}, {"CFStringGetSmallestEncoding", "u:o"},
     {"CFStringGetMaximumSizeForEncoding", "z:zu"}, {"CFStringGetCStringPtr", "s:ou"},
     {"CFStringConvertEncodingToNSStringEncoding", "z:u"}, {"CFStringConvertNSStringEncodingToEncoding", "u:z"},
@@ -614,4 +622,36 @@ B32_THUNK(_CFRunLoopObserverCreate) {
     CFRunLoopObserverRef observer = CFRunLoopObserverCreate(nullptr, activities, repeats, order, observerFired, &context);
     o->observer = bridge(c).toGuest((id)observer);
     c.ret(o->observer);
+}
+
+// --- read stream clients ------------------------------------------------------------------
+
+namespace {
+struct GuestStreamClient {
+    GuestAddr callback;
+    GuestAddr info;
+    GuestAddr stream;  // the guest's reference to the stream
+};
+
+void streamEvent(CFReadStreamRef, CFStreamEventType type, void *data) {
+    auto *client = static_cast<GuestStreamClient *>(data);
+    Runtime::threadCpu().call(client->callback, {client->stream, uint32_t(type), client->info});
+}
+}  // namespace
+
+// Boolean CFReadStreamSetClient(CFReadStreamRef, CFOptionFlags events, CFReadStreamClientCallBack,
+//     CFStreamClientContext *)
+// The guest context is { version, info, retain, release, copyDescription }; only info is kept.
+B32_THUNK(_CFReadStreamSetClient) {
+    GuestAddr guestStream = c.args.ptr();
+    CFReadStreamRef stream = (CFReadStreamRef)bridge(c).toHost(guestStream);
+    CFOptionFlags events = c.args.u32();
+    GuestAddr callback = c.args.ptr(), context = c.args.ptr();
+    if (!callback) {
+        c.ret(CFReadStreamSetClient(stream, kCFStreamEventNone, nullptr, nullptr));
+        return;
+    }
+    auto *client = new GuestStreamClient{callback, context ? c.mem.read<uint32_t>(context + 4) : 0, guestStream};
+    CFStreamClientContext hostContext = {0, client, nullptr, nullptr, nullptr};
+    c.ret(CFReadStreamSetClient(stream, events, streamEvent, &hostContext));
 }
