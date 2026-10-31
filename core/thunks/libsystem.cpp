@@ -34,6 +34,11 @@ B32_THUNK(___error) {
     c.ret(errnoSlot);
 }
 
+void b32::setGuestErrno(Call &c, int value) {
+    if (!errnoSlot) errnoSlot = c.heap.calloc(1, 4);
+    c.mem.write<int32_t>(errnoSlot, value);
+}
+
 B32_THUNK(___assert_rtn) {
     const char *function = c.mem.cstr(c.args.ptr());
     const char *file = c.mem.cstr(c.args.ptr());
@@ -125,29 +130,6 @@ B32_THUNK(_read) {
     c.ret(uint32_t(n));
 }
 B32_THUNK(_close) { c.ret(uint32_t(::close(c.args.i32()))); }
-
-// --- sockets: no networking yet --------------------------------------------------------------
-
-#define B32_NO_NETWORK(symbol)                     \
-    B32_THUNK(symbol) {                            \
-        if (GuestAddr e = errnoSlot) c.mem.write<int32_t>(e, ENETDOWN); \
-        c.ret(uint32_t(-1));                       \
-    }
-B32_NO_NETWORK(_socket)
-B32_NO_NETWORK(_bind)
-B32_NO_NETWORK(_listen)
-B32_NO_NETWORK(_accept)
-B32_NO_NETWORK(_connect)
-B32_NO_NETWORK(_recv)
-B32_NO_NETWORK(_send)
-B32_NO_NETWORK(_select)
-B32_NO_NETWORK(_getsockname)
-B32_NO_NETWORK(_getsockopt)
-B32_NO_NETWORK(_setsockopt)
-B32_NO_NETWORK(_getifaddrs)
-B32_THUNK(_freeifaddrs) {}
-B32_THUNK(_inet_pton) { c.ret(0); }
-B32_THUNK(_inet_ntoa) { c.ret(c.rt.internString("0.0.0.0")); }
 
 // --- ctype ----------------------------------------------------------------------------------
 
