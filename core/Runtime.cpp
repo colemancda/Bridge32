@@ -4,7 +4,11 @@
 #include "core/mem/Layout.h"
 #include "core/objc/Bridge.h"
 
+#include <dirent.h>
 #include <dlfcn.h>
+#include <unistd.h>
+
+#include <cstring>
 
 extern "C" void *objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void *);
@@ -50,7 +54,8 @@ Runtime::Runtime(CpuFactory makeCpu)
     : mem_(std::make_unique<GuestMemory>()),
       heap_(std::make_unique<GuestHeap>(*mem_)),
       thunks_(std::make_unique<ThunkTable>(*mem_)),
-      makeCpu_(std::move(makeCpu)) {
+      makeCpu_(std::move(makeCpu)),
+      nextLibraryBase_(layout::kLibraryBase) {
     instance = this;
     bridge_ = std::make_unique<objc::Bridge>(*this);
     cpu_ = makeCpu_(*mem_, [this](Cpu &cpu, uint32_t imm) { thunks_->dispatch(*this, cpu, imm); });
@@ -99,6 +104,7 @@ GuestAddr Runtime::internString(const std::string &s) {
 }
 
 GuestAddr Runtime::resolve(const std::string &symbol) {
+    if (auto it = libraryExports_.find(symbol); it != libraryExports_.end()) return it->second;
     if (GuestAddr data = dataSymbol(symbol)) return data;
     if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
     // Object constants (notification names, keys...) the host exports.
@@ -117,13 +123,62 @@ void loadHostLibrary(const std::string &path) {
 }
 }  // namespace
 
-void Runtime::load(const std::string &path) {
+std::string Runtime::findGuestLibrary(const std::string &installName) const {
+    std::string base = installName.substr(installName.rfind('/') + 1);
+    // libstdc++.6.dylib may be there as its versioned file, libstdc++.6.0.9.dylib.
+    std::string stem = base.substr(0, base.rfind(".dylib")) + ".";
+    for (const auto &dir : guestLibraryDirs_) {
+        std::string exact = dir + "/" + base;
+        if (access(exact.c_str(), R_OK) == 0) return exact;
+        if (DIR *d = opendir(dir.c_str())) {
+            std::string found;
+            while (dirent *e = readdir(d))
+                if (std::strncmp(e->d_name, stem.c_str(), stem.size()) == 0) found = dir + "/" + e->d_name;
+            closedir(d);
+            if (!found.empty()) return found;
+        }
+    }
+    return {};
+}
+
+MachOLoader Runtime::makeLoader() {
     MachOLoader loader(*mem_, [this](const std::string &s) { return resolve(s); });
-    loader.onDylibs = [](const std::vector<std::string> &dylibs) {
-        for (const auto &d : dylibs)
-            if (d.rfind("/System/Library/Frameworks/", 0) == 0) loadHostLibrary(d);
-    };
-    image_ = loader.load(path);
+    loader.onDylibs = [this](const std::vector<std::string> &dylibs) { loadLinkedLibraries(dylibs); };
+    return loader;
+}
+
+// Before an image is bound: host frameworks are loaded so their classes and
+// constants exist, and guest builds of libraries are loaded (dependencies
+// first) so the image binds to them.
+void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs) {
+    for (const auto &d : dylibs) {
+        if (d.rfind("/System/Library/Frameworks/", 0) == 0) {
+            loadHostLibrary(d);
+            continue;
+        }
+        if (librariesSeen_.count(d)) continue;
+        librariesSeen_[d] = true;
+        std::string path = findGuestLibrary(d);
+        if (path.empty()) continue;
+        // Each library gets its window before it loads, since its own
+        // dependencies load (and take the next windows) part way through.
+        GuestAddr base = nextLibraryBase_;
+        nextLibraryBase_ += layout::kLibraryWindow;
+        if (nextLibraryBase_ > layout::kHeapBase) fatal("too many guest libraries");
+        Image lib = makeLoader().load(path, base);
+        if (lib.end > base + layout::kLibraryWindow) fatal("guest library %s is too big for its window", path.c_str());
+        for (const auto &[name, addr] : lib.exports) libraryExports_.emplace(name, addr);
+        if (lib.dyldSection) {
+            mem_->write<uint32_t>(lib.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
+            mem_->write<uint32_t>(lib.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
+        }
+        log("loaded guest library %s at 0x%08x", path.c_str(), lib.slide);
+        libraries_.push_back(std::move(lib));
+    }
+}
+
+void Runtime::load(const std::string &path) {
+    image_ = makeLoader().load(path);
     // Old binaries reach dyld through two pointers at the start of __dyld:
     // the lazy binding entry point and _dyld_func_lookup.
     if (image_.dyldSection) {
@@ -183,7 +238,11 @@ int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::st
     } popOnExit{pool};
 
     try {
-        // dyld runs +load, then initializers, before the entry point.
+        // dyld initializes libraries first, then runs the app's +load and
+        // initializers, before the entry point.
+        for (const Image &lib : libraries_)
+            for (GuestAddr init : lib.initializers)
+                cpu_->call(init, {uint32_t(argv.size()), argvAddr, envpAddr, appleAddr});
         bridge_->runLoadMethods(*cpu_);
         for (GuestAddr init : image_.initializers)
             cpu_->call(init, {uint32_t(argv.size()), argvAddr, envpAddr, appleAddr});
