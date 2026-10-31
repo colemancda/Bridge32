@@ -5,8 +5,12 @@
 #include "core/objc/Bridge.h"
 
 #include <dlfcn.h>
+#include <pthread.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
 #include <ffi/ffi.h>
 
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -124,8 +128,31 @@ void cThunk(Call &c) {
         slots[k] = &v;
     }
 
+    // B32_GL_ERRORS=1 names the GL call that raises each error, or the guest
+    // call it was pending at when something else raised it (which hides it
+    // from the guest's own glGetError).
+    static const bool checkGL = getenv("B32_GL_ERRORS") != nullptr;
+    bool isGL = checkGL && std::strncmp(c.name, "_gl", 3) == 0 && std::strcmp(c.name, "_glGetError") != 0;
+    static auto getError = [] {
+        // OpenGL ES's, not macOS's own libGL (which RTLD_DEFAULT would find).
+        void *gles = dlopen("/System/iOSSupport/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW);
+        auto fn = reinterpret_cast<uint32_t (*)()>(dlsym(gles, "glGetError"));
+        if (checkGL) log("checking GL errors (%s)", fn ? "on" : "glGetError not found");
+        return fn;
+    }();
+    if (isGL && getError) {
+        if (uint32_t error = getError()) log("GL error 0x%04x pending before %s", error, c.name + 1);
+        static Class contextClass = objc_getClass("EAGLContext");
+        if (!((id (*)(id, SEL))objc_msgSend)(contextClass, sel_registerName("currentContext")))
+            log("%s called with no current GL context (thread %x)", c.name + 1, pthread_mach_thread_np(pthread_self()));
+    }
+
     alignas(16) uint8_t result[16] = {};
     ffi_call(&p.cif, FFI_FN(p.fn), result, slots);
+
+    if (isGL && getError)
+        if (uint32_t error = getError()) log("GL error 0x%04x from %s", error, c.name + 1);
+
 
     switch (p.ret) {
     case 'v': break;
