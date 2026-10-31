@@ -361,3 +361,33 @@ B32_OVERRIDE("initWithBytesNoCopy:length:encoding:freeWhenDone:") {
         if (bytes) heap->free(bytes);
     }]);
 }
+
+// --- Core Data: iCloud stores open as local ones ---------------------------------------------------
+// The ubiquitous-store options (iOS 5–9 iCloud Core Data) are gone from
+// today's Core Data, which refuses a store that asks for them. Without iCloud
+// the store was local anyway, so it opens without them.
+
+namespace {
+bool isStoreCoordinator(id receiver) { return [receiver isKindOfClass:NSClassFromString(@"NSPersistentStoreCoordinator")]; }
+}  // namespace
+
+// - (NSPersistentStore *)addPersistentStoreWithType:(NSString *)type configuration:(NSString *)configuration
+//       URL:(NSURL *)url options:(NSDictionary *)options error:(NSError **)error
+B32_OVERRIDE_WHEN(isStoreCoordinator, "addPersistentStoreWithType:configuration:URL:options:error:") {
+    NSString *type = o.bridge.toHost(o.args.ptr());
+    NSString *configuration = o.bridge.toHost(o.args.ptr());
+    NSURL *url = o.bridge.toHost(o.args.ptr());
+    NSDictionary *options = o.bridge.toHost(o.args.ptr());
+    GuestAddr errorOut = o.args.ptr();
+    NSMutableDictionary *local = [[options mutableCopy] autorelease];
+    for (NSString *key : {@"NSPersistentStoreUbiquitousContentNameKey", @"NSPersistentStoreUbiquitousContentURLKey",
+                          @"NSPersistentStoreUbiquitousPeerTokenOption", @"NSPersistentStoreUbiquitousContainerIdentifierKey",
+                          @"NSPersistentStoreRebuildFromUbiquitousContentOption",
+                          @"NSPersistentStoreRemoveUbiquitousMetadataOption"})
+        [local removeObjectForKey:key];
+    NSError *error = nil;
+    id store = reinterpret_cast<id (*)(id, SEL, NSString *, NSString *, NSURL *, NSDictionary *, NSError **)>(objc_msgSend)(
+        o.receiver, o.sel, type, configuration, url, local, &error);
+    if (!store && errorOut) o.c.mem.write<uint32_t>(errorOut, o.bridge.toGuest(error));
+    returnObject(o, store);
+}
