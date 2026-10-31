@@ -8,6 +8,7 @@
 #include "core/objc/Bridge.h"
 #include "core/thunks/CTable.h"
 
+#import <Foundation/Foundation.h>
 #include <CommonCrypto/CommonCrypto.h>
 #include <Security/Security.h>
 #include <dlfcn.h>
@@ -93,6 +94,10 @@ constexpr CFunction kTrust[] = {
     {"SecTrustCopyPublicKey", "o:o"}, {"SecTrustCopyExceptions", "o:o"}, {"SecTrustSetExceptions", "B:oo"},
     // SecTrustResultType is a 32-bit enum in both ABIs.
     {"SecTrustEvaluate", "i:op"},
+    {"SecKeyGetBlockSize", "z:o"},
+    // OSStatus SecKeyRawVerify(SecKeyRef, SecPadding, const uint8_t *signedData, size_t,
+    //                          const uint8_t *sig, size_t)
+    {"SecKeyRawVerify", "i:oupzpz"},
 };
 }  // namespace
 
@@ -106,6 +111,44 @@ B32_THUNK(_SecTrustCreateWithCertificates) {
     SecTrustRef trust = nullptr;
     OSStatus status = SecTrustCreateWithCertificates(certificates, policies, &trust);
     if (out) c.mem.write<uint32_t>(out, trust ? c.rt.bridge().toGuest((id)trust) : 0);
+    c.ret(uint32_t(status));
+}
+
+// --- keys ---------------------------------------------------------------------------------------
+// Keys are generated in memory; with no keychain behind this app, permanent
+// ones aren't kept.
+
+// OSStatus SecKeyGeneratePair(CFDictionaryRef parameters, SecKeyRef *publicKey, SecKeyRef *privateKey)
+B32_THUNK(_SecKeyGeneratePair) {
+    CFDictionaryRef parameters = (CFDictionaryRef)c.rt.bridge().toHost(c.args.ptr());
+    GuestAddr publicOut = c.args.ptr(), privateOut = c.args.ptr();
+    // Asking for permanent keys would go to the keychain, which refuses this app.
+    NSMutableDictionary *params = [[(__bridge NSDictionary *)parameters mutableCopy] autorelease];
+    [params removeObjectForKey:(id)kSecAttrIsPermanent];
+    for (id key in @[ (id)kSecPublicKeyAttrs, (id)kSecPrivateKeyAttrs ]) {
+        NSMutableDictionary *attrs = [[params[key] mutableCopy] autorelease];
+        if (!attrs) continue;
+        [attrs removeObjectForKey:(id)kSecAttrIsPermanent];
+        params[key] = attrs;
+    }
+    SecKeyRef publicKey = nullptr, privateKey = nullptr;
+    OSStatus status = SecKeyGeneratePair((CFDictionaryRef)params, &publicKey, &privateKey);
+    if (publicOut) c.mem.write<uint32_t>(publicOut, publicKey ? c.rt.bridge().toGuest((id)publicKey) : 0);
+    if (privateOut) c.mem.write<uint32_t>(privateOut, privateKey ? c.rt.bridge().toGuest((id)privateKey) : 0);
+    c.ret(uint32_t(status));
+}
+
+// OSStatus SecKeyRawSign(SecKeyRef, SecPadding, const uint8_t *dataToSign, size_t,
+//                        uint8_t *sig, size_t *sigLen): sigLen is a 32-bit size_t in the guest.
+B32_THUNK(_SecKeyRawSign) {
+    SecKeyRef key = (SecKeyRef)c.rt.bridge().toHost(c.args.ptr());
+    SecPadding padding = c.args.u32();
+    GuestAddr data = c.args.ptr();
+    size_t length = c.args.u32();
+    GuestAddr sig = c.args.ptr(), sigLen = c.args.ptr();
+    size_t outLength = sigLen ? c.mem.read<uint32_t>(sigLen) : 0;
+    OSStatus status = SecKeyRawSign(key, padding, c.mem.ptr<uint8_t>(data), length, c.mem.ptr<uint8_t>(sig), &outLength);
+    if (sigLen) c.mem.write<uint32_t>(sigLen, uint32_t(outLength));
     c.ret(uint32_t(status));
 }
 
