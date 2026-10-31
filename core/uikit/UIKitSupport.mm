@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <crt_externs.h>
 #include <cstring>
+#include <objc/message.h>
 #include <objc/runtime.h>
 
 using namespace b32;
@@ -226,6 +227,29 @@ static NSString *deviceInfoValue(NSString *key) {
     backdrop.window.frame = windowScene.coordinateSpace.bounds;
     layoutGuestWindows();
 }
+
+// With scenes, UIKit tells the scene delegate about activation and the
+// background instead of the app delegate, but iOS apps from before scenes
+// start and stop their game loops in the app delegate's methods. They're
+// forwarded, as iOS sends them: no foreground call at launch.
+namespace {
+bool launched = false;
+void forwardToAppDelegate(SEL selector) {
+    id delegate = UIApplication.sharedApplication.delegate;
+    if ([delegate respondsToSelector:selector])
+        reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(delegate, selector, UIApplication.sharedApplication);
+}
+}  // namespace
+
+- (void)sceneWillEnterForeground:(UIScene *)scene {
+    if (launched) forwardToAppDelegate(@selector(applicationWillEnterForeground:));
+}
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    launched = true;
+    forwardToAppDelegate(@selector(applicationDidBecomeActive:));
+}
+- (void)sceneWillResignActive:(UIScene *)scene { forwardToAppDelegate(@selector(applicationWillResignActive:)); }
+- (void)sceneDidEnterBackground:(UIScene *)scene { forwardToAppDelegate(@selector(applicationDidEnterBackground:)); }
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     UIWindowScene *windowScene = (UIWindowScene *)scene;
