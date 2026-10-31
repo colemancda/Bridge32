@@ -156,6 +156,18 @@ void loadHostLibrary(const std::string &path) {
 }  // namespace
 
 std::string Runtime::findGuestLibrary(const std::string &installName) const {
+    // Libraries the app ships itself, beside its executable or in its
+    // Frameworks folder: SDL2.framework, or the Swift runtime of Swift apps
+    // from before iOS 12.2.
+    for (const char *prefix : {"@rpath/", "@executable_path/", "@loader_path/"}) {
+        if (installName.rfind(prefix, 0) != 0) continue;
+        std::string rest = installName.substr(std::strlen(prefix));
+        for (const std::string &dir : {mainDir_, mainDir_ + "/Frameworks"}) {
+            std::string path = dir + "/" + rest;
+            if (access(path.c_str(), R_OK) == 0) return path;
+        }
+        return {};
+    }
     std::string base = installName.substr(installName.rfind('/') + 1);
     // libstdc++.6.dylib may be there as its versioned file, libstdc++.6.0.9.dylib.
     std::string stem = base.substr(0, base.rfind(".dylib")) + ".";
@@ -204,12 +216,15 @@ void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs) {
             mem_->write<uint32_t>(lib.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
             mem_->write<uint32_t>(lib.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
         }
+        // Its ObjC classes, categories and selectors (SDL2's app delegate...).
+        bridge_->setupImage(lib);
         log("loaded guest library %s at 0x%08x", path.c_str(), lib.slide);
         libraries_.push_back(std::move(lib));
     }
 }
 
 void Runtime::load(const std::string &path) {
+    mainDir_ = path.substr(0, path.rfind('/'));
     image_ = makeLoader().load(path);
     // Old binaries reach dyld through two pointers at the start of __dyld:
     // the lazy binding entry point and _dyld_func_lookup.
