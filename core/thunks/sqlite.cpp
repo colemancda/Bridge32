@@ -49,6 +49,19 @@ B32_THUNK(_sqlite3_open) {
     c.ret(uint32_t(rc));
 }
 
+// int sqlite3_open_v2(const char *filename, sqlite3 **ppDb, int flags, const char *zVfs)
+B32_THUNK(_sqlite3_open_v2) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    int flags = c.args.i32();
+    GuestAddr vfs = c.args.ptr();
+    sqlite3 *db = nullptr;
+    int rc = sqlite3_open_v2(path, &db, flags, vfs ? c.mem.cstr(vfs) : nullptr);
+    c.mem.write<uint32_t>(out, handleFor(db));
+    if (rc != SQLITE_OK) log("sqlite3_open_v2(%s) failed: %s", path, db ? sqlite3_errmsg(db) : "?");
+    c.ret(uint32_t(rc));
+}
+
 B32_THUNK(_sqlite3_close) {
     sqlite3 *db = object<sqlite3>(c.args.u32());
     int rc = sqlite3_close(db);
@@ -219,6 +232,45 @@ B32_THUNK(_sqlite3_exec) {
 
 B32_THUNK(_sqlite3_free) { c.heap.free(c.args.ptr()); }
 
+// const char *sqlite3_column_name(sqlite3_stmt *, int): copied like text.
+B32_THUNK(_sqlite3_column_name) {
+    sqlite3_stmt *stmt = object<sqlite3_stmt>(c.args.u32());
+    const char *name = sqlite3_column_name(stmt, c.args.i32());
+    if (!name) {
+        c.ret(0);
+        return;
+    }
+    GuestAddr copy = c.heap.alloc(uint32_t(std::strlen(name) + 1));
+    c.mem.copyIn(copy, name, std::strlen(name) + 1);
+    {
+        std::lock_guard guard(lock);
+        columnText[stmt].push_back(copy);
+    }
+    c.ret(copy);
+}
+
+B32_THUNK(_sqlite3_last_insert_rowid) { c.ret64(uint64_t(sqlite3_last_insert_rowid(object<sqlite3>(c.args.u32())))); }
+B32_THUNK(_sqlite3_libversion) { c.ret(c.rt.internString(sqlite3_libversion())); }
+
+// sqlite3_stmt *sqlite3_next_stmt(sqlite3 *, sqlite3_stmt *)
+B32_THUNK(_sqlite3_next_stmt) {
+    sqlite3 *db = object<sqlite3>(c.args.u32());
+    uint32_t after = c.args.u32();
+    sqlite3_stmt *next = sqlite3_next_stmt(db, after ? object<sqlite3_stmt>(after) : nullptr);
+    c.ret(next ? handleFor(next) : 0);
+}
+
+// Guest SQL functions aren't bridged: registering one reports success, and
+// queries that call it fail.
+// int sqlite3_create_function(sqlite3 *, const char *name, int nArg, int encoding, void *,
+//     void (*xFunc)(...), void (*xStep)(...), void (*xFinal)(...))
+B32_THUNK(_sqlite3_create_function) {
+    c.args.u32();
+    log("sqlite3_create_function(%s): guest SQL functions aren't supported", c.mem.cstr(c.args.ptr()));
+    c.ret(SQLITE_OK);
+}
+B32_THUNK(_sqlite3_user_data) { c.ret(0); }
+
 B32_THUNK(_sqlite3_errmsg) {
     sqlite3 *db = object<sqlite3>(c.args.u32());
     c.ret(c.rt.internString(sqlite3_errmsg(db)));
@@ -232,6 +284,8 @@ constexpr CFunction kSqlite[] = {
     {"sqlite3_column_type", "i:hi"}, {"sqlite3_column_bytes", "i:hi"}, {"sqlite3_bind_int", "i:hii"},
     {"sqlite3_bind_double", "i:hid"}, {"sqlite3_bind_null", "i:hi"}, {"sqlite3_clear_bindings", "i:h"},
     {"sqlite3_changes", "i:h"}, {"sqlite3_errcode", "i:h"},
+    {"sqlite3_bind_parameter_count", "i:h"}, {"sqlite3_bind_parameter_index", "i:hp"},
+    {"sqlite3_busy_timeout", "i:hi"}, {"sqlite3_data_count", "i:h"}, {"sqlite3_threadsafe", "i:"},
 };
 }  // namespace
 
