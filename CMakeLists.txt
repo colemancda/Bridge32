@@ -38,7 +38,7 @@ add_library(b32core OBJECT
     core/thunks/cxxabi.cpp
     core/thunks/corefoundation.mm
     core/thunks/coregraphics.mm
-    core/thunks/darwin.cpp core/thunks/dispatch.mm core/thunks/libc.cpp core/thunks/libcxx.cpp core/thunks/locale.cpp core/thunks/network.cpp core/thunks/security.mm
+    core/thunks/darwin.cpp core/thunks/dispatch.mm core/thunks/libc.cpp core/thunks/libcxx.cpp core/thunks/locale.cpp core/thunks/network.cpp core/thunks/security.mm core/thunks/zlib.cpp
     core/thunks/libstdcxx.cpp
     core/thunks/libsystem.cpp
     core/thunks/posix.cpp
@@ -78,7 +78,7 @@ if(B32_CATALYST)
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
         core/audio/audio.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
-    target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework Security" "-framework GameController"
+    target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework CoreData" "-framework Security" "-framework GameController"
         "-framework CoreLocation")
 
     add_executable(Bridge32 MACOSX_BUNDLE app/main.mm)
