@@ -14,6 +14,9 @@
 #include <objc/runtime.h>
 
 #include <cstring>
+#include <unordered_map>
+#include <mutex>
+#include <ffi/ffi.h>
 
 using namespace b32;
 
@@ -82,7 +85,9 @@ CFRange range(Call &c) {
 // A CF collection made with the kCFType callbacks holds objects; one made
 // with NULL callbacks holds plain pointer-sized values (the guest's malloc'd
 // buffers, small integers), which pass through unconverted. The latter are
-// marked with an associated object.
+// marked with an associated object. A dictionary with callbacks of the
+// guest's own (C string keys, say) holds plain values too, compared, hashed,
+// retained and released by calling those guest functions.
 
 namespace {
 char rawKey;
@@ -124,16 +129,107 @@ B32_THUNK(_CFArrayCreateMutable) {
     c.ret(bridge(c).toGuest((id)array));
 }
 
+namespace {
+
+// A host callback that calls a guest callback function, as a libffi closure.
+struct GuestCallback {
+    enum Kind { Retain, Release, Equal, Hash } kind;
+    GuestAddr fn;
+    ffi_cif cif;
+    ffi_type *args[2];
+};
+
+void callGuestCallback(ffi_cif *, void *ret, void **args, void *data) {
+    auto *cb = static_cast<GuestCallback *>(data);
+    auto arg = [&](int i) { return uint32_t(*static_cast<uintptr_t *>(args[i])); };
+    Cpu &cpu = Runtime::threadCpu();
+    switch (cb->kind) {
+    case GuestCallback::Retain:  // const void *(CFAllocatorRef, const void *)
+        *static_cast<void **>(ret) = reinterpret_cast<void *>(uintptr_t(uint32_t(cpu.call(cb->fn, {0, arg(1)}))));
+        break;
+    case GuestCallback::Release:  // void (CFAllocatorRef, const void *)
+        cpu.call(cb->fn, {0, arg(1)});
+        break;
+    case GuestCallback::Equal:  // Boolean (const void *, const void *)
+        *static_cast<ffi_arg *>(ret) = uint8_t(cpu.call(cb->fn, {arg(0), arg(1)}));
+        break;
+    case GuestCallback::Hash:  // CFHashCode (const void *)
+        *static_cast<uint64_t *>(ret) = uint32_t(cpu.call(cb->fn, {arg(0)}));
+        break;
+    }
+}
+
+// The host function for the guest callback at `fn`, or null for none.
+void *hostCallback(GuestAddr fn, GuestCallback::Kind kind) {
+    if (!fn) return nullptr;
+    auto *cb = new GuestCallback{kind, fn, {}, {&ffi_type_pointer, &ffi_type_pointer}};
+    unsigned argc = kind == GuestCallback::Hash ? 1 : 2;
+    ffi_type *ret = kind == GuestCallback::Retain ? &ffi_type_pointer : kind == GuestCallback::Release ? &ffi_type_void
+                  : kind == GuestCallback::Equal  ? &ffi_type_uint8   : &ffi_type_uint64;
+    void *code = nullptr;
+    auto *closure = static_cast<ffi_closure *>(ffi_closure_alloc(sizeof(ffi_closure), &code));
+    if (!closure || ffi_prep_cif(&cb->cif, FFI_DEFAULT_ABI, argc, ret, cb->args) != FFI_OK ||
+        ffi_prep_closure_loc(closure, &cb->cif, callGuestCallback, cb, code) != FFI_OK)
+        fatal("can't make a host callback for guest function 0x%08x", fn);
+    return code;
+}
+
+// How a guest collection's callbacks are honoured.
+enum class Callbacks { Objects, Plain, Guest };
+Callbacks callbacksKind(Call &c, GuestAddr callbacks, const char *standard, const char *standard2 = nullptr) {
+    if (!callbacks) return Callbacks::Plain;
+    if (callbacks == c.rt.dataSymbol(standard) || (standard2 && callbacks == c.rt.dataSymbol(standard2)))
+        return Callbacks::Objects;
+    return Callbacks::Guest;
+}
+
+// Host versions of guest key and value callbacks
+//   { version, retain, release, copyDescription, equal, hash },
+// made once per guest callbacks structure.
+const CFDictionaryKeyCallBacks *hostKeyCallbacks(Call &c, GuestAddr guest) {
+    static std::mutex lock;
+    static std::unordered_map<GuestAddr, CFDictionaryKeyCallBacks *> made;
+    std::lock_guard guard(lock);
+    if (auto it = made.find(guest); it != made.end()) return it->second;
+    auto *cb = new CFDictionaryKeyCallBacks{};
+    cb->retain = reinterpret_cast<CFDictionaryRetainCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 4), GuestCallback::Retain));
+    cb->release = reinterpret_cast<CFDictionaryReleaseCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 8), GuestCallback::Release));
+    cb->equal = reinterpret_cast<CFDictionaryEqualCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 16), GuestCallback::Equal));
+    cb->hash = reinterpret_cast<CFDictionaryHashCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 20), GuestCallback::Hash));
+    made[guest] = cb;
+    return cb;
+}
+const CFDictionaryValueCallBacks *hostValueCallbacks(Call &c, GuestAddr guest) {
+    static std::mutex lock;
+    static std::unordered_map<GuestAddr, CFDictionaryValueCallBacks *> made;
+    std::lock_guard guard(lock);
+    if (auto it = made.find(guest); it != made.end()) return it->second;
+    auto *cb = new CFDictionaryValueCallBacks{};
+    cb->retain = reinterpret_cast<CFDictionaryRetainCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 4), GuestCallback::Retain));
+    cb->release = reinterpret_cast<CFDictionaryReleaseCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 8), GuestCallback::Release));
+    cb->equal = reinterpret_cast<CFDictionaryEqualCallBack>(hostCallback(c.mem.read<uint32_t>(guest + 16), GuestCallback::Equal));
+    made[guest] = cb;
+    return cb;
+}
+
+}  // namespace
+
 // CFMutableDictionaryRef CFDictionaryCreateMutable(CFAllocatorRef, CFIndex capacity,
 //     const CFDictionaryKeyCallBacks *, const CFDictionaryValueCallBacks *)
 B32_THUNK(_CFDictionaryCreateMutable) {
     c.args.ptr();
     CFIndex capacity = c.args.i32();
-    bool rawKeys = c.args.ptr() == 0, rawValues = c.args.ptr() == 0;
-    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(nullptr, capacity,
-                                                            rawKeys ? nullptr : &kCFTypeDictionaryKeyCallBacks,
-                                                            rawValues ? nullptr : &kCFTypeDictionaryValueCallBacks);
-    markRaw((id)dict, (rawKeys ? kRawKeys : 0) | (rawValues ? kRawValues : 0));
+    GuestAddr keyCallbacks = c.args.ptr(), valueCallbacks = c.args.ptr();
+    Callbacks keys = callbacksKind(c, keyCallbacks, "_kCFTypeDictionaryKeyCallBacks", "_kCFCopyStringDictionaryKeyCallBacks");
+    Callbacks values = callbacksKind(c, valueCallbacks, "_kCFTypeDictionaryValueCallBacks");
+    const CFDictionaryKeyCallBacks *hostKeys = keys == Callbacks::Objects ? &kCFTypeDictionaryKeyCallBacks
+                                             : keys == Callbacks::Guest   ? hostKeyCallbacks(c, keyCallbacks)
+                                                                          : nullptr;
+    const CFDictionaryValueCallBacks *hostValues = values == Callbacks::Objects ? &kCFTypeDictionaryValueCallBacks
+                                                 : values == Callbacks::Guest   ? hostValueCallbacks(c, valueCallbacks)
+                                                                                : nullptr;
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(nullptr, capacity, hostKeys, hostValues);
+    markRaw((id)dict, (keys != Callbacks::Objects ? kRawKeys : 0) | (values != Callbacks::Objects ? kRawValues : 0));
     c.ret(bridge(c).toGuest((id)dict));
 }
 
