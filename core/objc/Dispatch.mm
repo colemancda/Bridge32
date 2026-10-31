@@ -80,7 +80,7 @@ static bool namesDouble(std::string_view keyword) {
     static const char *const kDoubleWords[] = {"duration", "delay", "interval", "time",     "date",
                                                "double",   "latitude", "longitude", "degrees", "distance",
                                                "accuracy", "altitude", "speed",    "course",  "heading",
-                                               "seconds"};
+                                               "seconds",  "samplerate", "latency"};
     std::string lower(keyword);
     for (char &ch : lower) ch = char(std::tolower(ch));
     for (const char *word : kDoubleWords)
