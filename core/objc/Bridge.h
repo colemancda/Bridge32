@@ -22,6 +22,7 @@
 #include "core/thunks/Thunks.h"
 
 #include <objc/objc.h>
+#include <objc/runtime.h>
 
 #include <mutex>
 #include <string>
@@ -64,6 +65,7 @@ struct ClassInfo {
     uint32_t instanceSize = kObjectHeaderSize;
     std::unordered_map<GuestAddr, GuestMethod> methods;  // guest SEL -> method
     std::vector<GuestIvar> ivars;  // guest classes only
+    bool initialized = false;      // +initialize has run (guest classes)
 };
 
 class Bridge {
@@ -110,6 +112,12 @@ public:
     bool hostMethodFor(GuestAddr method, IMP &imp, SEL &sel);
     // Calls a host IMP directly for the guest call in progress (self in r0).
     void callHostImp(Call &c, IMP imp, SEL sel);
+
+    // Runs a guest class's +initialize (its own or inherited, superclasses
+    // first) the first time the class or an instance is messaged, as the
+    // runtime does. Guest-to-guest sends never pass through the host
+    // runtime, which would otherwise do it.
+    void ensureInitialized(ClassInfo *cls);
 
     // Whether a class (guest or host) adopts the protocol named `protocol`,
     // directly, through a protocol it adopts, or through a superclass.
@@ -215,6 +223,10 @@ private:
 
     GuestAddr emptyCache_ = 0;
     std::unordered_map<GuestAddr, id> aliases_;
+    std::unordered_map<GuestAddr, std::string> guestProtocols_;  // protocol_t -> name
+    std::unordered_map<std::string, GuestAddr> guestProtocolByName_;
+    Protocol *hostProtocol(const std::string &name);
+    std::recursive_mutex initLock_;
     std::unordered_map<std::string, GuestAddr> hostConstants_;
     struct MutableBuffer {
         GuestAddr guest;
