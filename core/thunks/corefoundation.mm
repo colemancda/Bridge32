@@ -61,6 +61,8 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFURLCreateStringByAddingPercentEscapes", "o:oooou"},
     {"CFURLCreateStringByReplacingPercentEscapes", "o:ooo"},
     {"CFURLCreateStringByReplacingPercentEscapesUsingEncoding", "o:ooou"},
+    {"CFURLCreateFromFileSystemRepresentation", "o:opzu"}, {"CFURLGetFileSystemRepresentation", "B:oupz"},
+    {"CFURLCopyFileSystemPath", "o:oi"}, {"CFURLCopyPathExtension", "o:o"}, {"CFURLGetString", "o:o"},
     {"CFAttributedStringSetAttribute", "v:ozzoo"}, {"CFAttributedStringRemoveAttribute", "v:ozzo"},
 };
 
@@ -193,6 +195,18 @@ B32_THUNK(_CFDictionaryRemoveValue) {
     id dict = bridge(c).toHost(c.args.ptr());
     CFDictionaryRemoveValue((CFMutableDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawKeys, c.args.ptr()));
 }
+// Boolean CFDictionaryGetValueIfPresent(CFDictionaryRef, const void *key, const void **value)
+B32_THUNK(_CFDictionaryGetValueIfPresent) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    int flags = rawFlags(dict);
+    const void *key = hostValue(c, flags & kRawKeys, c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    const void *value = nullptr;
+    Boolean found = CFDictionaryGetValueIfPresent((CFDictionaryRef)dict, key, &value);
+    if (found && out) c.mem.write<uint32_t>(out, guestValue(c, flags & kRawValues, value));
+    c.ret(found);
+}
+
 B32_THUNK(_CFDictionaryContainsKey) {
     id dict = bridge(c).toHost(c.args.ptr());
     c.ret(CFDictionaryContainsKey((CFDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawKeys, c.args.ptr())));
