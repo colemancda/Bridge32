@@ -6,8 +6,8 @@
 // match, and every size the guest can query reads back unscaled, so the guest
 // never sees the difference. Offscreen framebuffers are left alone.
 //
-// The factor is B32RenderScale in Info.plist or B32_RENDER_SCALE (default 4;
-// 1 turns it off).
+// The factor is B32RenderScale in Info.plist or B32_RENDER_SCALE (default 1,
+// which is off).
 //
 // Not scaled: glReadPixels and glCopyTex[Sub]Image2D from the screen, and
 // ES2 shaders that use gl_FragCoord or gl_PointSize.
@@ -48,7 +48,7 @@ int factor() {
         id setting = getenv("B32_RENDER_SCALE")
                          ? (id)[NSString stringWithUTF8String:getenv("B32_RENDER_SCALE")]
                          : [[NSBundle mainBundle] objectForInfoDictionaryKey:@"B32RenderScale"];
-        int v = setting ? [setting intValue] : 4;
+        int v = setting ? [setting intValue] : 1;
         return v < 1 ? 1 : v;
     }();
     return value;
