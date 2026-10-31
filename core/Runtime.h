@@ -51,6 +51,11 @@ public:
         uint32_t value;
     };
 
+    // Directories holding guest (armv6/armv7) builds of system libraries the
+    // host can't stand in for, such as GCC's libstdc++: a library the guest
+    // links that is found here is loaded and run as guest code.
+    void addGuestLibraryDir(const std::string &dir) { guestLibraryDirs_.push_back(dir); }
+
     // Loads the executable and binds every import. Doesn't run anything.
     void load(const std::string &path);
 
@@ -67,6 +72,9 @@ public:
 
 private:
     GuestAddr resolve(const std::string &symbol);
+    MachOLoader makeLoader();
+    void loadLinkedLibraries(const std::vector<std::string> &dylibs);
+    std::string findGuestLibrary(const std::string &installName) const;
     GuestAddr buildProcessStack(GuestAddr stackTop, const std::vector<std::string> &argv,
                                 const std::vector<std::string> &envp, GuestAddr *argvOut, GuestAddr *envpOut,
                                 GuestAddr *appleOut);
@@ -80,6 +88,11 @@ private:
     std::unique_ptr<Cpu> cpu_;
     std::unique_ptr<objc::Bridge> bridge_;
     Image image_;
+    std::vector<std::string> guestLibraryDirs_;
+    std::vector<Image> libraries_;  // guest libraries, dependencies first
+    std::unordered_map<std::string, bool> librariesSeen_;  // by install name
+    std::unordered_map<std::string, GuestAddr> libraryExports_;
+    GuestAddr nextLibraryBase_;
     std::unordered_map<std::string, GuestAddr> data_;
     std::unordered_map<std::string, GuestAddr> strings_;
 };
