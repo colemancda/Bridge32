@@ -760,4 +760,4 @@ B32_THUNK(_utime) {
 
 // bool __availability_version_check(uint32_t count, dyld_build_version_t versions[]):
 // behind @available, which the guest's OS versions always satisfy.
-B32_THUNK(___availability_version_check) { c.ret(1); }
+B32_THUNK(__availability_version_check) { c.ret(1); }
