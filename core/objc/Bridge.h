@@ -42,12 +42,14 @@ std::string describeObject(Call &c, GuestAddr object);
 struct GuestMethod {
     GuestAddr imp;
     std::string types;  // the guest's own (32-bit) encoding
+    GuestAddr entry = 0;  // its method_t { SEL, types, IMP } in guest memory
 };
 
 struct GuestIvar {
     std::string name;
     GuestAddr offsetVar;  // the guest's OBJC_IVAR_$ variable
     std::string type;
+    GuestAddr entry = 0;  // its ivar_t { offset *, name, type, alignment, size }
 };
 
 struct ClassInfo {
@@ -94,6 +96,21 @@ public:
     // like _dispatch_main_q) stand for a host object, both ways.
     void aliasObject(GuestAddr guest, id host);
 
+    // Reflection (class_getInstanceMethod, method_exchangeImplementations...).
+    // A Method is a guest method_t { SEL, types, IMP }: a guest class's own,
+    // or for a host method one made once, whose IMP is a stub that calls the
+    // host implementation the method had then (so swizzled code can call the
+    // original). Setting an IMP updates guest dispatch and the host side.
+    GuestAddr findMethod(ClassInfo *cls, GuestAddr sel);
+    void setMethodImp(GuestAddr method, GuestAddr imp);
+    // class_addMethod (replace = false: fails if the class itself has one)
+    // and class_replaceMethod; returns the previous IMP (or 1 for added).
+    GuestAddr addMethod(ClassInfo *cls, GuestAddr sel, GuestAddr imp, const std::string &types, bool replace);
+    // The host implementation behind a stub IMP made by findMethod.
+    bool hostMethodFor(GuestAddr method, IMP &imp, SEL &sel);
+    // Calls a host IMP directly for the guest call in progress (self in r0).
+    void callHostImp(Call &c, IMP imp, SEL sel);
+
     // Whether a class (guest or host) adopts the protocol named `protocol`,
     // directly, through a protocol it adopts, or through a superclass.
     bool conformsTo(ClassInfo *cls, const std::string &protocol);
@@ -115,6 +132,11 @@ public:
     // Sends a message from host code through the guest's dispatch, so guest
     // overrides run. Arguments are guest words after self and _cmd.
     uint64_t send(GuestAddr receiver, const char *sel, std::initializer_list<uint32_t> args = {});
+
+    // -[NSMutableData mutableBytes]: one guest buffer per object (while its
+    // length stays the same), whose contents are copied into the object
+    // whenever it crosses back to the host, so guest writes reach it.
+    GuestAddr mutableBytes(id data);
 
     // Guest copies of host memory, freed with `owner` (or never if nil).
     GuestAddr guestCString(const char *s, id owner);
@@ -151,7 +173,21 @@ private:
     GuestAddr allocObject(id object, ClassInfo *isa, uint32_t size);
     id cfstringToHost(GuestAddr addr);
 
-    void hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo *superInfo, bool stret);
+    // `direct`: call this IMP instead of sending the message (no overrides).
+    void hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo *superInfo, bool stret,
+                      IMP direct = nullptr);
+
+    struct MethodOwner {
+        ClassInfo *cls;
+        GuestAddr sel;
+    };
+    std::unordered_map<GuestAddr, MethodOwner> methodOwners_;  // method_t -> its class and selector
+    struct HostMethod {
+        IMP imp;
+        SEL sel;
+    };
+    std::unordered_map<GuestAddr, HostMethod> hostMethods_;  // made-up method_t -> host implementation
+    std::unordered_map<void *, GuestAddr> guestMethodForHost_;  // host Method -> made-up method_t
 
     Runtime &rt_;
     std::recursive_mutex lock_;
@@ -180,6 +216,16 @@ private:
     GuestAddr emptyCache_ = 0;
     std::unordered_map<GuestAddr, id> aliases_;
     std::unordered_map<std::string, GuestAddr> hostConstants_;
+    struct MutableBuffer {
+        GuestAddr guest;
+        uint32_t length;
+    };
+    std::unordered_map<id, MutableBuffer> mutableBuffers_;  // NSMutableData -> its guest buffer
+    void syncMutableBytes(id data);
+
+public:
+    void forgetMutableBytesOf(id data);  // for the sentinel
+private:
 };
 
 }  // namespace b32::objc
