@@ -533,6 +533,34 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
                         "v@:@@");
 }
 
+namespace {
+// The host encoding of a method some host protocol declares, or null.
+const char *anyProtocolTypes(SEL sel, bool instance) {
+    static std::mutex lock;
+    static std::unordered_map<SEL, const char *> instanceTypes, classTypes;
+    static bool indexed = false;
+    std::lock_guard guard(lock);
+    if (!indexed) {
+        indexed = true;
+        unsigned count = 0;
+        Protocol *__unsafe_unretained *protocols = objc_copyProtocolList(&count);
+        for (unsigned i = 0; i < count; i++)
+            for (BOOL isInstance : {YES, NO})
+                for (BOOL required : {YES, NO}) {
+                    unsigned n = 0;
+                    objc_method_description *methods = protocol_copyMethodDescriptionList(protocols[i], required, isInstance, &n);
+                    auto &table = isInstance ? instanceTypes : classTypes;
+                    for (unsigned k = 0; k < n; k++) table.emplace(methods[k].name, methods[k].types);
+                    free(methods);
+                }
+        free(protocols);
+    }
+    auto &table = instance ? instanceTypes : classTypes;
+    auto it = table.find(sel);
+    return it == table.end() ? nullptr : it->second;
+}
+}  // namespace
+
 std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const std::string &guestTypes) {
     // An override of a host method: the host's encoding is authoritative.
     if (Method m = class_getInstanceMethod(lookup, sel)) return method_getTypeEncoding(m);
@@ -553,6 +581,30 @@ std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const 
             }
         }
     }
+
+    // ...or one a host superclass adopts: a UITableViewController subclass
+    // gets UITableViewDelegate from it and never names it itself.
+    ClassInfo *hostAncestor = instanceInfo;
+    while (hostAncestor && hostAncestor->isGuest) hostAncestor = hostAncestor->super;
+    for (Class k = hostAncestor ? hostAncestor->host : nil; k; k = class_getSuperclass(k)) {
+        unsigned count = 0;
+        Protocol *__unsafe_unretained *protocols = class_copyProtocolList(k, &count);
+        const char *found = nullptr;
+        for (unsigned i = 0; i < count && !found; i++)
+            for (BOOL required : {YES, NO}) {
+                objc_method_description d = protocol_getMethodDescription(protocols[i], sel, required, !owner->isMeta);
+                if (d.types) {
+                    found = d.types;
+                    break;
+                }
+            }
+        free(protocols);
+        if (found) return found;
+    }
+
+    // ...or one of any host protocol: older code implements delegate methods
+    // without declaring the protocol. Indexed once, by selector.
+    if (const char *types = anyProtocolTypes(sel, !owner->isMeta)) return types;
 
     // A method only the guest knows: derive host types from the guest's,
     // widening geometry structs to CGFloat = double.
