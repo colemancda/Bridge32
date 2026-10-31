@@ -14,6 +14,8 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <pthread.h>
+
 #import <Foundation/Foundation.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -101,21 +103,31 @@ static void markCGFloats(Signature &sig, const char *selName) {
     }
 }
 
-HostCall &hostCall(const std::string &types, const char *selName) {
+// Marks which host doubles are CGFloats from the guest's own encoding of the
+// same method, where 'f' is a CGFloat and 'd' a real double.
+static void markCGFloatsFromGuest(Signature &sig, const std::string &guestTypes) {
+    Signature guest = parseSignature(guestTypes.c_str());
+    if (sig.ret.code == 'd') sig.ret.cgfloat = guest.ret.code == 'f';
+    for (size_t i = 0; i < sig.args.size() && i < guest.args.size(); i++)
+        if (sig.args[i].code == 'd') sig.args[i].cgfloat = guest.args[i].code == 'f';
+}
+
+HostCall &hostCall(const std::string &types, const char *selName, const std::string *guestTypes) {
     static std::recursive_mutex lock;
     static std::unordered_map<std::string, std::unique_ptr<HostCall>> cache;
     // Selectors that take or return long long or int64_t (encodeInt64:forKey:):
     // the only 'q's that stay 64-bit until the signature database exists.
     bool wide = std::strstr(selName, "LongLong") != nullptr || std::strstr(selName, "Int64") != nullptr;
     std::string key = (wide ? "W" : "N") + types;
-    // Which doubles are CGFloats depends on the selector.
-    if (types.find('d') != std::string::npos) key += std::string("/") + selName;
+    // Which doubles are CGFloats depends on the guest's encoding, or else the selector.
+    if (types.find('d') != std::string::npos) key += guestTypes ? "|" + *guestTypes : std::string("/") + selName;
     std::lock_guard guard(lock);
     if (auto it = cache.find(key); it != cache.end()) return *it->second;
 
     auto call = std::make_unique<HostCall>();
     call->sig = parseSignature(types.c_str());
-    markCGFloats(call->sig, selName);
+    if (guestTypes) markCGFloatsFromGuest(call->sig, *guestTypes);
+    else markCGFloats(call->sig, selName);
     auto markWide = [&](Type &t) {
         if (wide && (t.code == 'q' || t.code == 'Q')) t.wide = true;
     };
@@ -135,6 +147,11 @@ HostCall &hostCall(const std::string &types, const char *selName) {
 }  // namespace b32::objc
 
 // --- guest -> host --------------------------------------------------------------
+
+namespace {
+// The guest encoding of the method behind a trampoline IMP, or null.
+const std::string *trampolineGuestTypes(IMP imp);
+}  // namespace
 
 void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     Cpu &cpu = c.cpu;
@@ -182,7 +199,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     hostDispatch(c, receiver, sel, kind != SuperKind::None ? info : nullptr, stret);
 }
 
-void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo *superInfo, bool stret) {
+void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo *superInfo, bool stret, IMP direct) {
     GuestMemory &mem = rt_.mem();
     id recv = toHost(receiver);
     const char *name = selName(sel);
@@ -190,15 +207,15 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     // B32_TRACE_SENDS=1 logs every guest-to-host message.
     static const bool trace = getenv("B32_TRACE_SENDS") != nullptr;
     if (trace)
-        log("guest -> host %c[%s %s]%s", object_isClass(recv) ? '+' : '-', object_getClassName(recv), name,
-            superInfo ? " (super)" : "");
+        log("guest -> host %c[%s %s]%s (thread %x)", object_isClass(recv) ? '+' : '-', object_getClassName(recv), name,
+            superInfo ? " (super)" : "", pthread_mach_thread_np(pthread_self()));
 
     Args args(c.cpu);
     GuestAddr retPtr = stret ? args.ptr() : 0;
     args.u32();  // self or objc_super
     args.u32();  // _cmd
 
-    for (auto [it, end] = overrides().equal_range(name); it != end; ++it) {
+    for (auto [it, end] = overrides().equal_range(name); !direct && it != end; ++it) {
         if (it->second.when && !it->second.when(recv)) continue;
         if (superInfo) fatal("super send of overridden selector %s is not supported yet", name);
         OverrideCall oc{c, *this, recv, receiver, hsel, name, args, retPtr};
@@ -208,8 +225,10 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
 
     Class lookup = superInfo ? superInfo->host : object_getClass(recv);
     std::string types;
+    const std::string *guestTypes = nullptr;  // when the method is a guest one behind a trampoline
     if (Method m = class_getInstanceMethod(lookup, hsel)) {
         types = method_getTypeEncoding(m);
+        guestTypes = trampolineGuestTypes(direct ? direct : method_getImplementation(m));
     } else if (NSMethodSignature *ms = [recv methodSignatureForSelector:hsel]) {
         types = ms.methodReturnType;
         for (NSUInteger i = 0; i < ms.numberOfArguments; i++) types += [ms getArgumentTypeAtIndex:i];
@@ -217,7 +236,8 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         fatal("unrecognized selector %c[%s %s] (from 0x%08x)", object_isClass(recv) ? '+' : '-',
               class_getName(object_getClass(recv)), name, c.cpu.reg(Cpu::LR));
     }
-    HostCall &hc = hostCall(types, name);
+    if (trace) log("    types %s%s", types.c_str(), guestTypes ? " (a guest method)" : "");
+    HostCall &hc = hostCall(types, name, guestTypes);
     const Signature &sig = hc.sig;
 
     struct objc_super superStruct{recv, superInfo ? superInfo->host : nil};
@@ -239,6 +259,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         const Type &t = sig.args[i];
         std::vector<uint32_t> words(wordsFor(t.guestSize()));
         for (auto &w : words) w = args.u32();
+        if (trace) log("    arg %zu '%c'%s: %zu word(s), first %08x", i, t.code, t.cgfloat ? " (CGFloat)" : "", words.size(), words.empty() ? 0 : words[0]);
         storage[i].resize(std::max<size_t>(t.hostSize(), 8));
         if (t.code == '^' && !passesThrough(t) && !isCFRef(t)) {
             // Copy in/out through a host temporary laid out for the host.
@@ -260,12 +281,20 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
 
     alignas(16) uint8_t result[256] = {};
     if (sig.ret.hostSize() > sizeof result) fatal("return type of %s is too large", name);
-    ffi_call(&hc.cif, superInfo ? FFI_FN(objc_msgSendSuper) : FFI_FN(objc_msgSend), result, values.data());
+    ffi_call(&hc.cif, direct ? FFI_FN(direct) : superInfo ? FFI_FN(objc_msgSendSuper) : FFI_FN(objc_msgSend), result,
+             values.data());
 
     for (const auto &out : outParams) toGuestValue(*out.type, out.host, mem.ptr<uint8_t>(out.guest));
 
     const Type &r = sig.ret;
     if (r.code == 'v') return;
+    if (r.code == '@') {
+        // Host objects live above 4 GB on arm64 macOS (tagged pointers have the top bit).
+        auto value = *reinterpret_cast<uintptr_t *>(result);
+        if (value && value < (uint64_t(1) << 32))
+            fatal("%c[%s %s] returned 0x%lx, which isn't an object (type %s)", object_isClass(recv) ? '+' : '-',
+                  object_getClassName(recv), name, (unsigned long)value, types.c_str());
+    }
     if (r.code == '^' && !isCFRef(r)) {
         auto *p = *reinterpret_cast<uint8_t **>(result);
         uint8_t *base = mem.base();
@@ -317,7 +346,11 @@ struct Trampoline {
     GuestAddr imp;
     GuestAddr sel;
     HostCall *call;
+    std::string guestTypes;
 };
+
+std::mutex trampolinesLock;
+std::unordered_map<void *, Trampoline *> trampolines;  // closure code -> its trampoline
 
 void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
     auto *t = static_cast<Trampoline *>(user);
@@ -372,15 +405,27 @@ void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
 
 }  // namespace
 
+namespace {
+const std::string *trampolineGuestTypes(IMP imp) {
+    std::lock_guard guard(trampolinesLock);
+    auto it = trampolines.find(reinterpret_cast<void *>(imp));
+    return it == trampolines.end() ? nullptr : &it->second->guestTypes;
+}
+}  // namespace
+
 void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &method, ClassInfo *owner) {
     SEL hsel = hostSel(sel);
     std::string types = hostTypesFor(target, hsel, owner, method.types);
-    HostCall &hc = hostCall(types, sel_getName(hsel));
+    HostCall &hc = hostCall(types, sel_getName(hsel), &method.types);
     void *code = nullptr;
     auto *closure = static_cast<ffi_closure *>(ffi_closure_alloc(sizeof(ffi_closure), &code));
-    auto *t = new Trampoline{this, method.imp, sel, &hc};
+    auto *t = new Trampoline{this, method.imp, sel, &hc, method.types};
     if (!closure || ffi_prep_closure_loc(closure, &hc.cif, trampolineEntry, t, code) != FFI_OK)
         fatal("could not create a trampoline for %s", sel_getName(hsel));
+    {
+        std::lock_guard guard(trampolinesLock);
+        trampolines[code] = t;
+    }
     if (!owner->isGuest && class_getInstanceMethod(target, hsel))
         log("guest category replaces host method %c[%s %s]", owner->isMeta ? '+' : '-', owner->name.c_str(), sel_getName(hsel));
     class_replaceMethod(target, hsel, reinterpret_cast<IMP>(code), types.c_str());
