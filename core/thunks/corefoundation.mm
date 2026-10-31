@@ -26,6 +26,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFPreferencesAppSynchronize", "B:o"}, {"CFPreferencesCopyAppValue", "o:oo"},
     {"CFPreferencesSetAppValue", "v:ooo"},
     {"CFRunLoopGetCurrent", "o:"}, {"CFRunLoopGetMain", "o:"},
+    {"CFRunLoopAddTimer", "v:ooo"}, {"CFRunLoopTimerInvalidate", "v:o"},
     {"CFStringAppendCharacters", "v:opz"}, {"CFStringAppendCString", "v:opu"},
     {"CFStringCreateWithCString", "o:opu"}, {"CFStringGetCString", "B:opzu"},
     {"CFStringGetLength", "z:o"}, {"CFStringCreateMutable", "o:oz"}, {"CFStringCreateCopy", "o:oo"},
@@ -61,6 +62,13 @@ B32_THUNK(_CFArrayCreate) {
     for (int32_t i = 0; i < count; i++) objects[i] = bridge(c).toHost(c.mem.read<uint32_t>(values + i * 4));
     CFArrayRef array = CFArrayCreate(nullptr, (const void **)objects.data(), count, &kCFTypeArrayCallBacks);
     c.ret(bridge(c).toGuest((id)array));
+}
+
+// CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef, CFIndex capacity, const CFArrayCallBacks *)
+B32_THUNK(_CFArrayCreateMutable) {
+    c.args.ptr();
+    CFIndex capacity = c.args.i32();
+    c.ret(bridge(c).toGuest((id)CFArrayCreateMutable(nullptr, capacity, &kCFTypeArrayCallBacks)));
 }
 
 // void CFArrayGetValues(CFArrayRef, CFRange, const void **values)
@@ -177,3 +185,37 @@ B32_OBJC_CONSTANT(NSGregorianCalendar)
 B32_OBJC_CONSTANT(NSLocalizedDescriptionKey)
 B32_OBJC_CONSTANT(NSUnderlyingErrorKey)
 B32_OBJC_CONSTANT(NSLocaleCountryCode)
+
+// --- run loop timers ---------------------------------------------------------------------
+
+namespace {
+struct GuestTimer {
+    GuestAddr callout;
+    GuestAddr info;
+    GuestAddr timer;  // the guest's reference to the timer
+};
+
+void timerFired(CFRunLoopTimerRef, void *data) {
+    auto *t = static_cast<GuestTimer *>(data);
+    Runtime::threadCpu().call(t->callout, {t->timer, t->info});
+}
+}  // namespace
+
+// CFRunLoopTimerRef CFRunLoopTimerCreate(CFAllocatorRef, CFAbsoluteTime fireDate,
+//     CFTimeInterval interval, CFOptionFlags, CFIndex order, CFRunLoopTimerCallBack,
+//     CFRunLoopTimerContext *)
+// The guest context is { version, info, retain, release, copyDescription }; only
+// info is kept (games pass plain pointers).
+B32_THUNK(_CFRunLoopTimerCreate) {
+    c.args.ptr();
+    CFAbsoluteTime fireDate = c.args.f64();
+    CFTimeInterval interval = c.args.f64();
+    CFOptionFlags flags = c.args.u32();
+    CFIndex order = c.args.i32();
+    auto *t = new GuestTimer{c.args.ptr(), 0, 0};
+    if (GuestAddr context = c.args.ptr()) t->info = c.mem.read<uint32_t>(context + 4);
+    CFRunLoopTimerContext context = {0, t, nullptr, nullptr, nullptr};
+    CFRunLoopTimerRef timer = CFRunLoopTimerCreate(nullptr, fireDate, interval, flags, order, timerFired, &context);
+    t->timer = bridge(c).toGuest((id)timer);
+    c.ret(t->timer);
+}
