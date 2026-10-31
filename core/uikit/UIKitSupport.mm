@@ -233,11 +233,21 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 
 @end
 
+UIWindow *b32::uikit::guestKeyWindow() {
+    UIWindow *front = nil;
+    for (UIWindow *window in guestWindows) {
+        if (window.isKeyWindow) return window;
+        if (!window.hidden) front = window;
+    }
+    return front;
+}
+
 void b32::uikit::configureHost() {
     NSArray *families = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"B32GuestDeviceFamily"];
     if ([families isKindOfClass:[NSArray class]] && ![families containsObject:@1] && [families containsObject:@2])
         device::useIPad();
     log("guest device %s, screen %.0fx%.0f", device::current().machine, screenWidth(), screenHeight());
+    startController();
 
     pendingWindows = [[NSMutableArray alloc] init];
     guestWindows = [[NSHashTable weakObjectsHashTable] retain];
