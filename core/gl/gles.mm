@@ -91,7 +91,8 @@ constexpr CFunction kFunctions[] = {
     {"glDeleteFramebuffersOES", "v:ip"}, {"glDeleteRenderbuffersOES", "v:ip"},
     {"glBindFramebufferOES", "v:uu"}, {"glBindRenderbufferOES", "v:uu"},
     
-    {"glCheckFramebufferStatusOES", "u:u"}, 
+    {"glCheckFramebufferStatusOES", "u:u"},
+    {"glResolveMultisampleFramebufferAPPLE", "v:"}, {"glDiscardFramebufferEXT", "v:uip"}, 
     {"glGetFramebufferAttachmentParameterivOES", "v:uuup"}, 
     {"glIsFramebufferOES", "B:u"}, {"glIsRenderbufferOES", "B:u"}, {"glGenerateMipmapOES", "v:u"},
     // OES_draw_texture
