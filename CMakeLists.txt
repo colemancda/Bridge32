@@ -29,9 +29,17 @@ add_library(b32core OBJECT
     core/thunks/compiler_rt.cpp
     core/thunks/cxxabi.cpp
     core/thunks/libc.cpp
+    core/objc/Bridge.mm
+    core/objc/Dispatch.mm
+    core/objc/Encoding.cpp
+    core/objc/objc_thunks.mm
+    core/objc/overrides.mm
 )
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
+# The bridge manages host object lifetimes by hand.
+target_compile_options(b32core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fno-objc-arc>)
+target_link_libraries(b32core PUBLIC "-framework Foundation" ffi)
 
 if(B32_HAVE_DYNARMIC)
     target_sources(b32core PRIVATE core/cpu/DynarmicCpu.cpp)
@@ -57,4 +65,7 @@ if(B32_HAVE_DYNARMIC)
     add_test(NAME run-cxx COMMAND b32-run "${B32_GUEST_DIR}/cxx")
     set_tests_properties(run-cxx PROPERTIES PASS_REGULAR_EXPRESSION
         "area=42.*array\\[3\\]=9.*static init ran.*counter=2.*try=42.*div=-3 mod=-2 udiv=3 ldiv=-3333333333.*fadd=3\\.75 fdiv=0\\.25 flt=1 fix=-3 dmul=-6\\.0")
+    add_test(NAME run-objc COMMAND b32-run "${B32_GUEST_DIR}/objc")
+    set_tests_properties(run-objc PROPERTIES PASS_REGULAR_EXPRESSION
+        "count=102 name=pac.*formatted=<Counter pac: 102> / 7 / 2\\.5.*array count=3 joined=abc csv=a,b,c.*number=42.*shout=WAKA!.*class=Counter super=NSObject.*dealloc pac.*done")
 endif()

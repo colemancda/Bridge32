@@ -15,6 +15,10 @@
 
 namespace b32 {
 
+namespace objc {
+class Bridge;
+}
+
 class Runtime {
 public:
     using CpuFactory = std::function<std::unique_ptr<Cpu>(GuestMemory &, Cpu::SvcHandler)>;
@@ -27,6 +31,10 @@ public:
     ThunkTable &thunks() { return *thunks_; }
     const Image &image() const { return image_; }
     Cpu &mainCpu() { return *cpu_; }
+    objc::Bridge &bridge() { return *bridge_; }
+
+    // The CPU of the guest thread running on this host thread, if any.
+    static Cpu *currentCpu();
 
     // Loads the executable and binds every import. Doesn't run anything.
     void load(const std::string &path);
@@ -52,6 +60,7 @@ private:
     std::unique_ptr<GuestHeap> heap_;
     std::unique_ptr<ThunkTable> thunks_;
     std::unique_ptr<Cpu> cpu_;
+    std::unique_ptr<objc::Bridge> bridge_;
     Image image_;
     std::unordered_map<std::string, GuestAddr> data_;
     std::unordered_map<std::string, GuestAddr> strings_;

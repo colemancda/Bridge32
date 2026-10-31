@@ -2,6 +2,10 @@
 
 #include "core/Log.h"
 #include "core/mem/Layout.h"
+#include "core/objc/Bridge.h"
+
+extern "C" void *objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void *);
 
 namespace b32 {
 
@@ -11,7 +15,11 @@ namespace {
 struct ExitRequest {
     int status;
 };
+
+thread_local Cpu *currentCpuForThread = nullptr;
 }  // namespace
+
+Cpu *Runtime::currentCpu() { return currentCpuForThread; }
 
 std::unordered_map<std::string, DataSymbolRegistry::Entry> &DataSymbolRegistry::all() {
     static std::unordered_map<std::string, Entry> registry;
@@ -22,6 +30,7 @@ Runtime::Runtime(CpuFactory makeCpu)
     : mem_(std::make_unique<GuestMemory>()),
       heap_(std::make_unique<GuestHeap>(*mem_)),
       thunks_(std::make_unique<ThunkTable>(*mem_)) {
+    bridge_ = std::make_unique<objc::Bridge>(*this);
     cpu_ = makeCpu(*mem_, [this](Cpu &cpu, uint32_t imm) { thunks_->dispatch(*this, cpu, imm); });
 }
 
@@ -48,6 +57,7 @@ GuestAddr Runtime::internString(const std::string &s) {
 
 GuestAddr Runtime::resolve(const std::string &symbol) {
     if (GuestAddr data = dataSymbol(symbol)) return data;
+    if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
     return thunks_->stubFor(symbol);
 }
 
@@ -60,6 +70,7 @@ void Runtime::load(const std::string &path) {
         mem_->write<uint32_t>(image_.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
         mem_->write<uint32_t>(image_.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
     }
+    bridge_->setupImage(image_);
 }
 
 GuestAddr Runtime::buildProcessStack(GuestAddr top, const std::vector<std::string> &argv,
@@ -103,9 +114,17 @@ int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::st
     GuestAddr argvAddr, envpAddr, appleAddr;
     GuestAddr sp = buildProcessStack(stackBottom + layout::kStackSize, argv, envp, &argvAddr, &envpAddr, &appleAddr);
     cpu_->setReg(Cpu::SP, sp);
+    currentCpuForThread = cpu_.get();
+    // Catches host objects autoreleased outside any guest pool.
+    void *pool = objc_autoreleasePoolPush();
+    struct PoolPop {
+        void *pool;
+        ~PoolPop() { objc_autoreleasePoolPop(pool); }
+    } popOnExit{pool};
 
     try {
-        // dyld runs initializers before the entry point in both binary eras.
+        // dyld runs +load, then initializers, before the entry point.
+        bridge_->runLoadMethods(*cpu_);
         for (GuestAddr init : image_.initializers)
             cpu_->call(init, {uint32_t(argv.size()), argvAddr, envpAddr, appleAddr});
 

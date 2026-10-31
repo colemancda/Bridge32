@@ -23,7 +23,7 @@ void Cpu::run() {
     }
 }
 
-uint64_t Cpu::call(GuestAddr fn, std::initializer_list<uint32_t> args) {
+uint64_t Cpu::call(GuestAddr fn, const std::vector<uint32_t> &args) {
     std::array<uint32_t, 16> saved;
     for (int i = 0; i < 16; i++) saved[i] = reg(i);
     uint32_t savedCpsr = cpsr();

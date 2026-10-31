@@ -7,7 +7,7 @@ CC      := xcrun clang
 # -marm: Xcode 27's linker writes an even LC_MAIN entry offset for Thumb code.
 CFLAGS  := -arch armv7 -isysroot $(SDK) -miphoneos-version-min=9.0 -marm -O1 -Wall
 
-TESTS   := hello cxx
+TESTS   := hello cxx objc
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
@@ -21,6 +21,11 @@ $(OUT)/hello: hello/hello.c
 $(OUT)/cxx: cxx/cxx.cpp
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -std=c++17 -o $@ $< -lc++
+
+# Manual retain/release, as in iPhone OS 2-4 apps.
+$(OUT)/objc: objc/objc.m
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fno-objc-arc -o $@ $< -framework Foundation
 
 clean:
 	rm -rf $(OUT)

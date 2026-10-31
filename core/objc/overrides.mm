@@ -1,0 +1,130 @@
+// Host methods that need hand-written argument handling.
+
+#include "Dispatch.h"
+
+#include "core/Log.h"
+#include "core/Runtime.h"
+#include "core/thunks/Format.h"
+
+#import <Foundation/Foundation.h>
+#include <objc/message.h>
+
+using namespace b32;
+using namespace b32::objc;
+
+namespace {
+
+NSString *formatted(OverrideCall &o) {
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    std::string s = formatGuest(o.c, [format UTF8String], o.args, describeObject);
+    return [NSString stringWithUTF8String:s.c_str()];
+}
+
+// Guest objects up to a nil terminator, as host objects.
+NSMutableArray *nilTerminated(OverrideCall &o) {
+    NSMutableArray *objects = [NSMutableArray array];
+    for (GuestAddr obj = o.args.ptr(); obj; obj = o.args.ptr()) [objects addObject:o.bridge.toHost(obj)];
+    return objects;
+}
+
+std::vector<id> guestIdArray(OverrideCall &o, GuestAddr array, uint32_t count) {
+    std::vector<id> objects(count);
+    for (uint32_t i = 0; i < count; i++) objects[i] = o.bridge.toHost(o.c.mem.read<uint32_t>(array + i * 4));
+    return objects;
+}
+
+template <typename... Args> id send(OverrideCall &o, Args... args) {
+    return reinterpret_cast<id (*)(id, SEL, Args...)>(objc_msgSend)(o.receiver, o.sel, args...);
+}
+template <typename... Args> id sendSel(OverrideCall &o, SEL sel, Args... args) {
+    return reinterpret_cast<id (*)(id, SEL, Args...)>(objc_msgSend)(o.receiver, sel, args...);
+}
+
+void returnObject(OverrideCall &o, id result) { o.c.ret(o.bridge.toGuest(result)); }
+
+}  // namespace
+
+// --- printf-style formats -------------------------------------------------------
+// The format is rendered in the guest's calling convention, then handed to
+// the host method as "%@" so the host never sees guest varargs.
+
+B32_OVERRIDE("stringWithFormat:", "initWithFormat:", "stringByAppendingFormat:", "localizedStringWithFormat:") {
+    NSString *text = formatted(o);
+    returnObject(o, reinterpret_cast<id (*)(id, SEL, NSString *, ...)>(objc_msgSend)(o.receiver, o.sel, @"%@", text));
+}
+
+B32_OVERRIDE("appendFormat:") {
+    NSString *text = formatted(o);
+    reinterpret_cast<void (*)(id, SEL, NSString *, ...)>(objc_msgSend)(o.receiver, o.sel, @"%@", text);
+}
+
+// --- nil-terminated object lists --------------------------------------------------
+
+B32_OVERRIDE("arrayWithObjects:") { returnObject(o, sendSel(o, @selector(arrayWithArray:), nilTerminated(o))); }
+B32_OVERRIDE("setWithObjects:") { returnObject(o, sendSel(o, @selector(setWithArray:), nilTerminated(o))); }
+B32_OVERRIDE("initWithObjects:") { returnObject(o, sendSel(o, @selector(initWithArray:), nilTerminated(o))); }
+
+B32_OVERRIDE("dictionaryWithObjectsAndKeys:", "initWithObjectsAndKeys:") {
+    NSMutableArray *values = [NSMutableArray array], *keys = [NSMutableArray array];
+    for (GuestAddr value = o.args.ptr(); value; value = o.args.ptr()) {
+        [values addObject:o.bridge.toHost(value)];
+        [keys addObject:o.bridge.toHost(o.args.ptr())];
+    }
+    SEL sel = std::strncmp(o.name, "init", 4) == 0 ? @selector(initWithObjects:forKeys:)
+                                                   : @selector(dictionaryWithObjects:forKeys:);
+    returnObject(o, sendSel(o, sel, values, keys));
+}
+
+// --- id buffers with a count --------------------------------------------------------
+
+B32_OVERRIDE("arrayWithObjects:count:", "initWithObjects:count:", "setWithObjects:count:") {
+    GuestAddr array = o.args.ptr();
+    uint32_t count = o.args.u32();
+    std::vector<id> objects = guestIdArray(o, array, count);
+    returnObject(o, send(o, objects.data(), NSUInteger(count)));
+}
+
+B32_OVERRIDE("dictionaryWithObjects:forKeys:count:", "initWithObjects:forKeys:count:") {
+    GuestAddr values = o.args.ptr();
+    GuestAddr keys = o.args.ptr();
+    uint32_t count = o.args.u32();
+    std::vector<id> hostValues = guestIdArray(o, values, count), hostKeys = guestIdArray(o, keys, count);
+    returnObject(o, send(o, hostValues.data(), hostKeys.data(), NSUInteger(count)));
+}
+
+// --- fast enumeration ----------------------------------------------------------------
+// The guest's NSFastEnumerationState is 32-bit: {state, itemsPtr,
+// mutationsPtr, extra[5]}. The host collection is snapshotted on the first
+// call and handed out in chunks of guest pointers.
+
+namespace {
+struct Snapshot {
+    std::vector<GuestAddr> items;
+    size_t next = 0;
+};
+std::unordered_map<GuestAddr, Snapshot> snapshots;
+GuestAddr mutationsWord = 0;
+}  // namespace
+
+B32_OVERRIDE("countByEnumeratingWithState:objects:count:") {
+    GuestMemory &mem = o.c.mem;
+    GuestAddr state = o.args.ptr();
+    GuestAddr buffer = o.args.ptr();
+    uint32_t length = o.args.u32();
+    if (!mutationsWord) mutationsWord = o.c.heap.calloc(1, 4);
+
+    if (mem.read<uint32_t>(state) == 0) {
+        Snapshot s;
+        for (id item in (id<NSFastEnumeration>)o.receiver) s.items.push_back(o.bridge.toGuest(item));
+        snapshots[state] = std::move(s);
+        mem.write<uint32_t>(state, 1);
+        mem.write<uint32_t>(state + 8, mutationsWord);
+    }
+    Snapshot &s = snapshots[state];
+    uint32_t n = uint32_t(std::min<size_t>(length, s.items.size() - s.next));
+    for (uint32_t i = 0; i < n; i++) mem.write<uint32_t>(buffer + i * 4, s.items[s.next + i]);
+    s.next += n;
+    mem.write<uint32_t>(state + 4, buffer);
+    if (n == 0) snapshots.erase(state);
+    o.c.ret(n);
+}

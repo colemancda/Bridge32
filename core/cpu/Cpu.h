@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <initializer_list>
+#include <vector>
 
 namespace b32 {
 
@@ -41,7 +42,8 @@ public:
 
     // Calls a guest function with AAPCS arguments and returns r0 (and r1 in
     // the high half). Reentrant: SVC handlers may call back into the guest.
-    uint64_t call(GuestAddr fn, std::initializer_list<uint32_t> args);
+    uint64_t call(GuestAddr fn, std::initializer_list<uint32_t> args) { return call(fn, std::vector<uint32_t>(args)); }
+    uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args);
 
     // Ends the current run() as if the sentinel were reached (exit()).
     void stop() { stopRequested_ = true; }
