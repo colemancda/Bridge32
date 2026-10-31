@@ -17,6 +17,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 
@@ -112,6 +113,18 @@ GuestMutex &mutexAt(Call &c, GuestAddr m, bool recursive = false) {
     if (!slot) slot = new GuestMutex(recursive || c.mem.read<uint32_t>(m) == kRecursiveMutexSignature);
     return *slot;
 }
+
+// Read-write locks: a host std::shared_mutex per guest pthread_rwlock_t,
+// created on first use (statically initialized ones included).
+std::unordered_map<GuestAddr, std::shared_mutex *> rwlocks;
+std::shared_mutex &rwlockAt(GuestAddr l) {
+    std::lock_guard guard(objectsLock);
+    auto &slot = rwlocks[l];
+    if (!slot) slot = new std::shared_mutex;
+    return *slot;
+}
+// Which way each thread holds each lock, for unlock.
+thread_local std::unordered_map<GuestAddr, int> heldRwlocks;  // 1 read, 2 write
 
 std::condition_variable_any &condAt(GuestAddr cv) {
     std::lock_guard guard(objectsLock);
@@ -480,3 +493,43 @@ B32_THUNK(_pthread_mutexattr_gettype) {
 }
 B32_THUNK(_pthread_sigmask) { c.ret(0); }
 B32_THUNK(_pthread_kill) { c.ret(0); }
+
+// --- read-write locks ---------------------------------------------------------------------------
+
+B32_THUNK(_pthread_rwlock_init) {
+    rwlockAt(c.args.ptr());
+    c.ret(0);
+}
+B32_THUNK(_pthread_rwlock_destroy) { c.ret(0); }
+B32_THUNK(_pthread_rwlock_rdlock) {
+    GuestAddr l = c.args.ptr();
+    rwlockAt(l).lock_shared();
+    heldRwlocks[l] = 1;
+    c.ret(0);
+}
+B32_THUNK(_pthread_rwlock_wrlock) {
+    GuestAddr l = c.args.ptr();
+    rwlockAt(l).lock();
+    heldRwlocks[l] = 2;
+    c.ret(0);
+}
+B32_THUNK(_pthread_rwlock_tryrdlock) {
+    GuestAddr l = c.args.ptr();
+    bool ok = rwlockAt(l).try_lock_shared();
+    if (ok) heldRwlocks[l] = 1;
+    c.ret(ok ? 0 : EBUSY);
+}
+B32_THUNK(_pthread_rwlock_trywrlock) {
+    GuestAddr l = c.args.ptr();
+    bool ok = rwlockAt(l).try_lock();
+    if (ok) heldRwlocks[l] = 2;
+    c.ret(ok ? 0 : EBUSY);
+}
+B32_THUNK(_pthread_rwlock_unlock) {
+    GuestAddr l = c.args.ptr();
+    int held = heldRwlocks[l];
+    heldRwlocks.erase(l);
+    if (held == 2) rwlockAt(l).unlock();
+    else rwlockAt(l).unlock_shared();
+    c.ret(0);
+}
