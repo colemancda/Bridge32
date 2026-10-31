@@ -11,6 +11,7 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <runetype.h>
 #include <sys/mount.h>
+#include <sys/sysctl.h>
 #include <sys/utsname.h>
 
 #include <algorithm>
@@ -19,6 +20,8 @@
 #include <cstring>
 #include <ctime>
 #include <unistd.h>
+
+#include <unordered_map>
 #include <vector>
 
 using namespace b32;
@@ -61,18 +64,15 @@ B32_THUNK(_uname) {
     c.ret(0);
 }
 
-// int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
-B32_THUNK(_sysctlbyname) {
-    std::string name = c.mem.cstr(c.args.ptr());
-    GuestAddr out = c.args.ptr();
-    GuestAddr lenp = c.args.ptr();
+namespace {
+// The device profile's answers, by sysctl name; false when there's none.
+bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr lenp) {
     auto reply = [&](const void *data, uint32_t size) {
         if (lenp) {
             uint32_t room = c.mem.read<uint32_t>(lenp);
             if (out) c.mem.copyIn(out, data, std::min(room, size));
             c.mem.write<uint32_t>(lenp, size);
         }
-        c.ret(0);
     };
     if (name == "hw.machine" || name == "hw.model") {
         const char *s = name == "hw.machine" ? device::current().machine : device::current().model;
@@ -86,10 +86,72 @@ B32_THUNK(_sysctlbyname) {
     } else if (name == "hw.memsize") {
         int64_t bytes = int64_t(512) << 20;
         reply(&bytes, 8);
+    } else if (name == "hw.cputype" || name == "hw.cpusubtype") {
+        int32_t value = name == "hw.cputype" ? 12 /* CPU_TYPE_ARM */ : 9 /* CPU_SUBTYPE_ARM_V7 */;
+        reply(&value, 4);
+    } else if (name == "hw.physicalcpu_max" || name == "hw.logicalcpu_max") {
+        int32_t n = 2;
+        reply(&n, 4);
+    } else if (name == "kern.osversion") {
+        const char *build = "10B329";  // iOS 6.1.3
+        reply(build, uint32_t(std::strlen(build) + 1));
+    } else if (name == "hw.pagesize") {
+        int32_t bytes = 4096;
+        reply(&bytes, 4);
+    } else if (name == "hw.cpufrequency") {
+        int32_t hz = 1000000000;
+        reply(&hz, 4);
+    } else if (name == "kern.boottime") {
+        // struct timeval: two 32-bit words in the guest.
+        int32_t tv[2] = {int32_t(std::time(nullptr) - 3600), 0};
+        reply(tv, 8);
     } else {
-        log("sysctlbyname(%s) not supported", name.c_str());
-        c.ret(uint32_t(-1));
+        return false;
     }
+    return true;
+}
+}  // namespace
+
+// int sysctlbyname(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+B32_THUNK(_sysctlbyname) {
+    std::string name = c.mem.cstr(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    GuestAddr lenp = c.args.ptr();
+    if (sysctlAnswer(c, name, out, lenp)) {
+        c.ret(0);
+        return;
+    }
+    log("sysctlbyname(%s) not supported", name.c_str());
+    c.ret(uint32_t(-1));
+}
+
+// int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
+B32_THUNK(_sysctl) {
+    GuestAddr mib = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr out = c.args.ptr(), lenp = c.args.ptr();
+    int32_t top = length > 0 ? c.mem.read<int32_t>(mib) : 0, second = length > 1 ? c.mem.read<int32_t>(mib + 4) : 0;
+    static const std::unordered_map<int64_t, const char *> names = {
+        {int64_t(CTL_HW) << 32 | HW_MACHINE, "hw.machine"}, {int64_t(CTL_HW) << 32 | HW_MODEL, "hw.model"},
+        {int64_t(CTL_HW) << 32 | HW_NCPU, "hw.ncpu"}, {int64_t(CTL_HW) << 32 | HW_PHYSMEM, "hw.physmem"},
+        {int64_t(CTL_HW) << 32 | HW_USERMEM, "hw.usermem"}, {int64_t(CTL_HW) << 32 | HW_MEMSIZE, "hw.memsize"},
+        {int64_t(CTL_HW) << 32 | HW_PAGESIZE, "hw.pagesize"}, {int64_t(CTL_HW) << 32 | HW_CPU_FREQ, "hw.cpufrequency"},
+        {int64_t(CTL_KERN) << 32 | KERN_BOOTTIME, "kern.boottime"},
+    };
+    if (auto it = names.find(int64_t(top) << 32 | uint32_t(second)); it != names.end() && sysctlAnswer(c, it->second, out, lenp)) {
+        c.ret(0);
+        return;
+    }
+    if (top == CTL_KERN && second == KERN_PROC) {
+        // kinfo_proc, asked for to see whether a debugger is attached: all zeros
+        // (not traced) in whatever size the guest's struct is.
+        if (out && lenp) std::memset(c.mem.ptr<void>(out), 0, c.mem.read<uint32_t>(lenp));
+        c.ret(0);
+        return;
+    }
+    log("sysctl {%d, %d} not supported", top, second);
+    setGuestErrno(c, ENOENT);
+    c.ret(uint32_t(-1));
 }
 
 B32_THUNK(_getgid) { c.ret(getgid()); }
