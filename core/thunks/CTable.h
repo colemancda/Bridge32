@@ -44,6 +44,7 @@ void setBufferBoundQuery(BufferBoundQuery query);
 // The guest handles behind 'h': opaque host pointers as small integers.
 uint32_t hostHandle(void *pointer);
 void *hostPointer(uint32_t handle);
+bool isHostHandle(uint32_t handle);
 void forgetHostHandle(void *pointer);
 
 // For an `extern NSString *const` (or other object constant) the host
