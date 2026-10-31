@@ -11,6 +11,7 @@
 
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "MainQueue.h"
 #include "core/objc/Bridge.h"
 
 #import <Foundation/Foundation.h>
@@ -19,6 +20,8 @@
 #include <mutex>
 
 using namespace b32;
+
+MainQueueHold b32::mainQueueHold = nullptr;
 
 namespace {
 
@@ -115,6 +118,7 @@ B32_THUNK(_dispatch_async) {
     auto queue = object<dispatch_queue_t>(c);
     auto block = object<dispatch_block_t>(c);
     checkQueueAndBlock(c, "dispatch_async", queue, block);
+    if (mainQueueHold && mainQueueHold(queue, block)) return;
     dispatch_async(queue, block);
 }
 B32_THUNK(_dispatch_sync) {
@@ -148,7 +152,9 @@ B32_THUNK(_dispatch_apply) {
 
 B32_THUNK(_dispatch_async_f) {
     auto queue = object<dispatch_queue_t>(c);
-    dispatch_async_f(queue, guestFunction(c), callGuestFunction);
+    void *context = guestFunction(c);
+    if (mainQueueHold && mainQueueHold(queue, ^{ callGuestFunction(context); })) return;
+    dispatch_async_f(queue, context, callGuestFunction);
 }
 B32_THUNK(_dispatch_sync_f) {
     auto queue = object<dispatch_queue_t>(c);
