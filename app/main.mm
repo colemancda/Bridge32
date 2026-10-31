@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <string>
 
 int main(int argc, char **argv) {
     @autoreleasepool {
@@ -48,6 +49,25 @@ int main(int argc, char **argv) {
         // No AppKit window restoration: after a crash it would stop the next
         // launch at a modal "reopen windows?" alert, and games have no windows to restore.
         [NSUserDefaults.standardUserDefaults registerDefaults:@{@"ApplePersistenceIgnoreState" : @YES}];
+
+        // SDL in iOS-9-era games names an MFi controller by vendor, product and
+        // button mask, and its database only knows Apple's own MFi pads. Brand
+        // controllers the Mac reports through GameController (DualSense, DualShock 4,
+        // Xbox, Switch Pro) get mappings here, in the iOS 9 layout SDL reads
+        // them in: A B X Y, shoulders, pause; D-pad hat; sticks and triggers.
+        // A name checksum of 0000 matches any name. Not set if already in the environment.
+        {
+            const char *layout = "a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,start:b6,"
+                                 "dpup:h0.1,dpright:h0.2,dpdown:h0.4,dpleft:h0.8,"
+                                 "leftx:a0,lefty:a1,lefttrigger:a2,rightx:a3,righty:a4,righttrigger:a5,platform:iOS,";
+            std::string mappings;
+            for (auto [guid, name] : {std::pair{"050000004c050000e60c00004f066d00", "DualSense (MFi)"},
+                                      std::pair{"050000004c050000cc0900004f066d00", "DualShock 4 (MFi)"},
+                                      std::pair{"050000005e040000e00200004f066d00", "Xbox Controller (MFi)"},
+                                      std::pair{"050000007e050000092000004f066d00", "Switch Pro Controller (MFi)"}})
+                mappings += std::string(guid) + "," + name + "," + layout + "\n";
+            setenv("SDL_GAMECONTROLLERCONFIG", mappings.c_str(), 0);
+        }
         b32::uikit::configureHost();
         b32::gl::loadHostOpenGLES();
 
