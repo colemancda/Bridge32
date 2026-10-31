@@ -8,10 +8,13 @@
 
 #include <sys/time.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <unordered_map>
 
@@ -59,6 +62,17 @@ B32_THUNK(_sprintf) {
     c.ret(uint32_t(s.size()));
 }
 
+// The _FORTIFY_SOURCE variants carry the destination size, which the host
+// doesn't need to check again.
+B32_THUNK(___sprintf_chk) {
+    GuestAddr buf = c.args.ptr();
+    c.args.i32();  // flag
+    c.args.u32();  // destination size
+    std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
+    c.mem.copyIn(buf, s.c_str(), s.size() + 1);
+    c.ret(uint32_t(s.size()));
+}
+
 // --- stdlib ----------------------------------------------------------------
 
 B32_THUNK(_malloc) { c.ret(c.heap.alloc(c.args.u32())); }
@@ -76,6 +90,29 @@ B32_THUNK(_malloc_size) { c.ret(c.heap.sizeOf(c.args.ptr())); }
 B32_THUNK(_exit) { c.rt.exit(c.args.i32()); }
 B32_THUNK(__exit) { c.rt.exit(c.args.i32()); }
 B32_THUNK(_abort) { fatal("guest called abort() from 0x%08x", c.cpu.reg(Cpu::LR)); }
+
+B32_THUNK(_atol) { c.ret(uint32_t(std::atol(c.mem.cstr(c.args.ptr())))); }
+B32_THUNK(_atof) { c.retF64(std::atof(c.mem.cstr(c.args.ptr()))); }
+
+// long strtol(const char *, char **end, int base) and strtoul: long is 32-bit.
+B32_THUNK(_strtol) {
+    GuestAddr str = c.args.ptr(), endptr = c.args.ptr();
+    int base = c.args.i32();
+    const char *s = c.mem.cstr(str);
+    char *end;
+    long long value = std::strtoll(s, &end, base);
+    if (endptr) c.mem.write<uint32_t>(endptr, str + GuestAddr(end - s));
+    c.ret(uint32_t(int32_t(std::clamp<long long>(value, INT32_MIN, INT32_MAX))));
+}
+B32_THUNK(_strtoul) {
+    GuestAddr str = c.args.ptr(), endptr = c.args.ptr();
+    int base = c.args.i32();
+    const char *s = c.mem.cstr(str);
+    char *end;
+    unsigned long long value = std::strtoull(s, &end, base);
+    if (endptr) c.mem.write<uint32_t>(endptr, str + GuestAddr(end - s));
+    c.ret(uint32_t(std::min<unsigned long long>(value, UINT32_MAX)));
+}
 
 B32_THUNK(_atoi) { c.ret(uint32_t(std::atoi(c.mem.cstr(c.args.ptr())))); }
 
@@ -157,6 +194,78 @@ B32_THUNK(_memset) {
 B32_THUNK(_bzero) {
     GuestAddr dst = c.args.ptr();
     std::memset(hostPtr(c, dst), 0, c.args.u32());
+}
+
+B32_THUNK(___memcpy_chk) {
+    GuestAddr dst = c.args.ptr(), src = c.args.ptr();
+    std::memcpy(hostPtr(c, dst), hostPtr(c, src), c.args.u32());
+    c.ret(dst);
+}
+B32_THUNK(___memset_chk) {
+    GuestAddr dst = c.args.ptr();
+    int value = c.args.i32();
+    std::memset(hostPtr(c, dst), value, c.args.u32());
+    c.ret(dst);
+}
+B32_THUNK(___strcat_chk) {
+    GuestAddr dst = c.args.ptr();
+    std::strcat(hostPtr(c, dst), c.mem.cstr(c.args.ptr()));
+    c.ret(dst);
+}
+B32_THUNK(_strlcpy) {
+    char *dst = hostPtr(c, c.args.ptr());
+    const char *src = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::strlcpy(dst, src, c.args.u32())));
+}
+B32_THUNK(_strpbrk) {
+    GuestAddr s = c.args.ptr();
+    const char *accept = c.mem.cstr(c.args.ptr());
+    c.ret(guestPtr(c, s, hostPtr(c, s), std::strpbrk(hostPtr(c, s), accept)));
+}
+// char *strtok(char *str, const char *sep), with its position kept per thread
+// in guest terms.
+B32_THUNK(_strtok) {
+    static thread_local GuestAddr next = 0;
+    GuestAddr str = c.args.ptr();
+    const char *sep = c.mem.cstr(c.args.ptr());
+    GuestAddr p = str ? str : next;
+    if (!p) {
+        c.ret(0);
+        return;
+    }
+    p += GuestAddr(std::strspn(hostPtr(c, p), sep));
+    if (!*hostPtr(c, p)) {
+        next = 0;
+        c.ret(0);
+        return;
+    }
+    GuestAddr token = p;
+    p += GuestAddr(std::strcspn(hostPtr(c, p), sep));
+    if (*hostPtr(c, p)) {
+        *hostPtr(c, p) = '\0';
+        next = p + 1;
+    } else {
+        next = 0;
+    }
+    c.ret(token);
+}
+B32_THUNK(_strerror_r) {
+    int err = c.args.i32();
+    char *buf = hostPtr(c, c.args.ptr());
+    c.ret(uint32_t(::strerror_r(err, buf, c.args.u32())));
+}
+B32_THUNK(_perror) {
+    GuestAddr s = c.args.ptr();
+    std::perror(s ? c.mem.cstr(s) : nullptr);
+}
+B32_THUNK(_wcscpy) {
+    GuestAddr dst = c.args.ptr();
+    std::wcscpy(c.mem.ptr<wchar_t>(dst), c.mem.ptr<wchar_t>(c.args.ptr()));
+    c.ret(dst);
+}
+B32_THUNK(_wcscmp) {
+    const wchar_t *a = c.mem.ptr<wchar_t>(c.args.ptr());
+    c.ret(uint32_t(std::wcscmp(a, c.mem.ptr<wchar_t>(c.args.ptr()))));
 }
 
 B32_THUNK(_memcmp) {
@@ -326,6 +435,38 @@ B32_THUNK(_fgets) {
     int size = c.args.i32();
     char *r = std::fgets(c.mem.ptr<char>(buf), size, hostFile(c, c.args.ptr()));
     c.ret(r ? buf : 0);
+}
+
+B32_THUNK(_putc) {
+    int ch = c.args.i32();
+    c.ret(uint32_t(std::fputc(ch, hostFile(c, c.args.ptr()))));
+}
+B32_THUNK(_ungetc) {
+    int ch = c.args.i32();
+    c.ret(uint32_t(std::ungetc(ch, hostFile(c, c.args.ptr()))));
+}
+B32_THUNK(_fileno) { c.ret(uint32_t(::fileno(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_fdopen) {
+    int fd = c.args.i32();
+    c.ret(wrapFile(c, ::fdopen(fd, c.mem.cstr(c.args.ptr()))));
+}
+// int setvbuf(FILE *, char *buf, int mode, size_t size): the buffer is guest
+// memory, which never moves.
+B32_THUNK(_setvbuf) {
+    FILE *f = hostFile(c, c.args.ptr());
+    char *buf = hostPtr(c, c.args.ptr());
+    int mode = c.args.i32();
+    c.ret(uint32_t(std::setvbuf(f, buf, mode, c.args.u32())));
+}
+// Wide characters are 4 bytes in both ABIs.
+B32_THUNK(_getwc) { c.ret(uint32_t(std::getwc(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_putwc) {
+    wchar_t ch = wchar_t(c.args.u32());
+    c.ret(uint32_t(std::putwc(ch, hostFile(c, c.args.ptr()))));
+}
+B32_THUNK(_ungetwc) {
+    wint_t ch = c.args.u32();
+    c.ret(uint32_t(std::ungetwc(ch, hostFile(c, c.args.ptr()))));
 }
 
 B32_THUNK(_fprintf) {
