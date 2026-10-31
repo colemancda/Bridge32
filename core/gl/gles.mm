@@ -211,8 +211,13 @@ B32_OBJC_CONSTANT(kEAGLColorFormatSRGBA8)
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #include "core/objc/Dispatch.h"
+#include "core/uikit/UIKitSupport.h"
 #include <objc/message.h>
+
+#include <chrono>
+#include <optional>
 
 namespace {
 constexpr uint32_t GL_RENDERBUFFER = 0x8D41, GL_RENDERBUFFER_WIDTH = 0x8D42, GL_RENDERBUFFER_HEIGHT = 0x8D43;
@@ -256,8 +261,73 @@ std::vector<gl::PresentHook> &presentHooks() {
     return hooks;
 }
 
+// --- the frame rate counter (B32ShowFPS in Info.plist, or B32_SHOW_FPS=1) -----------------
+// A small label in the bottom left corner of the Mac window shows frames per
+// second and the slowest frame of the last half second, and every frame
+// slower than 50 ms is logged with the time, to line hitches up with what the
+// game was doing.
+
+bool showingFPS() {
+    static const bool enabled =
+        getenv("B32_SHOW_FPS") != nullptr || [[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32ShowFPS"] boolValue];
+    return enabled;
+}
+
+UIWindow *fpsWindow = nil;
+UILabel *fpsLabel = nil;
+
+void showFPS(double fps, double worstMs) {
+    NSString *text = [NSString stringWithFormat:@" %.0f fps · worst %.0f ms ", fps, worstMs];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindowScene *scene = uikit::guestKeyWindow().windowScene;
+        if (!scene) return;
+        if (!fpsWindow) {
+            fpsWindow = [[UIWindow alloc] initWithWindowScene:scene];
+            fpsWindow.windowLevel = UIWindowLevelAlert + 1;
+            fpsWindow.userInteractionEnabled = NO;
+            fpsWindow.backgroundColor = UIColor.clearColor;
+            fpsLabel = [[UILabel alloc] init];
+            fpsLabel.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightSemibold];
+            fpsLabel.textColor = UIColor.whiteColor;
+            fpsLabel.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+            [fpsWindow addSubview:fpsLabel];
+            fpsWindow.hidden = NO;
+        }
+        fpsLabel.text = text;
+        [fpsLabel sizeToFit];
+        CGRect bounds = scene.coordinateSpace.bounds;
+        fpsWindow.frame = CGRectMake(8, bounds.size.height - fpsLabel.bounds.size.height - 8, fpsLabel.bounds.size.width,
+                                     fpsLabel.bounds.size.height);
+        fpsLabel.frame = fpsWindow.bounds;
+    });
+}
+
+void countFrame() {
+    using Clock = std::chrono::steady_clock;
+    static std::optional<Clock::time_point> last, windowStart;
+    static int frames = 0;
+    static double worst = 0;
+    auto now = Clock::now();
+    if (last) {
+        double ms = std::chrono::duration<double, std::milli>(now - *last).count();
+        worst = std::max(worst, ms);
+        if (ms > 50) log("slow frame: %.0f ms", ms);
+    }
+    last = now;
+    if (!windowStart) windowStart = now;
+    frames++;
+    double elapsed = std::chrono::duration<double>(now - *windowStart).count();
+    if (elapsed >= 0.5) {
+        showFPS(frames / elapsed, worst);
+        frames = 0;
+        worst = 0;
+        windowStart = now;
+    }
+}
+
 bool watchingPresents(id receiver) {
-    return (dumpingFrames() || !presentHooks().empty()) && [receiver isKindOfClass:objc_getClass("EAGLContext")];
+    return (dumpingFrames() || showingFPS() || !presentHooks().empty()) &&
+           [receiver isKindOfClass:objc_getClass("EAGLContext")];
 }
 }  // namespace
 
@@ -266,6 +336,7 @@ void b32::gl::addPresentHook(PresentHook hook) { presentHooks().push_back(hook);
 // - (BOOL)presentRenderbuffer:(NSUInteger)target
 B32_OVERRIDE_WHEN(watchingPresents, "presentRenderbuffer:") {
     for (gl::PresentHook hook : presentHooks()) hook(o.c);
+    if (showingFPS()) countFrame();
     static uint64_t frames = 0;
     if (dumpingFrames() && frames++ % 60 == 0) dumpFrame();
     NSUInteger target = o.args.u32();
