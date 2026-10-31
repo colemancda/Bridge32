@@ -13,6 +13,7 @@
 // so calling it runs the host implementation the method had at that moment,
 // as swizzling code expects when it calls "the original".
 
+#include "Blocks.h"
 #include "Bridge.h"
 
 #include "core/Log.h"
@@ -300,3 +301,187 @@ B32_THUNK(_NSStringFromProtocol) {
     c.ret(protocol ? bridge(c).toGuest(@(c.mem.cstr(c.mem.read<uint32_t>(protocol + 4)))) : 0);
 }
 B32_THUNK(_NSProtocolFromString) { c.ret(0); }
+
+// --- blocks as methods ----------------------------------------------------------------------------
+
+// IMP imp_implementationWithBlock(id block): an IMP that calls the block with
+// self in place of _cmd, as the runtime's does. A small ARM stub:
+//     mov r1, r0          ; self moves to the block's first argument
+//     ldr r0, [pc]        ; the block
+//     ldr pc, [r0, #12]   ; its invoke
+//     .word block
+B32_THUNK(_imp_implementationWithBlock) {
+    GuestAddr block = objc::blocks::copy(bridge(c), c.args.ptr());
+    GuestAddr stub = c.heap.alloc(16);
+    const uint32_t code[4] = {0xe1a01000, 0xe59f0000, 0xe590f00c, block};
+    c.mem.copyIn(stub, code, sizeof code);
+    c.ret(stub);
+}
+B32_THUNK(_imp_getBlock) {
+    GuestAddr imp = c.args.ptr();
+    c.ret(c.mem.read<uint32_t>(imp) == 0xe1a01000 ? c.mem.read<uint32_t>(imp + 12) : 0);
+}
+B32_THUNK(_imp_removeBlock) { c.ret(0); }
+
+B32_THUNK(_class_isMetaClass) {
+    ClassInfo *cls = classArg(c);
+    c.ret(cls && cls->isMeta ? 1 : 0);
+}
+B32_THUNK(_sel_isEqual) {
+    GuestAddr a = c.args.u32();
+    c.ret(a == c.args.u32() ? 1 : 0);
+}
+
+// objc_property_t *class_copyPropertyList(Class, unsigned *outCount): the
+// class's own declared properties (class_ro_t baseProperties at 36), each a
+// guest property_t { name, attributes }.
+B32_THUNK(_class_copyPropertyList) {
+    ClassInfo *cls = classArg(c);
+    GuestAddr outCount = c.args.ptr();
+    std::vector<GuestAddr> properties;
+    if (cls && cls->isGuest) {
+        GuestAddr ro = c.mem.read<uint32_t>(cls->addr + 16) & ~3u;
+        if (GuestAddr list = c.mem.read<uint32_t>(ro + 36)) {
+            uint32_t entsize = c.mem.read<uint32_t>(list), count = c.mem.read<uint32_t>(list + 4);
+            for (uint32_t i = 0; i < count; i++) properties.push_back(list + 8 + i * entsize);
+        }
+    }
+    if (outCount) c.mem.write<uint32_t>(outCount, uint32_t(properties.size()));
+    if (properties.empty()) {
+        c.ret(0);
+        return;
+    }
+    GuestAddr array = c.heap.calloc(uint32_t(properties.size() + 1), 4);
+    for (size_t i = 0; i < properties.size(); i++) c.mem.write<uint32_t>(array + uint32_t(i) * 4, properties[i]);
+    c.ret(array);
+}
+
+// --- protocols ---------------------------------------------------------------------------------------
+// A guest protocol_t: { isa, name, protocols, instanceMethods, classMethods,
+// optionalInstanceMethods, optionalClassMethods, instanceProperties, ... };
+// method lists are { entsize, count, { SEL, types, IMP }... }. A protocol that
+// stands for a host one has only its name; its details come from the host.
+
+namespace {
+constexpr uint32_t kProtoName = 4, kProtoProtocols = 8, kProtoInstance = 12, kProtoClass = 16;
+constexpr uint32_t kProtoOptionalInstance = 20, kProtoOptionalClass = 24;
+
+std::string protocolName(Call &c, GuestAddr p) { return c.mem.cstr(c.mem.read<uint32_t>(p + kProtoName)); }
+
+uint32_t methodListOffset(bool required, bool instance) {
+    return required ? (instance ? kProtoInstance : kProtoClass) : (instance ? kProtoOptionalInstance : kProtoOptionalClass);
+}
+
+// The protocol's own list of adopted protocols: { count, protocol_t *... }.
+std::vector<GuestAddr> adopted(Call &c, GuestAddr p) {
+    std::vector<GuestAddr> result;
+    if (GuestAddr list = c.mem.read<uint32_t>(p + kProtoProtocols)) {
+        uint32_t count = c.mem.read<uint32_t>(list);
+        for (uint32_t i = 0; i < count; i++) result.push_back(c.mem.read<uint32_t>(list + 4 + i * 4));
+    } else if (Protocol *host = objc_getProtocol(protocolName(c, p).c_str())) {
+        unsigned count = 0;
+        Protocol *__unsafe_unretained *list = protocol_copyProtocolList(host, &count);
+        for (unsigned i = 0; i < count; i++) result.push_back(bridge(c).toGuest((id)list[i]));
+        free(list);
+    }
+    return result;
+}
+}  // namespace
+
+B32_THUNK(_objc_getProtocol) { c.ret(bridge(c).protocolNamed(c.mem.cstr(c.args.ptr()))); }
+
+// struct objc_method_description protocol_getMethodDescription(Protocol *, SEL, BOOL required,
+//     BOOL instance): { SEL name; char *types }, 8 bytes, returned through r0.
+B32_THUNK(_protocol_getMethodDescription) {
+    GuestAddr out = c.args.ptr(), p = c.args.ptr(), sel = c.args.u32();
+    bool required = c.args.u32() != 0, instance = c.args.u32() != 0;
+    c.mem.write<uint32_t>(out, 0);
+    c.mem.write<uint32_t>(out + 4, 0);
+    if (!p) return;
+    if (GuestAddr list = c.mem.read<uint32_t>(p + methodListOffset(required, instance))) {
+        uint32_t entsize = c.mem.read<uint32_t>(list) & ~3u, count = c.mem.read<uint32_t>(list + 4);
+        for (uint32_t i = 0; i < count; i++) {
+            GuestAddr m = list + 8 + i * entsize;
+            if (bridge(c).guestSel(c.mem.cstr(c.mem.read<uint32_t>(m))) != sel) continue;
+            c.mem.write<uint32_t>(out, sel);
+            c.mem.write<uint32_t>(out + 4, c.mem.read<uint32_t>(m + 4));
+            return;
+        }
+        return;
+    }
+    if (Protocol *host = objc_getProtocol(protocolName(c, p).c_str())) {
+        objc_method_description d = protocol_getMethodDescription(host, bridge(c).hostSel(sel), required, instance);
+        if (d.name) {
+            c.mem.write<uint32_t>(out, sel);
+            c.mem.write<uint32_t>(out + 4, d.types ? c.rt.internString(d.types) : 0);
+        }
+    }
+}
+
+// struct objc_method_description *protocol_copyMethodDescriptionList(Protocol *, BOOL required,
+//     BOOL instance, unsigned *outCount)
+B32_THUNK(_protocol_copyMethodDescriptionList) {
+    GuestAddr p = c.args.ptr();
+    bool required = c.args.u32() != 0, instance = c.args.u32() != 0;
+    GuestAddr outCount = c.args.ptr();
+    std::vector<std::pair<GuestAddr, GuestAddr>> descriptions;  // SEL, types
+    if (p) {
+        if (GuestAddr list = c.mem.read<uint32_t>(p + methodListOffset(required, instance))) {
+            uint32_t entsize = c.mem.read<uint32_t>(list) & ~3u, count = c.mem.read<uint32_t>(list + 4);
+            for (uint32_t i = 0; i < count; i++) {
+                GuestAddr m = list + 8 + i * entsize;
+                descriptions.push_back({bridge(c).guestSel(c.mem.cstr(c.mem.read<uint32_t>(m))), c.mem.read<uint32_t>(m + 4)});
+            }
+        } else if (Protocol *host = objc_getProtocol(protocolName(c, p).c_str())) {
+            unsigned count = 0;
+            objc_method_description *list = protocol_copyMethodDescriptionList(host, required, instance, &count);
+            for (unsigned i = 0; i < count; i++)
+                descriptions.push_back({bridge(c).guestSel(list[i].name), list[i].types ? c.rt.internString(list[i].types) : 0});
+            free(list);
+        }
+    }
+    if (outCount) c.mem.write<uint32_t>(outCount, uint32_t(descriptions.size()));
+    if (descriptions.empty()) {
+        c.ret(0);
+        return;
+    }
+    GuestAddr array = c.heap.calloc(uint32_t(descriptions.size() + 1), 8);
+    for (size_t i = 0; i < descriptions.size(); i++) {
+        c.mem.write<uint32_t>(array + uint32_t(i) * 8, descriptions[i].first);
+        c.mem.write<uint32_t>(array + uint32_t(i) * 8 + 4, descriptions[i].second);
+    }
+    c.ret(array);
+}
+
+// Protocol **protocol_copyProtocolList(Protocol *, unsigned *outCount)
+B32_THUNK(_protocol_copyProtocolList) {
+    GuestAddr p = c.args.ptr(), outCount = c.args.ptr();
+    std::vector<GuestAddr> list = p ? adopted(c, p) : std::vector<GuestAddr>{};
+    if (outCount) c.mem.write<uint32_t>(outCount, uint32_t(list.size()));
+    if (list.empty()) {
+        c.ret(0);
+        return;
+    }
+    GuestAddr array = c.heap.calloc(uint32_t(list.size() + 1), 4);
+    for (size_t i = 0; i < list.size(); i++) c.mem.write<uint32_t>(array + uint32_t(i) * 4, list[i]);
+    c.ret(array);
+}
+
+// BOOL protocol_conformsToProtocol(Protocol *, Protocol *other): by name, through adopted protocols.
+B32_THUNK(_protocol_conformsToProtocol) {
+    GuestAddr p = c.args.ptr(), other = c.args.ptr();
+    if (!p || !other) {
+        c.ret(0);
+        return;
+    }
+    std::string want = protocolName(c, other);
+    std::vector<GuestAddr> pending = {p};
+    for (size_t i = 0; i < pending.size() && i < 256; i++) {
+        if (protocolName(c, pending[i]) == want) {
+            c.ret(1);
+            return;
+        }
+        for (GuestAddr a : adopted(c, pending[i])) pending.push_back(a);
+    }
+    c.ret(0);
+}
