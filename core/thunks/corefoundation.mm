@@ -14,6 +14,7 @@
 #include <objc/runtime.h>
 
 #include <cstring>
+#include <vector>
 #include <unordered_map>
 #include <mutex>
 #include <ffi/ffi.h>
@@ -46,6 +47,34 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFURLCreateWithFileSystemPath", "o:ooiu"}, {"CFBundleGetMainBundle", "o:"},
     {"CFBundleCopyResourceURL", "o:oooo"}, {"CFBundleGetValueForInfoDictionaryKey", "o:oo"},
     {"CFLocaleCopyCurrent", "o:"}, {"CFLocaleGetIdentifier", "o:o"}, {"CFLocaleGetSystem", "o:"},
+    // Strings, locales, time zones, calendars and formatters (Adobe AIR).
+    {"CFStringNormalize", "v:oz"}, {"CFStringCreateWithBytes", "o:opzuu"}, {"CFStringCreateWithCharacters", "o:opz"},
+    {"CFStringGetCharacterAtIndex", "u:oz"}, {"CFStringGetSystemEncoding", "u:"},
+    {"CFStringCompareWithOptionsAndLocale", "z:oozzzo"}, {"CFStringConvertEncodingToWindowsCodepage", "u:u"},
+    {"CFStringConvertWindowsCodepageToEncoding", "u:u"}, {"CFAllocatorGetDefault", "o:"}, {"CFDataCreateCopy", "o:oo"},
+    {"CFLocaleCreate", "o:oo"}, {"CFLocaleCreateCopy", "o:oo"}, {"CFLocaleCopyAvailableLocaleIdentifiers", "o:"},
+    {"CFTimeZoneCopyDefault", "o:"}, {"CFTimeZoneCopySystem", "o:"}, {"CFTimeZoneCreateWithTimeIntervalFromGMT", "o:od"},
+    {"CFTimeZoneGetSecondsFromGMT", "d:od"}, {"CFTimeZoneIsDaylightSavingTime", "B:od"},
+    {"CFCalendarCreateWithIdentifier", "o:oo"}, {"CFCalendarGetFirstWeekday", "z:o"}, {"CFCalendarSetTimeZone", "v:oo"},
+    {"CFDateFormatterCreate", "o:oozz"}, {"CFDateFormatterSetFormat", "v:oo"}, {"CFDateFormatterGetFormat", "o:o"},
+    {"CFDateFormatterCopyProperty", "o:oo"}, {"CFDateFormatterSetProperty", "v:ooo"},
+    {"CFDateFormatterCreateStringWithAbsoluteTime", "o:ood"},
+    {"CFNumberFormatterCreate", "o:ooz"}, {"CFNumberFormatterCopyProperty", "o:oo"},
+    {"CFNumberFormatterSetProperty", "v:ooo"}, {"CFNumberFormatterCreateStringWithValue", "o:oozp"},
+    {"CFBundleGetBundleWithIdentifier", "o:o"}, {"CFURLCreateWithString", "o:ooo"}, {"CFURLCopyNetLocation", "o:o"},
+    // CFNetwork: proxies, HTTP messages and streams.
+    {"CFNetworkCopySystemProxySettings", "o:"}, {"CFHTTPMessageCreateRequest", "o:oooo"},
+    {"CFHTTPMessageSetHeaderFieldValue", "v:ooo"}, {"CFHTTPMessageSetBody", "v:oo"},
+    {"CFHTTPMessageCopyAllHeaderFields", "o:o"}, {"CFHTTPMessageGetResponseStatusCode", "z:o"},
+    {"CFHTTPMessageGetTypeID", "z:"}, {"CFReadStreamCreateForHTTPRequest", "o:oo"},
+    {"CFReadStreamCreateForStreamedHTTPRequest", "o:ooo"}, {"CFReadStreamCreateWithBytesNoCopy", "o:opzo"},
+    {"CFReadStreamOpen", "B:o"}, {"CFReadStreamClose", "v:o"}, {"CFReadStreamGetStatus", "z:o"},
+    {"CFReadStreamHasBytesAvailable", "B:o"}, {"CFReadStreamRead", "z:opz"}, {"CFReadStreamCopyProperty", "o:oo"},
+    {"CFReadStreamSetProperty", "B:ooo"}, {"CFReadStreamCopyError", "o:o"}, {"CFReadStreamScheduleWithRunLoop", "v:ooo"},
+    {"CFWriteStreamOpen", "B:o"}, {"CFWriteStreamClose", "v:o"}, {"CFWriteStreamWrite", "z:opz"},
+    {"CFWriteStreamCanAcceptBytes", "B:o"}, {"CFWriteStreamSetProperty", "B:ooo"}, {"CFWriteStreamCopyError", "o:o"},
+    {"CFRunLoopAddSource", "v:ooo"}, {"CFRunLoopRemoveSource", "v:ooo"}, {"CFRunLoopAddObserver", "v:ooo"},
+    {"CFRunLoopRemoveObserver", "v:ooo"}, {"CFRunLoopObserverInvalidate", "v:o"},
     {"CFStringGetFastestEncoding", "u:o"}, {"CFStringGetSmallestEncoding", "u:o"},
     {"CFStringGetMaximumSizeForEncoding", "z:zu"}, {"CFStringGetCStringPtr", "s:ou"},
     {"CFStringConvertEncodingToNSStringEncoding", "z:u"}, {"CFStringConvertNSStringEncodingToEncoding", "u:z"},
@@ -517,3 +546,72 @@ B32_THUNK(_CFUUIDGetUUIDBytes) {
 B32_THUNK(_CFNotificationCenterAddObserver) {}
 B32_THUNK(_CFNotificationCenterRemoveObserver) {}
 B32_THUNK(_CFNotificationCenterRemoveEveryObserver) {}
+
+// CFIndex CFStringGetBytes(CFStringRef, CFRange, CFStringEncoding, UInt8 lossByte,
+//     Boolean isExternalRepresentation, UInt8 *buffer, CFIndex maxBufLen, CFIndex *usedBufLen)
+B32_THUNK(_CFStringGetBytes) {
+    CFStringRef string = (CFStringRef)bridge(c).toHost(c.args.ptr());
+    CFRange r = range(c);
+    CFStringEncoding encoding = c.args.u32();
+    UInt8 lossByte = UInt8(c.args.u32());
+    Boolean external = c.args.u32() != 0;
+    GuestAddr buffer = c.args.ptr();
+    CFIndex maxLength = c.args.i32();
+    GuestAddr used = c.args.ptr();
+    CFIndex usedLength = 0;
+    CFIndex converted = CFStringGetBytes(string, r, encoding, lossByte, external,
+                                         buffer ? c.mem.ptr<UInt8>(buffer) : nullptr, maxLength, &usedLength);
+    if (used) c.mem.write<int32_t>(used, int32_t(usedLength));
+    c.ret(uint32_t(converted));
+}
+
+// CFIndex CFDictionaryGetCountOfKey(CFDictionaryRef, const void *key)
+B32_THUNK(_CFDictionaryGetCountOfKey) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    c.ret(uint32_t(CFDictionaryGetCountOfKey((CFDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawKeys, c.args.ptr()))));
+}
+
+// void CFDictionaryApplyFunction(CFDictionaryRef, CFDictionaryApplierFunction, void *context):
+// calls the guest's function(key, value, context) for each entry.
+B32_THUNK(_CFDictionaryApplyFunction) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    GuestAddr fn = c.args.ptr(), context = c.args.ptr();
+    int flags = rawFlags(dict);
+    CFIndex count = CFDictionaryGetCount((CFDictionaryRef)dict);
+    std::vector<const void *> keys(static_cast<size_t>(count)), values(static_cast<size_t>(count));
+    CFDictionaryGetKeysAndValues((CFDictionaryRef)dict, keys.data(), values.data());
+    for (CFIndex i = 0; i < count; i++)
+        c.cpu.call(fn, {guestValue(c, flags & kRawKeys, keys[size_t(i)]), guestValue(c, flags & kRawValues, values[size_t(i)]),
+                        context});
+}
+
+// --- run loop observers ---------------------------------------------------------------------
+
+namespace {
+struct GuestObserver {
+    GuestAddr callout;
+    GuestAddr info;
+    GuestAddr observer;  // the guest's reference to the observer
+};
+
+void observerFired(CFRunLoopObserverRef, CFRunLoopActivity activity, void *data) {
+    auto *o = static_cast<GuestObserver *>(data);
+    Runtime::threadCpu().call(o->callout, {o->observer, uint32_t(activity), o->info});
+}
+}  // namespace
+
+// CFRunLoopObserverRef CFRunLoopObserverCreate(CFAllocatorRef, CFOptionFlags activities,
+//     Boolean repeats, CFIndex order, CFRunLoopObserverCallBack, CFRunLoopObserverContext *)
+// The guest context is { version, info, retain, release, copyDescription }; only info is kept.
+B32_THUNK(_CFRunLoopObserverCreate) {
+    c.args.ptr();
+    CFOptionFlags activities = c.args.u32();
+    Boolean repeats = c.args.u32() != 0;
+    CFIndex order = c.args.i32();
+    auto *o = new GuestObserver{c.args.ptr(), 0, 0};
+    if (GuestAddr context = c.args.ptr()) o->info = c.mem.read<uint32_t>(context + 4);
+    CFRunLoopObserverContext context = {0, o, nullptr, nullptr, nullptr};
+    CFRunLoopObserverRef observer = CFRunLoopObserverCreate(nullptr, activities, repeats, order, observerFired, &context);
+    o->observer = bridge(c).toGuest((id)observer);
+    c.ret(o->observer);
+}
