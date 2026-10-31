@@ -166,6 +166,15 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 
 @implementation B32SceneDelegate
 
+// Resizing the Mac window, full screen included.
+- (void)windowScene:(UIWindowScene *)windowScene didUpdateCoordinateSpace:(id<UICoordinateSpace>)previous
+    interfaceOrientation:(UIInterfaceOrientation)orientation traitCollection:(UITraitCollection *)traits {
+    // UIKit doesn't resize the windows along with the scene; the backdrop
+    // follows it and refits the guest.
+    backdrop.window.frame = windowScene.coordinateSpace.bounds;
+    layoutGuestWindows();
+}
+
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     UIWindowScene *windowScene = (UIWindowScene *)scene;
     guestScene = windowScene;
