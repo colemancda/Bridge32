@@ -31,11 +31,14 @@ namespace {
 
 uint32_t wordsFor(uint32_t bytes) { return (bytes + 3) / 4; }
 
-// '^{__CFString=}' and friends: opaque CF/CG struct pointers are objects.
+// '^{__CFString=}' and friends: opaque CF-style struct pointers are objects.
 bool isCFRef(const Type &t) {
     if (t.code != '^' || !t.pointee || !t.pointee->isStruct() || !t.pointee->fields.empty()) return false;
     const std::string &n = t.pointee->name;
-    return n.rfind("__CF", 0) == 0 || n.rfind("CG", 0) == 0 || n.rfind("__CG", 0) == 0 || n.rfind("__CT", 0) == 0;
+    // CoreFoundation-style types from CF, CG, CoreText, Security, SystemConfiguration, CoreVideo, CoreMedia.
+    for (const char *prefix : {"__CF", "CG", "__CG", "__CT", "__Sec", "__SC", "__CV", "opaqueCM"})
+        if (n.rfind(prefix, 0) == 0) return true;
+    return false;
 }
 
 // Pointers whose target bytes are identical in both ABIs pass straight
@@ -182,6 +185,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             return;
         }
         if (!start) fatal("-%s sent to 0x%08x, which is not an object (from 0x%08x)", selName(sel), receiver, cpu.reg(Cpu::LR));
+        if (!start->initialized && start->isGuest) ensureInitialized(start);
     }
 
     ClassInfo *info = start;
@@ -369,7 +373,9 @@ void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
     bool guestStret = sig.ret.isStruct() && retSize > 4;
     GuestAddr retBuf = guestStret ? rt.heap().alloc(retSize) : 0;
     if (guestStret) words.push_back(retBuf);
-    words.push_back(bridge.toGuest(*static_cast<id *>(args[0])));
+    GuestAddr self = bridge.toGuest(*static_cast<id *>(args[0]));
+    if (ClassInfo *cls = bridge.classOf(self); cls && cls->isGuest && !cls->initialized) bridge.ensureInitialized(cls);
+    words.push_back(self);
     words.push_back(t->sel);
     for (size_t i = 2; i < sig.args.size(); i++) {
         const Type &type = sig.args[i];
