@@ -8,10 +8,13 @@
 #include "core/Runtime.h"
 #include "core/thunks/Format.h"
 
+#import <CoreData/CoreData.h>
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+
+#include <cstring>
 
 using namespace b32;
 using namespace b32::objc;
@@ -172,4 +175,79 @@ B32_THUNK(_CATransform3DMakeTranslation) {
     CATransform3D t = CATransform3DMakeTranslation(tx, ty, tz);
     const CGFloat *v = &t.m11;
     for (int i = 0; i < 16; i++) c.mem.write<float>(out + uint32_t(i) * 4, float(v[i]));
+}
+
+// CoreData's merge policies: objects the host constant lookup doesn't take for ones.
+B32_DATA(_NSErrorMergePolicy, 4) { rt.mem().write<uint32_t>(addr, rt.bridge().toGuest(NSErrorMergePolicy)); }
+B32_DATA(_NSOverwriteMergePolicy, 4) { rt.mem().write<uint32_t>(addr, rt.bridge().toGuest(NSOverwriteMergePolicy)); }
+B32_DATA(_NSRollbackMergePolicy, 4) { rt.mem().write<uint32_t>(addr, rt.bridge().toGuest(NSRollbackMergePolicy)); }
+B32_DATA(_NSMergeByPropertyObjectTrumpMergePolicy, 4) {
+    rt.mem().write<uint32_t>(addr, rt.bridge().toGuest(NSMergeByPropertyObjectTrumpMergePolicy));
+}
+B32_DATA(_NSMergeByPropertyStoreTrumpMergePolicy, 4) {
+    rt.mem().write<uint32_t>(addr, rt.bridge().toGuest(NSMergeByPropertyStoreTrumpMergePolicy));
+}
+
+// GLKMatrix4Identity: sixteen floats in both ABIs.
+B32_DATA(_GLKMatrix4Identity, 64) {
+    for (uint32_t i = 0; i < 4; i++) rt.mem().write<float>(addr + i * 20, 1.0f);
+}
+
+// CATransform3D CATransform3DMakeScale(CGFloat sx, CGFloat sy, CGFloat sz): through r0.
+B32_THUNK(_CATransform3DMakeScale) {
+    GuestAddr out = c.args.ptr();
+    float sx = c.args.f32(), sy = c.args.f32(), sz = c.args.f32();
+    CATransform3D t = CATransform3DMakeScale(sx, sy, sz);
+    const CGFloat *v = &t.m11;
+    for (int i = 0; i < 16; i++) c.mem.write<float>(out + uint32_t(i) * 4, float(v[i]));
+}
+
+// --- CMTime: { int64 value; int32 timescale; uint32 flags; int64 epoch }, 24 bytes, same
+// layout in both ABIs; passed in six words and returned through r0 ---------------------------------
+
+namespace {
+CMTime cmtime(Call &c) {
+    CMTime t;
+    uint32_t words[6];
+    for (auto &w : words) w = c.args.u32();
+    std::memcpy(&t, words, sizeof t);
+    return t;
+}
+void returnTime(Call &c, GuestAddr out, CMTime t) { c.mem.copyIn(out, &t, sizeof t); }
+}  // namespace
+
+B32_THUNK(_CMTimeMake) {
+    GuestAddr out = c.args.ptr();
+    int64_t value = int64_t(c.args.u64());
+    returnTime(c, out, CMTimeMake(value, c.args.i32()));
+}
+B32_THUNK(_CMTimeMakeWithSeconds) {
+    GuestAddr out = c.args.ptr();
+    double seconds = c.args.f64();
+    returnTime(c, out, CMTimeMakeWithSeconds(seconds, c.args.i32()));
+}
+B32_THUNK(_CMTimeGetSeconds) { c.retF64(CMTimeGetSeconds(cmtime(c))); }
+B32_THUNK(_CMTimeAdd) {
+    GuestAddr out = c.args.ptr();
+    CMTime a = cmtime(c);
+    returnTime(c, out, CMTimeAdd(a, cmtime(c)));
+}
+B32_THUNK(_CMTimeSubtract) {
+    GuestAddr out = c.args.ptr();
+    CMTime a = cmtime(c);
+    returnTime(c, out, CMTimeSubtract(a, cmtime(c)));
+}
+B32_THUNK(_CMTimeMaximum) {
+    GuestAddr out = c.args.ptr();
+    CMTime a = cmtime(c);
+    returnTime(c, out, CMTimeMaximum(a, cmtime(c)));
+}
+B32_THUNK(_CMTimeMultiply) {
+    GuestAddr out = c.args.ptr();
+    CMTime a = cmtime(c);
+    returnTime(c, out, CMTimeMultiply(a, c.args.i32()));
+}
+B32_THUNK(_CMTimeCompare) {
+    CMTime a = cmtime(c);
+    c.ret(uint32_t(CMTimeCompare(a, cmtime(c))));
 }
