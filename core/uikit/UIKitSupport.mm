@@ -185,7 +185,6 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 // NSMainNibFile, see B32NibAppDelegate). Done when the scene connects, as
 // UIKit would: the initial view controller in a window that becomes the
 // app delegate's and key.
-static void loadMainStoryboard() {
 // The value of an Info.plist key for the guest's device (`key~iphone` or
 // `key~ipad`), else the plain key. Read from the plist itself: NSBundle
 // applies the Mac's own (iPad) suffix to the plain key.
@@ -196,6 +195,7 @@ static NSString *deviceInfoValue(NSString *key) {
     return info[[key stringByAppendingString:suffix]] ?: info[key];
 }
 
+static void loadMainStoryboard() {
     NSString *name = deviceInfoValue(@"UIMainStoryboardFile");
     if (!name) return;
     UIStoryboard *storyboard = [UIStoryboard storyboardWithName:name bundle:NSBundle.mainBundle];
