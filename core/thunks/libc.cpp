@@ -400,17 +400,38 @@ namespace {
 constexpr GuestAddr kDlHandle = 0xD1000000;  // any non-null value; never dereferenced
 }  // namespace
 
+// Guest libraries get real handles (their index in the runtime's library
+// list, so they're small numbers); anything else, a system library, gets
+// kDlHandle, and dlsym on it searches every symbol the loader would bind.
+namespace {
+thread_local GuestAddr dlErrorMessage = 0;
+constexpr uint32_t kMaxLibraryHandle = 0x10000;
+}  // namespace
+
 B32_THUNK(_dlopen) {
     GuestAddr path = c.args.ptr();
-    log("dlopen(%s)", path ? c.mem.cstr(path) : "NULL");
-    c.ret(kDlHandle);
+    if (!path) {
+        c.ret(kDlHandle);
+        return;
+    }
+    std::string name = c.mem.cstr(path);
+    if (name.rfind("/System/", 0) == 0 || name.rfind("/usr/lib/", 0) == 0) {
+        log("dlopen(%s)", name.c_str());
+        c.ret(kDlHandle);
+        return;
+    }
+    uint32_t handle = c.rt.openLibrary(name, c.cpu);
+    log("dlopen(%s) -> %s", name.c_str(), handle ? "guest library" : "not found");
+    if (!handle) dlErrorMessage = c.rt.internString("dlopen(" + name + "): image not found");
+    c.ret(handle);
 }
 
 B32_THUNK(_dlsym) {
-    c.args.ptr();  // handle: every library shares the one thunk table
+    uint32_t handle = c.args.u32();
     std::string name = std::string("_") + c.mem.cstr(c.args.ptr());
-    GuestAddr addr = c.rt.lookUp(name);
+    GuestAddr addr = handle && handle < kMaxLibraryHandle ? c.rt.librarySymbol(handle, name) : c.rt.lookUp(name);
     log("dlsym(%s) -> 0x%08x", name.c_str(), addr);
+    if (!addr) dlErrorMessage = c.rt.internString("dlsym: symbol not found: " + name);
     c.ret(addr);
 }
 
@@ -437,7 +458,10 @@ B32_THUNK(_dladdr) {
     c.mem.write<uint32_t>(info + 12, 0);
     c.ret(1);
 }
-B32_THUNK(_dlerror) { c.ret(0); }
+B32_THUNK(_dlerror) {
+    c.ret(dlErrorMessage);
+    dlErrorMessage = 0;
+}
 
 // --- stdio streams ------------------------------------------------------------
 // A guest FILE * is a zeroed guest block (sizeof(FILE) on 32-bit iOS) that
