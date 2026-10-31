@@ -8,6 +8,7 @@
 // closures that convert the arguments back and run the guest IMP.
 
 #include "Bridge.h"
+#include "Blocks.h"
 #include "Dispatch.h"
 
 #include "core/Log.h"
@@ -69,9 +70,9 @@ struct HostCall {
 HostCall &hostCall(const std::string &types, const char *selName) {
     static std::recursive_mutex lock;
     static std::unordered_map<std::string, std::unique_ptr<HostCall>> cache;
-    // Selectors that take or return long long: the only 'q's that stay 64-bit
-    // until the signature database exists.
-    bool wide = std::strstr(selName, "LongLong") != nullptr;
+    // Selectors that take or return long long or int64_t (encodeInt64:forKey:):
+    // the only 'q's that stay 64-bit until the signature database exists.
+    bool wide = std::strstr(selName, "LongLong") != nullptr || std::strstr(selName, "Int64") != nullptr;
     std::string key = (wide ? "W" : "N") + types;
     std::lock_guard guard(lock);
     if (auto it = cache.find(key); it != cache.end()) return *it->second;
@@ -121,6 +122,11 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             return;
         }
         start = classOf(receiver);
+        if (!start && blocks::isGuestBlock(*this, receiver)) {
+            // Blocks answer copy, retain, release... as their host blocks.
+            hostDispatch(c, receiver, sel, nullptr, stret);
+            return;
+        }
         if (!start) fatal("-%s sent to 0x%08x, which is not an object (from 0x%08x)", selName(sel), receiver, cpu.reg(Cpu::LR));
     }
 
@@ -223,6 +229,13 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
 
     const Type &r = sig.ret;
     if (r.code == 'v') return;
+    if (r.code == '^' && !isCFRef(r)) {
+        auto *p = *reinterpret_cast<uint8_t **>(result);
+        uint8_t *base = mem.base();
+        if (p && (p < base || p >= base + (uint64_t(1) << 32)))
+            fatal("%c[%s %s] returned host pointer %p (type %s), which the guest can't use",
+                  object_isClass(recv) ? '+' : '-', object_getClassName(recv), name, p, types.c_str());
+    }
     if (r.code == '*') {  // C strings: copy out, owned by the receiver
         c.ret(guestCString(*reinterpret_cast<const char **>(result), recv));
         return;
