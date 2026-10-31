@@ -14,6 +14,7 @@
 #include "core/objc/Dispatch.h"
 
 #import <UIKit/UIKit.h>
+#include <algorithm>
 #include <crt_externs.h>
 #include <objc/runtime.h>
 
@@ -48,13 +49,31 @@ CGSize sceneSize() {
     return guestRotation() != 0 ? CGSizeMake(screenHeight(), screenWidth()) : CGSizeMake(screenWidth(), screenHeight());
 }
 
-// Turns a guest window to match the device orientation, centered in the scene.
-void orient(UIWindow *window) {
-    if (guestRotation() == 0) return;
-    window.transform = CGAffineTransformMakeRotation(guestRotation());
+NSHashTable<UIWindow *> *guestWindows = nil;
+UIView *backdrop = nil;
+
+// Fits every guest window into the Mac window: turned to the device
+// orientation, scaled to fill the space below the title bar (Catalyst windows
+// run under it, and CoD's pause button lives in that corner) and letterboxed.
+// Guest windows keep their iPhone-sized bounds, so the guest sees no change.
+void layoutGuestWindows() {
+    if (!backdrop) return;
+    CGRect area = UIEdgeInsetsInsetRect(backdrop.bounds, backdrop.safeAreaInsets);
+    if (CGRectIsEmpty(area)) return;
     CGSize size = sceneSize();
-    window.center = CGPointMake(size.width / 2, size.height / 2);
+    CGFloat scale = std::min(area.size.width / size.width, area.size.height / size.height);
+    CGAffineTransform transform = CGAffineTransformScale(CGAffineTransformMakeRotation(guestRotation()), scale, scale);
+    for (UIWindow *window in guestWindows) {
+        window.transform = transform;
+        window.center = CGPointMake(CGRectGetMidX(area), CGRectGetMidY(area));
+    }
 }
+
+void orient(UIWindow *window) {
+    [guestWindows addObject:window];
+    layoutGuestWindows();
+}
+
 NSMutableArray<UIWindow *> *pendingWindows = nil;   // created before the scene connected
 NSMutableSet<UIWindow *> *pendingKeyWindows = nil;  // ...and asked to become key
 
@@ -107,6 +126,40 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 
 }  // namespace
 
+// Fills the Mac window behind the guest; resizing it, full screen included,
+// or a change to the title bar refits the guest.
+@interface B32Backdrop : UIView
+@end
+
+@implementation B32Backdrop
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    layoutGuestWindows();
+}
+
+// The title bar's height is known once the window is up: make room for it,
+// so the smallest window still shows the guest at full size.
+- (void)safeAreaInsetsDidChange {
+    [super safeAreaInsetsDidChange];
+    UIEdgeInsets insets = self.safeAreaInsets;
+    UIWindowScene *scene = self.window.windowScene;
+    CGSize size = sceneSize();
+    CGSize minimum = CGSizeMake(size.width + insets.left + insets.right, size.height + insets.top + insets.bottom);
+    CGSize current = scene.sizeRestrictions.minimumSize;
+    if (minimum.width > current.width || minimum.height > current.height) {
+        scene.sizeRestrictions.minimumSize = minimum;
+        CGRect frame = scene.effectiveGeometry.systemFrame;
+        frame.size.width = std::max(frame.size.width, minimum.width);
+        frame.size.height = std::max(frame.size.height, minimum.height);
+        [scene requestGeometryUpdateWithPreferences:[[[UIWindowSceneGeometryPreferencesMac alloc] initWithSystemFrame:frame] autorelease]
+                                       errorHandler:nil];
+    }
+    layoutGuestWindows();
+}
+
+@end
+
 // Named in the shell's UIApplicationSceneManifest.
 @interface B32SceneDelegate : UIResponder <UIWindowSceneDelegate>
 @end
@@ -116,9 +169,15 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     UIWindowScene *windowScene = (UIWindowScene *)scene;
     guestScene = windowScene;
-    CGSize size = sceneSize();
-    windowScene.sizeRestrictions.minimumSize = size;
-    windowScene.sizeRestrictions.maximumSize = size;
+    windowScene.sizeRestrictions.minimumSize = sceneSize();
+    windowScene.sizeRestrictions.maximumSize = CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX);
+    UIWindow *backdropWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
+    backdropWindow.windowLevel = UIWindowLevelNormal - 1;
+    backdropWindow.backgroundColor = UIColor.blackColor;
+    backdrop = [[B32Backdrop alloc] initWithFrame:backdropWindow.bounds];
+    backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [backdropWindow addSubview:backdrop];
+    backdropWindow.hidden = NO;
     NSBundle *bundle = [NSBundle mainBundle];
     windowScene.title = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]
                             ?: [bundle objectForInfoDictionaryKey:@"CFBundleName"];
@@ -172,6 +231,7 @@ void b32::uikit::configureHost() {
     log("guest device %s, screen %.0fx%.0f", device::current().machine, screenWidth(), screenHeight());
 
     pendingWindows = [[NSMutableArray alloc] init];
+    guestWindows = [[NSHashTable weakObjectsHashTable] retain];
     pendingKeyWindows = [[NSMutableSet alloc] init];
     Method init = class_getInstanceMethod([UIWindow class], @selector(initWithFrame:));
     originalInitWithFrame = method_setImplementation(init, reinterpret_cast<IMP>(windowInitWithFrame));
