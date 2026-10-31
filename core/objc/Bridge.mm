@@ -1,6 +1,7 @@
 // Classes, selectors and object identity. Message dispatch is in Dispatch.mm.
 
 #include "Bridge.h"
+#include "sdkstubs.h"
 #include "Blocks.h"
 
 #include "core/Log.h"
@@ -469,6 +470,7 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
 
     if (GuestAddr methods = mem.read<uint32_t>(ro + layout32::kRoMethods)) addGuestMethods(cls, methods);
     if (GuestAddr methods = mem.read<uint32_t>(metaRo + layout32::kRoMethods)) addGuestMethods(meta, methods);
+    stubSdkClass(*this, rt_, cls);  // ads, analytics and crash reporters compiled into the app
     if (GuestAddr protocols = mem.read<uint32_t>(ro + layout32::kRoProtocols)) guestClassProtocols_[addr].push_back(protocols);
 
     classes_[addr] = cls;
