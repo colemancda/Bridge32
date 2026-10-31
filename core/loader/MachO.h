@@ -55,6 +55,10 @@ public:
     // are slid to `dylibBase`.
     Image load(const std::string &path, GuestAddr dylibBase = 0);
 
+    // The address space a dylib spans (its segments from the first to the
+    // end of the last), read without loading it.
+    static uint32_t span(const std::string &path);
+
     // Called with the image's linked libraries after its load commands are
     // read and before anything is bound.
     std::function<void(const std::vector<std::string> &dylibs)> onDylibs;
