@@ -107,7 +107,19 @@ void cThunk(Call &c) {
         case 'z': v.z = int32_t(word); break;
         case 'p': v.ptr = word ? c.mem.ptr<void>(word) : nullptr; break;
         case 'a': case 'e': v.ptr = pointerOrOffset(c, word, p.args[k]); break;
-        case 'h': v.ptr = hostPointer(word); break;
+        case 'h':
+            // A value the library never handed out (games pass -1 as "none"
+            // to alcDestroyContext): the libraries behind these thunks
+            // validate their handles and report an error, as they would on
+            // the device, so it passes through as is.
+            if (isHostHandle(word)) {
+                v.ptr = hostPointer(word);
+            } else {
+                static std::once_flag warned;
+                std::call_once(warned, [&] { log("%s: argument %zu is %u, not a handle it handed out", c.name, k + 1, word); });
+                v.ptr = reinterpret_cast<void *>(uintptr_t(word));
+            }
+            break;
         case 'o': v.ptr = (void *)c.rt.bridge().toHost(word); break;
         case 'd': {
             uint64_t bits = word | (uint64_t(c.args.u32()) << 32);
@@ -198,6 +210,11 @@ uint32_t hostHandle(void *p) {
     auto [it, inserted] = handleOf.emplace(p, uint32_t(handles.size()));
     if (inserted) handles.push_back(p);
     return it->second;
+}
+
+bool isHostHandle(uint32_t h) {
+    std::lock_guard guard(handlesLock);
+    return h < handles.size();
 }
 
 void *hostPointer(uint32_t h) {
