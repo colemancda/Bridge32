@@ -137,3 +137,80 @@ B32_THUNK(___floatsidfvfp) { c.retF64(double(c.args.i32())); }
 B32_THUNK(___floatunssidfvfp) { c.retF64(double(c.args.u32())); }
 B32_THUNK(___extendsfdf2vfp) { c.retF64(double(c.args.f32())); }
 B32_THUNK(___truncdfsf2vfp) { c.retF32(float(c.args.f64())); }
+// --- the plain (non-VFP) names --------------------------------------------
+// Newer compilers call these, with the same softfp convention. Their
+// comparisons return three-way results instead of 1 or 0: __eq/__ne give 0
+// when equal, __lt/__le negative when less (or equal), __gt/__ge positive
+// when greater (or equal), and NaN makes each one's condition false.
+
+#define B32_PLAIN_BINOP(name, type, read, ret, op) \
+    B32_THUNK(name) {                              \
+        type a = c.args.read();                    \
+        c.ret(a op c.args.read());                 \
+    }
+B32_PLAIN_BINOP(___addsf3, float, f32, retF32, +)
+B32_PLAIN_BINOP(___subsf3, float, f32, retF32, -)
+B32_PLAIN_BINOP(___mulsf3, float, f32, retF32, *)
+B32_PLAIN_BINOP(___divsf3, float, f32, retF32, /)
+B32_PLAIN_BINOP(___adddf3, double, f64, retF64, +)
+B32_PLAIN_BINOP(___subdf3, double, f64, retF64, -)
+B32_PLAIN_BINOP(___muldf3, double, f64, retF64, *)
+B32_PLAIN_BINOP(___divdf3, double, f64, retF64, /)
+
+namespace {
+template <typename T> int32_t compare(T a, T b, int32_t unordered) {
+    if (std::isnan(a) || std::isnan(b)) return unordered;
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+}  // namespace
+
+#define B32_PLAIN_CMP(name, type, read, unordered)            \
+    B32_THUNK(name) {                                         \
+        type a = c.args.read();                               \
+        c.ret(uint32_t(compare(a, c.args.read(), unordered))); \
+    }
+B32_PLAIN_CMP(___eqsf2, float, f32, 1)
+B32_PLAIN_CMP(___nesf2, float, f32, 1)
+B32_PLAIN_CMP(___ltsf2, float, f32, 1)
+B32_PLAIN_CMP(___lesf2, float, f32, 1)
+B32_PLAIN_CMP(___gtsf2, float, f32, -1)
+B32_PLAIN_CMP(___gesf2, float, f32, -1)
+B32_PLAIN_CMP(___eqdf2, double, f64, 1)
+B32_PLAIN_CMP(___nedf2, double, f64, 1)
+B32_PLAIN_CMP(___ltdf2, double, f64, 1)
+B32_PLAIN_CMP(___ledf2, double, f64, 1)
+B32_PLAIN_CMP(___gtdf2, double, f64, -1)
+B32_PLAIN_CMP(___gedf2, double, f64, -1)
+B32_THUNK(___unordsf2) {
+    float a = c.args.f32();
+    c.ret(std::isnan(a) || std::isnan(c.args.f32()) ? 1 : 0);
+}
+B32_THUNK(___unorddf2) {
+    double a = c.args.f64();
+    c.ret(std::isnan(a) || std::isnan(c.args.f64()) ? 1 : 0);
+}
+
+B32_THUNK(___fixsfsi) { c.ret(uint32_t(saturate<int32_t>(c.args.f32()))); }
+B32_THUNK(___fixunssfsi) { c.ret(saturate<uint32_t>(c.args.f32())); }
+B32_THUNK(___fixdfsi) { c.ret(uint32_t(saturate<int32_t>(c.args.f64()))); }
+B32_THUNK(___fixunsdfsi) { c.ret(saturate<uint32_t>(c.args.f64())); }
+B32_THUNK(___floatsisf) { c.retF32(float(c.args.i32())); }
+B32_THUNK(___floatsidf) { c.retF64(double(c.args.i32())); }
+B32_THUNK(___floatunsisf) { c.retF32(float(c.args.u32())); }
+B32_THUNK(___floatunsidf) { c.retF64(double(c.args.u32())); }
+B32_THUNK(___floatdisf) { c.retF32(float(int64_t(c.args.u64()))); }
+B32_THUNK(___floatdidf) { c.retF64(double(int64_t(c.args.u64()))); }
+B32_THUNK(___extendsfdf2) { c.retF64(double(c.args.f32())); }
+B32_THUNK(___truncdfsf2) { c.retF32(float(c.args.f64())); }
+
+// --- 64-bit shifts -----------------------------------------------------------
+// Shift counts of 64 or more are undefined; mask them as the ARM helpers do.
+
+B32_THUNK(___ashldi3) {
+    uint64_t a = c.args.u64();
+    c.ret64(a << (c.args.u32() & 63));
+}
+B32_THUNK(___lshrdi3) {
+    uint64_t a = c.args.u64();
+    c.ret64(a >> (c.args.u32() & 63));
+}
