@@ -106,6 +106,9 @@ B32_CGFLOAT_CONSTANT(UIFontWeightBold)
 B32_CGFLOAT_CONSTANT(UIFontWeightHeavy)
 B32_CGFLOAT_CONSTANT(UIFontWeightBlack)
 B32_CGFLOAT_CONSTANT(UIViewNoIntrinsicMetric)
+B32_CGFLOAT_CONSTANT(UITableViewAutomaticDimension)
+B32_CGFLOAT_CONSTANT(UIStackViewSpacingUseDefault)
+B32_CGFLOAT_CONSTANT(UIStackViewSpacingUseSystem)
 
 #define B32_CGSIZE_CONSTANT(name)                                  \
     B32_DATA(_##name, 8) {                                         \
@@ -114,3 +117,41 @@ B32_CGFLOAT_CONSTANT(UIViewNoIntrinsicMetric)
     }
 B32_CGSIZE_CONSTANT(UILayoutFittingCompressedSize)
 B32_CGSIZE_CONSTANT(UILayoutFittingExpandedSize)
+B32_CGSIZE_CONSTANT(UICollectionViewFlowLayoutAutomaticSize)
+
+// id<MTLDevice> MTLCreateSystemDefaultDevice(void): no Metal for 32-bit guests,
+// as on iPhones before the 5s; engines that check fall back to OpenGL ES.
+B32_THUNK(_MTLCreateSystemDefaultDevice) { c.ret(0); }
+
+// --- CloudKit -----------------------------------------------------------------------------
+// A wrapped app has no iCloud container (that takes Apple's entitlement), and
+// the real CKContainer throws without one. This one has no account: games
+// read that as cloud saves being off. Its databases are nil, so any record
+// operations are messages to nil.
+
+@interface B32Compat_CKContainer : NSObject
+@end
+
+@implementation B32Compat_CKContainer
+
++ (instancetype)defaultContainer {
+    static B32Compat_CKContainer *container = [[B32Compat_CKContainer alloc] init];
+    return container;
+}
+
++ (instancetype)containerWithIdentifier:(NSString *)identifier { return [self defaultContainer]; }
+
+- (id)privateCloudDatabase { return nil; }
+- (id)publicCloudDatabase { return nil; }
+- (id)sharedCloudDatabase { return nil; }
+- (NSString *)containerIdentifier { return nil; }
+
+- (void)accountStatusWithCompletionHandler:(void (^)(NSInteger status, NSError *error))handler {
+    if (handler) handler(3 /* CKAccountStatusNoAccount */, nil);
+}
+
+- (void)fetchUserRecordIDWithCompletionHandler:(void (^)(id recordID, NSError *error))handler {
+    if (handler) handler(nil, [NSError errorWithDomain:@"CKErrorDomain" code:9 /* CKErrorNotAuthenticated */ userInfo:nil]);
+}
+
+@end
