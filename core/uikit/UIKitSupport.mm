@@ -251,9 +251,14 @@ static void loadMainStoryboard() {
 
 @implementation B32NibAppDelegate
 
+// The nib for the guest's device (NSMainNibFile~ipad / ~iphone), else the
+// plain one. Read from the plist itself: NSBundle applies the Mac's own
+// (iPad) suffix to the plain key.
 + (NSString *)mainNibName {
-    NSBundle *bundle = [NSBundle mainBundle];
-    return [bundle objectForInfoDictionaryKey:@"NSMainNibFile~ipad"] ?: [bundle objectForInfoDictionaryKey:@"NSMainNibFile"];
+    static NSDictionary *info = [[NSDictionary alloc]
+        initWithContentsOfURL:[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Contents/Info.plist"]];
+    NSString *key = std::strncmp(device::current().machine, "iPad", 4) == 0 ? @"NSMainNibFile~ipad" : @"NSMainNibFile~iphone";
+    return info[key] ?: info[@"NSMainNibFile"];
 }
 
 - (BOOL)application:(UIApplication *)application willFinishLaunchingWithOptions:(NSDictionary *)options {
