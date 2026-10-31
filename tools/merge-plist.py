@@ -73,6 +73,11 @@ def main():
     if "NSBluetoothAlwaysUsageDescription" not in merged:
         merged["NSBluetoothAlwaysUsageDescription"] = guest.get(
             "NSBluetoothPeripheralUsageDescription", "This app uses Bluetooth to talk to nearby devices.")
+    # Likewise for location: macOS won't ask without a reason, and some apps
+    # shipped the keys empty.
+    for key in ("NSLocationWhenInUseUsageDescription", "NSLocationAlwaysUsageDescription"):
+        if not merged.get(key):
+            merged[key] = "This app uses your location to show what's nearby."
     # A distinct identifier, so the wrapped game gets its own sandbox
     # container and never collides with an installed iOS app of the same id.
     merged["CFBundleIdentifier"] = guest.get("CFBundleIdentifier", "unknown") + ".bridge32"
