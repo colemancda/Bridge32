@@ -92,7 +92,10 @@ constexpr CFunction kFunctions[] = {
     {"glBindFramebufferOES", "v:uu"}, {"glBindRenderbufferOES", "v:uu"},
     
     {"glCheckFramebufferStatusOES", "u:u"},
-    {"glResolveMultisampleFramebufferAPPLE", "v:"}, {"glDiscardFramebufferEXT", "v:uip"}, 
+    {"glResolveMultisampleFramebufferAPPLE", "v:"}, {"glDiscardFramebufferEXT", "v:uip"},
+    {"glInvalidateFramebuffer", "v:uip"}, {"glShaderBinary", "v:ipupi"}, {"glLabelObjectEXT", "v:uuip"},
+    {"glGetObjectLabelEXT", "v:uuipp"}, {"glInsertEventMarkerEXT", "v:ip"}, {"glPushGroupMarkerEXT", "v:ip"},
+    {"glPopGroupMarkerEXT", "v:"}, 
     {"glGetFramebufferAttachmentParameterivOES", "v:uuup"}, 
     {"glIsFramebufferOES", "B:u"}, {"glIsRenderbufferOES", "B:u"}, {"glGenerateMipmapOES", "v:u"},
     // OES_draw_texture
@@ -362,4 +365,13 @@ B32_OVERRIDE_WHEN(watchingPresents, "presentRenderbuffer:") {
     if (dumpingFrames() && frames++ % 60 == 0) dumpFrame();
     NSUInteger target = o.args.u32();
     o.c.ret(reinterpret_cast<BOOL (*)(id, SEL, NSUInteger)>(objc_msgSend)(o.receiver, o.sel, target));
+}
+
+// const GLubyte *glGetStringi(GLenum name, GLuint index): extension names
+// (OpenGL ES 3), copied into guest memory once each.
+B32_THUNK(_glGetStringi) {
+    static auto getStringi = glFunction<const char *(*)(uint32_t, uint32_t)>("glGetStringi");
+    uint32_t name = c.args.u32();
+    const char *value = getStringi(name, c.args.u32());
+    c.ret(value ? c.rt.internString(value) : 0);
 }
