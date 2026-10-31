@@ -16,7 +16,9 @@
 
 #include <AudioToolbox/AudioToolbox.h>
 
+#include <cstddef>
 #include <mutex>
+#include <vector>
 #include <unordered_map>
 
 using namespace b32;
@@ -364,3 +366,67 @@ B32_THUNK(_CFRunLoopRunInMode) {
 }
 
 B32_THUNK(_CFRunLoopStop) { CFRunLoopStop((CFRunLoopRef)c.rt.bridge().toHost(c.args.ptr())); }
+
+// --- ExtAudioFile: decoding audio files to PCM ------------------------------------------------
+// The properties games use (file and client stream formats, length in
+// frames) have the same layout in both ABIs; only the buffer list that
+// ExtAudioFileRead fills holds pointers.
+
+namespace {
+ExtAudioFileRef extAudioFile(uint32_t handle) { return static_cast<ExtAudioFileRef>(hostPointer(handle)); }
+}  // namespace
+
+// OSStatus ExtAudioFileOpenURL(CFURLRef, ExtAudioFileRef *)
+B32_THUNK(_ExtAudioFileOpenURL) {
+    CFURLRef url = (CFURLRef)c.rt.bridge().toHost(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    ExtAudioFileRef file = nullptr;
+    OSStatus status = ExtAudioFileOpenURL(url, &file);
+    if (out) c.mem.write<uint32_t>(out, hostHandle(file));
+    c.ret(uint32_t(status));
+}
+
+B32_THUNK(_ExtAudioFileDispose) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    OSStatus status = ExtAudioFileDispose(file);
+    forgetHostHandle(file);
+    c.ret(uint32_t(status));
+}
+
+// OSStatus ExtAudioFileGetProperty(ExtAudioFileRef, ExtAudioFilePropertyID, UInt32 *ioSize, void *outData)
+B32_THUNK(_ExtAudioFileGetProperty) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    ExtAudioFilePropertyID property = c.args.u32();
+    GuestAddr size = c.args.ptr(), data = c.args.ptr();
+    c.ret(uint32_t(ExtAudioFileGetProperty(file, property, size ? c.mem.ptr<UInt32>(size) : nullptr,
+                                           data ? c.mem.ptr<void>(data) : nullptr)));
+}
+
+// OSStatus ExtAudioFileSetProperty(ExtAudioFileRef, ExtAudioFilePropertyID, UInt32 size, const void *data)
+B32_THUNK(_ExtAudioFileSetProperty) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    ExtAudioFilePropertyID property = c.args.u32();
+    UInt32 size = c.args.u32();
+    GuestAddr data = c.args.ptr();
+    c.ret(uint32_t(ExtAudioFileSetProperty(file, property, size, data ? c.mem.ptr<void>(data) : nullptr)));
+}
+
+// OSStatus ExtAudioFileRead(ExtAudioFileRef, UInt32 *ioNumberFrames, AudioBufferList *)
+// Guest AudioBufferList: { mNumberBuffers, { mNumberChannels, mDataByteSize, mData }... }.
+B32_THUNK(_ExtAudioFileRead) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    GuestAddr frames = c.args.ptr(), list = c.args.ptr();
+    uint32_t count = c.mem.read<uint32_t>(list);
+    std::vector<uint8_t> storage(offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer) * std::max(count, 1u));
+    auto *host = reinterpret_cast<AudioBufferList *>(storage.data());
+    host->mNumberBuffers = count;
+    for (uint32_t i = 0; i < count; i++) {
+        GuestAddr b = list + 4 + i * 12;
+        GuestAddr samples = c.mem.read<uint32_t>(b + 8);
+        host->mBuffers[i] = {c.mem.read<uint32_t>(b), c.mem.read<uint32_t>(b + 4),
+                             samples ? c.mem.ptr<void>(samples) : nullptr};
+    }
+    OSStatus status = ExtAudioFileRead(file, c.mem.ptr<UInt32>(frames), host);
+    for (uint32_t i = 0; i < count; i++) c.mem.write<uint32_t>(list + 4 + i * 12 + 4, host->mBuffers[i].mDataByteSize);
+    c.ret(uint32_t(status));
+}
