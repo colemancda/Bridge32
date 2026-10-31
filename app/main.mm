@@ -71,11 +71,13 @@ int main(int argc, char **argv) {
         b32::uikit::configureHost();
         b32::gl::loadHostOpenGLES();
 
-        static auto monitor = b32::DynarmicCpu::makeMonitor();
+        static auto *monitor = new decltype(b32::DynarmicCpu::makeMonitor())(b32::DynarmicCpu::makeMonitor());
         static std::atomic<size_t> nextProcessor{0};
-        static b32::Runtime rt([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
+        // Never destroyed: quitting runs exit()'s static destructors while the
+        // guest's threads are still running, and they'd use it after it's gone.
+        static b32::Runtime &rt = *new b32::Runtime([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
             return std::make_unique<b32::DynarmicCpu>(mem, std::move(handler), b32::DynarmicCpu::Arch::V7,
-                                                      monitor.get(), nextProcessor++);
+                                                      monitor->get(), nextProcessor++);
         });
         // make-app.sh copies guest libraries (--guest-libs) into the bundle.
         rt.addGuestLibraryDir([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"B32GuestLibraries"]
