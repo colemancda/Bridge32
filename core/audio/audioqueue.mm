@@ -98,6 +98,34 @@ B32_THUNK(_AudioQueueNewOutput) {
 }
 
 // OSStatus AudioQueueAllocateBuffer(AudioQueueRef, UInt32 size, AudioQueueBufferRef *out)
+// OSStatus AudioQueueAllocateBufferWithPacketDescriptions(AudioQueueRef, UInt32 size,
+//     UInt32 numberPacketDescriptions, AudioQueueBufferRef *): the guest mirror gets an array
+// of 16-byte AudioStreamPacketDescriptions of its own.
+B32_THUNK(_AudioQueueAllocateBufferWithPacketDescriptions) {
+    Queue *q = queueFor(c.args.u32());
+    uint32_t size = c.args.u32();
+    uint32_t descriptionCount = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    AudioQueueBufferRef buffer = nullptr;
+    OSStatus status = AudioQueueAllocateBufferWithPacketDescriptions(q->host, size, descriptionCount, &buffer);
+    if (status != noErr) {
+        c.ret(uint32_t(status));
+        return;
+    }
+    GuestAddr mirror = c.heap.calloc(1, 28);
+    c.mem.write<uint32_t>(mirror, size);
+    c.mem.write<uint32_t>(mirror + 4, c.heap.calloc(1, size));
+    c.mem.write<uint32_t>(mirror + 16, descriptionCount);
+    c.mem.write<uint32_t>(mirror + 20, c.heap.calloc(std::max(descriptionCount, 1u), 16));
+    {
+        std::lock_guard guard(lock);
+        q->mirrors[buffer] = mirror;
+        q->buffers[mirror] = buffer;
+    }
+    c.mem.write<uint32_t>(out, mirror);
+    c.ret(0);
+}
+
 B32_THUNK(_AudioQueueAllocateBuffer) {
     Queue *q = queueFor(c.args.u32());
     uint32_t size = c.args.u32();
@@ -122,6 +150,29 @@ B32_THUNK(_AudioQueueAllocateBuffer) {
 
 // OSStatus AudioQueueEnqueueBuffer(AudioQueueRef, AudioQueueBufferRef, UInt32 numPacketDescs,
 //                                  const AudioStreamPacketDescription *)
+namespace {
+// Copies a guest buffer's audio (and its packet descriptions, when the caller
+// passes none and the buffer has its own) into the host buffer; returns the
+// descriptions to enqueue with.
+AudioStreamPacketDescription *prepareBuffer(Call &c, AudioQueueBufferRef buffer, GuestAddr mirror,
+                                            uint32_t &descriptionCount, GuestAddr descriptions) {
+    uint32_t bytes = std::min(c.mem.read<uint32_t>(mirror + 8), buffer->mAudioDataBytesCapacity);
+    std::memcpy(buffer->mAudioData, c.mem.ptr<void>(c.mem.read<uint32_t>(mirror + 4)), bytes);
+    buffer->mAudioDataByteSize = bytes;
+    buffer->mUserData = nullptr;
+    if (descriptions) return c.mem.ptr<AudioStreamPacketDescription>(descriptions);
+    uint32_t own = c.mem.read<uint32_t>(mirror + 24);
+    GuestAddr ownDescriptions = c.mem.read<uint32_t>(mirror + 20);
+    if (own && ownDescriptions && buffer->mPacketDescriptions) {
+        own = std::min(own, buffer->mPacketDescriptionCapacity);
+        std::memcpy(buffer->mPacketDescriptions, c.mem.ptr<void>(ownDescriptions), own * sizeof(AudioStreamPacketDescription));
+        buffer->mPacketDescriptionCount = own;
+    }
+    descriptionCount = 0;
+    return nullptr;
+}
+}  // namespace
+
 B32_THUNK(_AudioQueueEnqueueBuffer) {
     Queue *q = queueFor(c.args.u32());
     GuestAddr mirror = c.args.ptr();
@@ -132,12 +183,32 @@ B32_THUNK(_AudioQueueEnqueueBuffer) {
         std::lock_guard guard(lock);
         buffer = q->buffers.at(mirror);
     }
-    uint32_t bytes = std::min(c.mem.read<uint32_t>(mirror + 8), buffer->mAudioDataBytesCapacity);
-    std::memcpy(buffer->mAudioData, c.mem.ptr<void>(c.mem.read<uint32_t>(mirror + 4)), bytes);
-    buffer->mAudioDataByteSize = bytes;
-    buffer->mUserData = nullptr;
-    auto *packets = descriptions ? c.mem.ptr<AudioStreamPacketDescription>(descriptions) : nullptr;
+    auto *packets = prepareBuffer(c, buffer, mirror, descriptionCount, descriptions);
     c.ret(uint32_t(AudioQueueEnqueueBuffer(q->host, buffer, descriptionCount, packets)));
+}
+
+// OSStatus AudioQueueEnqueueBufferWithParameters(AudioQueueRef, AudioQueueBufferRef, UInt32 numPacketDescs,
+//     const AudioStreamPacketDescription *, UInt32 trimFramesAtStart, UInt32 trimFramesAtEnd,
+//     UInt32 numParamValues, const AudioQueueParameterEvent *, const AudioTimeStamp *startTime,
+//     AudioTimeStamp *outActualStartTime)
+// Parameter events ({ id, Float32 value }) and timestamps have the same layout in both.
+B32_THUNK(_AudioQueueEnqueueBufferWithParameters) {
+    Queue *q = queueFor(c.args.u32());
+    GuestAddr mirror = c.args.ptr();
+    uint32_t descriptionCount = c.args.u32();
+    GuestAddr descriptions = c.args.ptr();
+    uint32_t trimStart = c.args.u32(), trimEnd = c.args.u32(), paramCount = c.args.u32();
+    GuestAddr params = c.args.ptr(), start = c.args.ptr(), actual = c.args.ptr();
+    AudioQueueBufferRef buffer;
+    {
+        std::lock_guard guard(lock);
+        buffer = q->buffers.at(mirror);
+    }
+    auto *packets = prepareBuffer(c, buffer, mirror, descriptionCount, descriptions);
+    c.ret(uint32_t(AudioQueueEnqueueBufferWithParameters(
+        q->host, buffer, descriptionCount, packets, trimStart, trimEnd, paramCount,
+        params ? c.mem.ptr<AudioQueueParameterEvent>(params) : nullptr, start ? c.mem.ptr<AudioTimeStamp>(start) : nullptr,
+        actual ? c.mem.ptr<AudioTimeStamp>(actual) : nullptr)));
 }
 
 B32_THUNK(_AudioQueueFreeBuffer) {
@@ -329,6 +400,22 @@ B32_THUNK(_AudioFileGetPropertyInfo) {
 
 // OSStatus AudioFileReadPackets(AudioFileID, Boolean useCache, UInt32 *outNumBytes,
 //     AudioStreamPacketDescription *, SInt64 startingPacket, UInt32 *ioNumPackets, void *outBuffer)
+// OSStatus AudioFileReadPacketData(AudioFileID, Boolean useCache, UInt32 *ioNumBytes,
+//     AudioStreamPacketDescription *, SInt64 startingPacket, UInt32 *ioNumPackets, void *outBuffer):
+// AudioFileReadPackets with the buffer's size given.
+B32_THUNK(_AudioFileReadPacketData) {
+    AudioFileID file = audioFile(c.args.u32());
+    Boolean useCache = Boolean(c.args.u32());
+    GuestAddr bytes = c.args.ptr();
+    GuestAddr descriptions = c.args.ptr();
+    SInt64 start = SInt64(c.args.u64());
+    GuestAddr packets = c.args.ptr();
+    GuestAddr buffer = c.args.ptr();
+    c.ret(uint32_t(AudioFileReadPacketData(file, useCache, c.mem.ptr<UInt32>(bytes),
+                                           descriptions ? c.mem.ptr<AudioStreamPacketDescription>(descriptions) : nullptr,
+                                           start, c.mem.ptr<UInt32>(packets), c.mem.ptr<void>(buffer))));
+}
+
 B32_THUNK(_AudioFileReadPackets) {
     AudioFileID file = audioFile(c.args.u32());
     Boolean useCache = Boolean(c.args.u32());
@@ -420,6 +507,134 @@ B32_THUNK(_ExtAudioFileRead) {
                              samples ? c.mem.ptr<void>(samples) : nullptr};
     }
     OSStatus status = ExtAudioFileRead(file, c.mem.ptr<UInt32>(frames), host);
+    for (uint32_t i = 0; i < count; i++) c.mem.write<uint32_t>(list + 4 + i * 12 + 4, host->mBuffers[i].mDataByteSize);
+    c.ret(uint32_t(status));
+}
+
+// --- AudioConverter ---------------------------------------------------------------------------
+// Converters are guest handles. FillComplexBuffer's input callback is the
+// guest's: it fills a guest AudioBufferList { count, { channels, size, data }... }
+// with pointers to its own data, which are guest memory and so usable by the
+// host in place. Packet descriptions have the same layout in both.
+
+namespace {
+struct Converter {
+    AudioConverterRef host;
+    uint32_t handle;
+    GuestAddr proc = 0, userData = 0;
+    GuestAddr scratch = 0;  // the callback's guest arguments
+    uint32_t scratchSize = 0;
+};
+std::mutex convertersLock;
+std::unordered_map<uint32_t, Converter *> converters;
+
+Converter *converterFor(uint32_t handle) {
+    std::lock_guard guard(convertersLock);
+    auto it = converters.find(handle);
+    if (it == converters.end()) fatal("bad AudioConverter handle %u", handle);
+    return it->second;
+}
+
+// AudioConverterComplexInputDataProc(AudioConverterRef, UInt32 *ioNumberDataPackets,
+//     AudioBufferList *ioData, AudioStreamPacketDescription **outDataPacketDescription, void *inUserData)
+OSStatus converterInput(AudioConverterRef, UInt32 *packets, AudioBufferList *ioData,
+                        AudioStreamPacketDescription **descriptions, void *data) {
+    auto *conv = static_cast<Converter *>(data);
+    GuestMemory &mem = guestMemory();
+    uint32_t count = ioData->mNumberBuffers;
+    uint32_t needed = 8 + 4 + count * 12;  // packets, descriptions pointer, buffer list
+    if (needed > conv->scratchSize) {
+        if (conv->scratch) guestHeap().free(conv->scratch);
+        conv->scratchSize = needed;
+        conv->scratch = guestHeap().calloc(1, needed);
+    }
+    GuestAddr guestPackets = conv->scratch, guestDescriptions = conv->scratch + 4, list = conv->scratch + 8;
+    mem.write<uint32_t>(guestPackets, *packets);
+    mem.write<uint32_t>(guestDescriptions, 0);
+    mem.write<uint32_t>(list, count);
+    for (uint32_t i = 0; i < count; i++) {
+        mem.write<uint32_t>(list + 4 + i * 12, ioData->mBuffers[i].mNumberChannels);
+        mem.write<uint32_t>(list + 8 + i * 12, 0);
+        mem.write<uint32_t>(list + 12 + i * 12, 0);
+    }
+    auto status = OSStatus(Runtime::threadCpu().call(
+        conv->proc, {conv->handle, guestPackets, list, descriptions ? guestDescriptions : 0, conv->userData}));
+    *packets = mem.read<uint32_t>(guestPackets);
+    for (uint32_t i = 0; i < count; i++) {
+        GuestAddr samples = mem.read<uint32_t>(list + 12 + i * 12);
+        ioData->mBuffers[i].mNumberChannels = mem.read<uint32_t>(list + 4 + i * 12);
+        ioData->mBuffers[i].mDataByteSize = mem.read<uint32_t>(list + 8 + i * 12);
+        ioData->mBuffers[i].mData = samples ? mem.ptr<void>(samples) : nullptr;
+    }
+    if (descriptions) {
+        GuestAddr d = mem.read<uint32_t>(guestDescriptions);
+        *descriptions = d ? mem.ptr<AudioStreamPacketDescription>(d) : nullptr;
+    }
+    return status;
+}
+}  // namespace
+
+// OSStatus AudioConverterNew(const AudioStreamBasicDescription *, const AudioStreamBasicDescription *,
+//     AudioConverterRef *)
+B32_THUNK(_AudioConverterNew) {
+    auto *from = c.mem.ptr<AudioStreamBasicDescription>(c.args.ptr());
+    auto *to = c.mem.ptr<AudioStreamBasicDescription>(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    AudioConverterRef host = nullptr;
+    OSStatus status = AudioConverterNew(from, to, &host);
+    if (status == noErr) {
+        auto *conv = new Converter{host, hostHandle(host)};
+        {
+            std::lock_guard guard(convertersLock);
+            converters[conv->handle] = conv;
+        }
+        c.mem.write<uint32_t>(out, conv->handle);
+    }
+    c.ret(uint32_t(status));
+}
+
+B32_THUNK(_AudioConverterDispose) {
+    Converter *conv = converterFor(c.args.u32());
+    OSStatus status = AudioConverterDispose(conv->host);
+    {
+        std::lock_guard guard(convertersLock);
+        converters.erase(conv->handle);
+    }
+    forgetHostHandle(conv->host);
+    if (conv->scratch) c.heap.free(conv->scratch);
+    delete conv;
+    c.ret(uint32_t(status));
+}
+
+// OSStatus AudioConverterSetProperty(AudioConverterRef, AudioConverterPropertyID, UInt32 size, const void *)
+// The properties games set (magic cookies, quality, channel maps) are plain bytes.
+B32_THUNK(_AudioConverterSetProperty) {
+    Converter *conv = converterFor(c.args.u32());
+    AudioConverterPropertyID property = c.args.u32();
+    UInt32 size = c.args.u32();
+    GuestAddr data = c.args.ptr();
+    c.ret(uint32_t(AudioConverterSetProperty(conv->host, property, size, data ? c.mem.ptr<void>(data) : nullptr)));
+}
+
+// OSStatus AudioConverterFillComplexBuffer(AudioConverterRef, AudioConverterComplexInputDataProc,
+//     void *inUserData, UInt32 *ioOutputDataPacketSize, AudioBufferList *outOutputData,
+//     AudioStreamPacketDescription *outPacketDescription)
+B32_THUNK(_AudioConverterFillComplexBuffer) {
+    Converter *conv = converterFor(c.args.u32());
+    conv->proc = c.args.ptr();
+    conv->userData = c.args.ptr();
+    GuestAddr packets = c.args.ptr(), list = c.args.ptr(), descriptions = c.args.ptr();
+    uint32_t count = c.mem.read<uint32_t>(list);
+    std::vector<uint8_t> storage(offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer) * std::max(count, 1u));
+    auto *host = reinterpret_cast<AudioBufferList *>(storage.data());
+    host->mNumberBuffers = count;
+    for (uint32_t i = 0; i < count; i++) {
+        GuestAddr b = list + 4 + i * 12, samples = c.mem.read<uint32_t>(b + 8);
+        host->mBuffers[i] = {c.mem.read<uint32_t>(b), c.mem.read<uint32_t>(b + 4), samples ? c.mem.ptr<void>(samples) : nullptr};
+    }
+    OSStatus status = AudioConverterFillComplexBuffer(
+        conv->host, converterInput, conv, c.mem.ptr<UInt32>(packets), host,
+        descriptions ? c.mem.ptr<AudioStreamPacketDescription>(descriptions) : nullptr);
     for (uint32_t i = 0; i < count; i++) c.mem.write<uint32_t>(list + 4 + i * 12 + 4, host->mBuffers[i].mDataByteSize);
     c.ret(uint32_t(status));
 }
