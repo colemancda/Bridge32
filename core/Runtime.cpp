@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+#include <climits>
 #include <cstring>
 
 extern "C" void *objc_autoreleasePoolPush(void);
@@ -210,24 +211,66 @@ void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs) {
         if (librariesSeen_.count(d)) continue;
         librariesSeen_[d] = true;
         std::string path = findGuestLibrary(d);
-        if (path.empty()) continue;
-        // Each library gets its window before it loads, since its own
-        // dependencies load (and take the next windows) part way through.
-        GuestAddr base = nextLibraryBase_;
-        nextLibraryBase_ += layout::kLibraryWindow;
-        if (nextLibraryBase_ > layout::kHeapBase) fatal("too many guest libraries");
-        Image lib = makeLoader().load(path, base);
-        if (lib.end > base + layout::kLibraryWindow) fatal("guest library %s is too big for its window", path.c_str());
-        for (const auto &[name, addr] : lib.exports) libraryExports_.emplace(name, addr);
-        if (lib.dyldSection) {
-            mem_->write<uint32_t>(lib.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
-            mem_->write<uint32_t>(lib.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
-        }
-        // Its ObjC classes, categories and selectors (SDL2's app delegate...).
-        bridge_->setupImage(lib);
-        log("loaded guest library %s at 0x%08x", path.c_str(), lib.slide);
-        libraries_.push_back(std::move(lib));
+        if (path.empty() || librariesByPath_.count(path)) continue;
+        loadGuestLibrary(path);
     }
+}
+
+size_t Runtime::loadGuestLibrary(const std::string &path) {
+    // Each library gets its window before it loads, since its own
+    // dependencies load (and take the next windows) part way through.
+    GuestAddr base = nextLibraryBase_;
+    nextLibraryBase_ += layout::kLibraryWindow;
+    if (nextLibraryBase_ > layout::kHeapBase) fatal("too many guest libraries");
+    Image lib = makeLoader().load(path, base);
+    if (lib.end > base + layout::kLibraryWindow) fatal("guest library %s is too big for its window", path.c_str());
+    for (const auto &[name, addr] : lib.exports) libraryExports_.emplace(name, addr);
+    if (lib.dyldSection) {
+        mem_->write<uint32_t>(lib.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
+        mem_->write<uint32_t>(lib.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
+    }
+    // Its ObjC classes, categories and selectors (SDL2's app delegate...).
+    bridge_->setupImage(lib);
+    log("loaded guest library %s at 0x%08x", path.c_str(), lib.slide);
+    libraries_.push_back(std::move(lib));
+    librariesByPath_[path] = libraries_.size() - 1;
+    return libraries_.size() - 1;
+}
+
+uint32_t Runtime::openLibrary(const std::string &requested, Cpu &cpu) {
+    std::lock_guard guard(openLock_);
+    // As given, then relative to the app's folder (where its libraries ship).
+    std::string base = requested.substr(requested.rfind('/') + 1);
+    std::string path;
+    for (const std::string &candidate : {requested, mainDir_ + "/" + requested, mainDir_ + "/" + base,
+                                         mainDir_ + "/Frameworks/" + base})
+        if (!candidate.empty() && access(candidate.c_str(), R_OK) == 0) {
+            path = candidate;
+            break;
+        }
+    if (path.empty()) path = findGuestLibrary(requested);
+    if (path.empty()) return 0;
+    char resolved[PATH_MAX];
+    if (realpath(path.c_str(), resolved)) path = resolved;
+    if (auto it = librariesByPath_.find(path); it != librariesByPath_.end()) return uint32_t(it->second + 1);
+
+    size_t first = libraries_.size();
+    size_t index = loadGuestLibrary(path);
+    // Its dependencies loaded first and come before it; initialize all of
+    // them in that order, as dyld does.
+    for (size_t i = first; i < libraries_.size(); i++) {
+        std::vector<GuestAddr> inits = libraries_[i].initializers;
+        for (GuestAddr init : inits) cpu.call(init, {});
+    }
+    return uint32_t(index + 1);
+}
+
+GuestAddr Runtime::librarySymbol(uint32_t handle, const std::string &symbol) {
+    std::lock_guard guard(openLock_);
+    if (handle == 0 || handle > libraries_.size()) return 0;
+    const auto &exports = libraries_[handle - 1].exports;
+    auto it = exports.find(symbol);
+    return it == exports.end() ? 0 : it->second;
 }
 
 void Runtime::load(const std::string &path) {
