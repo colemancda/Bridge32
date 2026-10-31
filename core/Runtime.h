@@ -72,6 +72,7 @@ public:
 
 private:
     GuestAddr resolve(const std::string &symbol);
+    GuestAddr thisReturning(GuestAddr target);
     MachOLoader makeLoader();
     void loadLinkedLibraries(const std::vector<std::string> &dylibs);
     std::string findGuestLibrary(const std::string &installName) const;
@@ -92,6 +93,7 @@ private:
     std::vector<Image> libraries_;  // guest libraries, dependencies first
     std::unordered_map<std::string, bool> librariesSeen_;  // by install name
     std::unordered_map<std::string, GuestAddr> libraryExports_;
+    std::unordered_map<GuestAddr, GuestAddr> thisShims_;  // library constructor -> shim returning this
     GuestAddr nextLibraryBase_;
     std::unordered_map<std::string, GuestAddr> data_;
     std::unordered_map<std::string, GuestAddr> strings_;
