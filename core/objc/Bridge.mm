@@ -867,8 +867,18 @@ void Bridge::toHostValue(const Type &t, const uint8_t *g, uint8_t *h) {
     case 'c': case 'C': case 'B': *h = *g; break;
     case 's': case 'S': std::memcpy(h, g, 2); break;
     case 'i': case 'I': case 'f': std::memcpy(h, g, 4); break;
-    case 'l': case 'q': store<int64_t>(h, t.wide ? load<int64_t>(g) : load<int32_t>(g)); break;
-    case 'L': case 'Q': store<uint64_t>(h, t.wide ? load<uint64_t>(g) : load<uint32_t>(g)); break;
+    // NSNotFound and NSIntegerMax are 0x7fffffff in the guest; the host's are
+    // its own 64-bit maximum (indexOfObject:, NSRange locations).
+    case 'l': case 'q': {
+        int64_t v = t.wide ? load<int64_t>(g) : load<int32_t>(g);
+        store<int64_t>(h, !t.wide && v == INT32_MAX ? INT64_MAX : v);
+        break;
+    }
+    case 'L': case 'Q': {
+        uint64_t v = t.wide ? load<uint64_t>(g) : load<uint32_t>(g);
+        store<uint64_t>(h, !t.wide && v == uint64_t(INT32_MAX) ? uint64_t(INT64_MAX) : v);
+        break;
+    }
     case 'd': store<double>(h, t.cgfloat ? double(load<float>(g)) : load<double>(g)); break;
     case '@': case '#': store<id>(h, toHost(load<uint32_t>(g))); break;
     case ':': {
@@ -910,6 +920,8 @@ void Bridge::toGuestValue(const Type &t, const uint8_t *h, uint8_t *g) {
     case 'l': case 'q': case 'L': case 'Q':
         if (t.wide)
             std::memcpy(g, h, 8);
+        else if (load<uint64_t>(h) == uint64_t(INT64_MAX))
+            store<uint32_t>(g, uint32_t(INT32_MAX));  // NSNotFound / NSIntegerMax
         else
             store<uint32_t>(g, uint32_t(load<uint64_t>(h)));
         break;
