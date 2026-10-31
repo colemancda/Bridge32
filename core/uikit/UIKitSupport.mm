@@ -11,6 +11,7 @@
 #include "core/Device.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "core/gl/GLES.h"
 #include "core/thunks/MainQueue.h"
 #include "core/objc/Dispatch.h"
 
@@ -83,6 +84,7 @@ void layoutGuestWindows() {
         window.transform = transform;
         window.center = CGPointMake(CGRectGetMidX(area), CGRectGetMidY(area));
     }
+    gl::setDisplayZoom(scale);
 }
 
 void orient(UIWindow *window) {
