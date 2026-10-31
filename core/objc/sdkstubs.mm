@@ -14,9 +14,12 @@ namespace b32::objc {
 namespace {
 
 // Each class is either stubbed whole (`selectors` null: its API is class
-// methods and singletons, so nil from +sharedInstance silences everything
-// after it) or only in the listed methods (ad views the game may add to its
-// layout, which must still be real views).
+// methods and singletons) or only in the listed methods (ad views the game
+// may add to its layout, which must still be real views). A whole stub keeps
+// its singleton real, an object whose methods all do nothing, since apps put
+// it in collections (Fabric's [Fabric with:@[CrashlyticsKit]]): its
+// +shared.../+default... getters run as written and its init methods return
+// self untouched.
 struct Rule {
     const char *sdk;
     const char *cls;
@@ -69,6 +72,19 @@ GuestAddr zeroRoutine(Runtime &rt) {
     return routine;
 }
 
+// bx lr: returns self (r0) as it came.
+GuestAddr selfRoutine(Runtime &rt) {
+    static GuestAddr routine = [&rt] {
+        const uint32_t code[] = {0xe12fff1e};
+        GuestAddr addr = rt.heap().alloc(sizeof code);
+        rt.mem().copyIn(addr, code, sizeof code);
+        return addr;
+    }();
+    return routine;
+}
+
+bool startsWith(const char *s, const char *prefix) { return std::strncmp(s, prefix, std::strlen(prefix)) == 0; }
+
 bool listed(const char *const *selectors, const char *name) {
     for (; *selectors; selectors++)
         if (std::strcmp(*selectors, name) == 0) return true;
@@ -94,9 +110,15 @@ void stubSdkClass(Bridge &bridge, Runtime &rt, ClassInfo *cls) {
             // leaves a dead object for the next release to trip over.
             bool teardown = std::strcmp(name, "dealloc") == 0 || std::strcmp(name, ".cxx_destruct") == 0;
             if (rule->selectors ? !listed(rule->selectors, name) : teardown) continue;
-            method.imp = zero;
+            GuestAddr imp = zero;
+            if (!rule->selectors) {
+                bool singleton = info->isMeta && (startsWith(name, "shared") || startsWith(name, "default"));
+                if (singleton) continue;
+                if (!info->isMeta && startsWith(name, "init")) imp = selfRoutine(rt);
+            }
+            method.imp = imp;
             // The guest's own method_t too, where its runtime and reflection read the IMP.
-            if (method.entry) rt.mem().write<uint32_t>(method.entry + 8, zero);
+            if (method.entry) rt.mem().write<uint32_t>(method.entry + 8, imp);
             count++;
         }
     }
