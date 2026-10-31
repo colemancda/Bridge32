@@ -1,8 +1,9 @@
 // MPMoviePlayerController with the iPhone OS 2/3 API (movieControlMode,
-// backgroundColor...), which today's MediaPlayer no longer has. Games mostly
-// use it for intro videos; this compat player skips the video: play() reports
-// the movie finished, and the game carries on as if the player had tapped
-// through it.
+// backgroundColor...), which today's MediaPlayer no longer has, and the
+// MPMoviePlayerViewController (iOS 3.2) that wraps one. Games mostly use them
+// for intro videos; this compat player skips the video: playing (by -play or
+// by autoplay) reports the movie finished, and the game carries on as if the
+// player had tapped through it.
 
 #include "core/Log.h"
 
@@ -17,11 +18,13 @@ using namespace b32;
 @property (nonatomic) NSInteger scalingMode, movieControlMode, controlStyle, repeatMode;
 @property (nonatomic) double initialPlaybackTime;
 @property (nonatomic, getter=isFullscreen) BOOL fullscreen;
+@property (nonatomic) BOOL useApplicationAudioSession;
+@property (nonatomic) BOOL shouldAutoplay;
 @end
 
 @implementation B32Compat_MPMoviePlayerController {
     UIView *_view;
-    BOOL _finished;
+    BOOL _playing, _finished;
 }
 
 - (instancetype)initWithContentURL:(NSURL *)url {
@@ -41,11 +44,21 @@ using namespace b32;
     return _view;
 }
 
-- (void)prepareToPlay {}
+- (void)prepareToPlay {
+    if (_shouldAutoplay) [self play];
+}
+
+// Autoplay starts once the content is ready, which is right away here.
+- (void)setShouldAutoplay:(BOOL)shouldAutoplay {
+    _shouldAutoplay = shouldAutoplay;
+    if (shouldAutoplay) [self play];
+}
 - (void)setFullscreen:(BOOL)fullscreen animated:(BOOL)animated { _fullscreen = fullscreen; }
 - (void)setOrientation:(NSInteger)orientation animated:(BOOL)animated {}
 
 - (void)play {
+    if (_playing) return;
+    _playing = YES;
     log("skipping movie %s", _contentURL.lastPathComponent.UTF8String ?: "?");
     _finished = NO;
     [self retain];
@@ -61,10 +74,38 @@ using namespace b32;
 - (void)finish {
     if (_finished) return;
     _finished = YES;
+    _playing = NO;
     [[NSNotificationCenter defaultCenter]
         postNotificationName:MPMoviePlayerPlaybackDidFinishNotification
                       object:self
                     userInfo:@{MPMoviePlayerPlaybackDidFinishReasonUserInfoKey : @(MPMovieFinishReasonUserExited)}];
+}
+
+@end
+
+@interface B32Compat_MPMoviePlayerViewController : UIViewController
+@property (nonatomic, readonly) B32Compat_MPMoviePlayerController *moviePlayer;
+@end
+
+@implementation B32Compat_MPMoviePlayerViewController
+
+- (instancetype)initWithContentURL:(NSURL *)url {
+    if ((self = [super initWithNibName:nil bundle:nil]))
+        _moviePlayer = [[B32Compat_MPMoviePlayerController alloc] initWithContentURL:url];
+    return self;
+}
+
+- (void)dealloc {
+    [_moviePlayer release];
+    [super dealloc];
+}
+
+- (void)loadView { self.view = _moviePlayer.view; }
+
+// Shown with presentMoviePlayerViewControllerAnimated:, it plays by itself.
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [_moviePlayer play];
 }
 
 @end
