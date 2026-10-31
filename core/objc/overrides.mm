@@ -133,7 +133,7 @@ B32_OVERRIDE("countByEnumeratingWithState:objects:count:") {
 // --- NSData's bytes --------------------------------------------------------------------------
 // The guest gets a copy in guest memory, freed with the data. An immutable
 // object's bytes never change, so its copy is made once; a mutable one's is
-// made on every call, and the guest's writes through it stay in the copy.
+// its mutableBytes buffer (see Bridge::mutableBytes).
 
 namespace {
 bool isData(id receiver) { return [receiver isKindOfClass:[NSData class]]; }
@@ -142,6 +142,8 @@ char immutableCopyKey;
 GuestAddr guestCopyOfBytes(OverrideCall &o) {
     NSData *data = o.receiver;
     bool isMutable = [data isKindOfClass:[NSMutableData class]];
+    // Bytes the guest is writing through mutableBytes: the same buffer.
+    if (isMutable) return o.bridge.mutableBytes(data);
     if (!isMutable)
         if (NSNumber *cached = objc_getAssociatedObject(data, &immutableCopyKey)) return cached.unsignedIntValue;
     GuestAddr copy = o.bridge.guestBytes(data.bytes, uint32_t(data.length), data);
@@ -151,14 +153,7 @@ GuestAddr guestCopyOfBytes(OverrideCall &o) {
 }  // namespace
 
 B32_OVERRIDE_WHEN(isData, "bytes") { o.c.ret(guestCopyOfBytes(o)); }
-B32_OVERRIDE_WHEN(isData, "mutableBytes") {
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
-        log("-[NSMutableData mutableBytes]: the guest writes to a copy");
-    }
-    o.c.ret(guestCopyOfBytes(o));
-}
+B32_OVERRIDE_WHEN(isData, "mutableBytes") { o.c.ret(o.bridge.mutableBytes(o.receiver)); }
 
 // --- method lookup ------------------------------------------------------------------------------
 // An IMP the guest can call: a guest class's own method, or else
@@ -191,4 +186,22 @@ B32_OVERRIDE("instanceMethodForSelector:") {
 B32_THUNK(_class_getMethodImplementation) {
     ClassInfo *cls = c.rt.bridge().classInfo(c.args.ptr());
     c.ret(guestImp(c.rt.bridge(), cls, c.args.u32()));
+}
+
+// --- performSelector: -------------------------------------------------------------------------
+// Run as an ordinary guest message send: the result comes back as the
+// guest's raw r0, as on iOS, where callers cast performSelector: results
+// that aren't objects (the host would try to bridge them as objects).
+
+B32_OVERRIDE("performSelector:") {
+    GuestAddr sel = o.args.u32();
+    o.c.ret(uint32_t(o.bridge.send(o.guestReceiver, o.bridge.selName(sel))));
+}
+B32_OVERRIDE("performSelector:withObject:") {
+    GuestAddr sel = o.args.u32(), a = o.args.ptr();
+    o.c.ret(uint32_t(o.bridge.send(o.guestReceiver, o.bridge.selName(sel), {a})));
+}
+B32_OVERRIDE("performSelector:withObject:withObject:") {
+    GuestAddr sel = o.args.u32(), a = o.args.ptr(), b = o.args.ptr();
+    o.c.ret(uint32_t(o.bridge.send(o.guestReceiver, o.bridge.selName(sel), {a, b})));
 }
