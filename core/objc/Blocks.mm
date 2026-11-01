@@ -305,6 +305,10 @@ bool blocks::isGuestBlock(Bridge &bridge, GuestAddr object) {
     return isa && (isa == c.global || isa == c.stack || isa == c.malloc);
 }
 
+bool blocks::isGuestStackBlock(Bridge &bridge, GuestAddr object) {
+    return isGuestBlock(bridge, object) && bridge.runtime().mem().read<uint32_t>(object) == guestClasses().stack;
+}
+
 id blocks::toHost(Bridge &bridge, GuestAddr object) {
     if (!isGuestBlock(bridge, object)) return nil;
     GuestAddr isa = bridge.runtime().mem().read<uint32_t>(object);
