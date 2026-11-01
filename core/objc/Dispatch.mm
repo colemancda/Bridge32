@@ -398,6 +398,7 @@ struct Trampoline {
     GuestAddr sel;
     HostCall *call;
     std::string guestTypes;
+    bool fastEnumeration = false;  // -countByEnumeratingWithState:objects:count:
 };
 
 std::mutex trampolinesLock;
@@ -449,12 +450,50 @@ void bounceOut(Bridge &bridge, const std::vector<Bounce> &bounces) {
     }
 }
 
+// -countByEnumeratingWithState:objects:count: called by the host on a guest
+// collection: the guest fills a 32-bit NSFastEnumerationState whose items
+// are guest objects. The guest's state lives in the host state's extra[0..3]
+// (32 bytes, untouched by the caller) between calls, the mutations word the
+// host watches is a copy in extra[4], and the items are converted into the
+// host's buffer, or a larger autoreleased one if the guest returns more.
+NSUInteger fastEnumerate(Bridge &bridge, Trampoline *t, void **args) {
+    id self = *static_cast<id *>(args[0]);
+    auto *state = *static_cast<NSFastEnumerationState **>(args[2]);
+    auto *buffer = *static_cast<__unsafe_unretained id **>(args[3]);
+    auto len = uint32_t(*static_cast<NSUInteger *>(args[4]));
+    Runtime &rt = bridge.runtime();
+    GuestMemory &mem = rt.mem();
+    GuestAddr guestState = rt.heap().calloc(1, 32);
+    GuestAddr guestBuffer = rt.heap().calloc(len ? len : 1, 4);
+    std::memcpy(mem.ptr<uint8_t>(guestState), state->extra, 32);
+    uint32_t n = uint32_t(Runtime::threadCpu().call(
+        t->imp, {bridge.toGuest(self), t->sel, guestState, guestBuffer, len}));
+    std::memcpy(state->extra, mem.ptr<uint8_t>(guestState), 32);
+    GuestAddr items = mem.read<uint32_t>(guestState + 4), mutations = mem.read<uint32_t>(guestState + 8);
+    state->state = 1;
+    state->extra[4] = mutations ? mem.read<uint32_t>(mutations) : 0;
+    state->mutationsPtr = &state->extra[4];
+    __unsafe_unretained id *out = buffer;
+    if (n > len) out = (__unsafe_unretained id *)[NSMutableData dataWithLength:n * sizeof(id)].mutableBytes;
+    for (uint32_t i = 0; i < n; i++) out[i] = bridge.toHost(mem.read<uint32_t>(items + i * 4));
+    state->itemsPtr = out;
+    rt.heap().free(guestState);
+    rt.heap().free(guestBuffer);
+    return n;
+}
+
 void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
     auto *t = static_cast<Trampoline *>(user);
+    if (t->fastEnumeration) {
+        *static_cast<ffi_arg *>(ret) = fastEnumerate(*t->bridge, t, args);
+        return;
+    }
     Bridge &bridge = *t->bridge;
-    // B32_TRACE_CALLS=1 logs every host-to-guest method call.
-    static const bool trace = getenv("B32_TRACE_CALLS") != nullptr;
-    if (trace)
+    // B32_TRACE_CALLS=1 logs every host-to-guest method call; any other
+    // value logs the calls whose selector contains it.
+    static const char *trace = getenv("B32_TRACE_CALLS");
+    static const bool traceAll = trace && std::strcmp(trace, "1") == 0;
+    if (trace && (traceAll || std::strstr(bridge.selName(t->sel), trace)))
         log("host -> guest %c[%s %s]", object_isClass(*static_cast<id *>(args[0])) ? '+' : '-',
             object_getClassName(*static_cast<id *>(args[0])), bridge.selName(t->sel));
     Runtime &rt = bridge.runtime();
@@ -540,6 +579,7 @@ void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &m
     void *code = nullptr;
     auto *closure = static_cast<ffi_closure *>(ffi_closure_alloc(sizeof(ffi_closure), &code));
     auto *t = new Trampoline{this, method.imp, sel, &hc, method.types};
+    t->fastEnumeration = std::strcmp(selName(sel), "countByEnumeratingWithState:objects:count:") == 0;
     if (!closure || ffi_prep_closure_loc(closure, &hc.cif, trampolineEntry, t, code) != FFI_OK)
         fatal("could not create a trampoline for %s", sel_getName(hsel));
     {
