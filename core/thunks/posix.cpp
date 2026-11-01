@@ -946,10 +946,29 @@ B32_THUNK(_os_log_pack_send) { c.ret(0); }
 
 // --- UUIDs (uuid_t is 16 bytes in both) -------------------------------------------------------------
 
+B32_THUNK(_uuid_generate) { ::uuid_generate(c.mem.ptr<unsigned char>(c.args.ptr())); }
 B32_THUNK(_uuid_generate_random) { ::uuid_generate_random(c.mem.ptr<unsigned char>(c.args.ptr())); }
 B32_THUNK(_uuid_unparse) {
     const unsigned char *uu = c.mem.ptr<unsigned char>(c.args.ptr());
     ::uuid_unparse(uu, c.mem.ptr<char>(c.args.ptr()));
+}
+B32_THUNK(_uuid_unparse_lower) {
+    const unsigned char *uu = c.mem.ptr<unsigned char>(c.args.ptr());
+    ::uuid_unparse_lower(uu, c.mem.ptr<char>(c.args.ptr()));
+}
+B32_THUNK(_uuid_unparse_upper) {
+    const unsigned char *uu = c.mem.ptr<unsigned char>(c.args.ptr());
+    ::uuid_unparse_upper(uu, c.mem.ptr<char>(c.args.ptr()));
+}
+B32_THUNK(_uuid_clear) { ::uuid_clear(c.mem.ptr<unsigned char>(c.args.ptr())); }
+B32_THUNK(_uuid_is_null) { c.ret(uint32_t(::uuid_is_null(c.mem.ptr<unsigned char>(c.args.ptr())))); }
+B32_THUNK(_uuid_copy) {
+    unsigned char *dst = c.mem.ptr<unsigned char>(c.args.ptr());
+    ::uuid_copy(dst, c.mem.ptr<unsigned char>(c.args.ptr()));
+}
+B32_THUNK(_uuid_compare) {
+    const unsigned char *a = c.mem.ptr<unsigned char>(c.args.ptr());
+    c.ret(uint32_t(::uuid_compare(a, c.mem.ptr<unsigned char>(c.args.ptr()))));
 }
 B32_THUNK(_uuid_parse) {
     const char *in = c.mem.cstr(c.args.ptr());
