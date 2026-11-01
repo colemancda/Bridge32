@@ -269,6 +269,10 @@ ClassInfo *Bridge::stubForName(const std::string &name) {
     Class host = objc_getClass(("B32Compat_" + name).c_str());
     if (!host) host = objc_getClass(name.c_str());
     if (!host) log("class %s doesn't exist on the host; messages to it will fail", name.c_str());
+    // A name that finds a class the bridge already knows: a guest class's
+    // shadow under its demangled Swift name ("Module.Class"), say.
+    if (host)
+        if (auto it = byHostClass_.find(host); it != byHostClass_.end()) return it->second;
     return makeStub(host, name);
 }
 
@@ -497,11 +501,11 @@ void Bridge::collectProtocols(GuestAddr list, std::vector<std::string> &names) {
 
 void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     ClassInfo *super = cls->super;
-    if (!super) {
-        log("guest root class %s has no host counterpart", cls->name.c_str());
-        return;
-    }
-    if (!super->host) {
+    // A guest root class (the Swift runtime's SwiftObject) gets an NSObject
+    // shadow, so its objects can reach the host; its own NSObject-protocol
+    // methods (retain, release, isEqual:...) are installed over NSObject's.
+    Class hostSuper = super ? super->host : [NSObject class];
+    if (super && !super->host) {
         // No shadow class: the guest class works for guest-to-guest calls
         // only, and anything reaching the host fails with a clear message.
         log("class %s's superclass %s is missing on the host", cls->name.c_str(), super->name.c_str());
@@ -515,7 +519,7 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
         name = "B32_" + name;
         log("guest class %s clashes with a host class; its shadow is %s", cls->name.c_str(), name.c_str());
     }
-    Class shadow = objc_allocateClassPair(super->host, name.c_str(), 0);
+    Class shadow = objc_allocateClassPair(hostSuper, name.c_str(), 0);
     cls->host = shadow;
     cls->meta->host = object_getClass(shadow);
     // Register first: method lookups on an unregistered class pair abort, and
@@ -528,7 +532,7 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     for (auto &[sel, method] : cls->meta->methods)
         if (selName(sel) != std::string("initialize")) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
     // Subclasses of guest classes inherit this from their guest superclass.
-    if (!super->isGuest && !cls->methods.count(guestSel("setValue:forUndefinedKey:")))
+    if ((!super || !super->isGuest) && !cls->methods.count(guestSel("setValue:forUndefinedKey:")))
         class_addMethod(shadow, @selector(setValue:forUndefinedKey:), reinterpret_cast<IMP>(shadowSetValueForUndefinedKey),
                         "v@:@@");
 }
@@ -658,11 +662,72 @@ GuestAddr Bridge::allocObject(id object, ClassInfo *isa, uint32_t size) {
     return addr;
 }
 
+// A guest object of a guest class with a host ancestor that the guest
+// allocated without the bridge (Swift objects such as _NSContiguousString).
+// Its host half is made in place; the guest keeps owning the memory, so the
+// host half lives as long as the bridge and is never freed with it.
+id Bridge::adoptGuestObject(GuestAddr addr, ClassInfo *isa) {
+    id object = class_createInstance(isa->host, 0);
+    uint32_t handle;
+    if (!freeHandles_.empty()) {
+        handle = freeHandles_.back();
+        freeHandles_.pop_back();
+    } else {
+        handle = uint32_t(handleObjects_.size());
+        handleObjects_.push_back(nil);
+        handleGuests_.push_back(0);
+    }
+    handleByGuest_[addr] = handle;
+    handleObjects_[handle] = object;
+    handleGuests_[handle] = addr;
+    guestByHost_[object] = addr;
+    adopted_[handle] = isa->addr;
+    return object;
+}
+
+void Bridge::guestObjectDestroyed(GuestAddr object) {
+    std::lock_guard guard(lock_);
+    auto it = handleByGuest_.find(object);
+    if (it == handleByGuest_.end() || !adopted_.count(it->second)) return;
+    uint32_t handle = it->second;
+    // The host half stays allocated (host code may still hold it); it just no
+    // longer stands for this memory.
+    guestByHost_.erase(handleObjects_[handle]);
+    handleByGuest_.erase(it);
+    handleObjects_[handle] = nil;
+    handleGuests_[handle] = 0;
+    freeHandles_.push_back(handle);
+    adopted_.erase(handle);
+}
+
+GuestAddr Bridge::createInstance(GuestAddr cls, uint32_t extra) {
+    std::lock_guard guard(lock_);
+    ClassInfo *info = classInfo(cls);
+    if (!info || info->isMeta || !info->host) fatal("class_createInstance(0x%08x): not a class the host has", cls);
+    id object = class_createInstance(info->host, 0);
+    return allocObject(object, info, (info->isGuest ? info->instanceSize : kObjectHeaderSize) + extra);
+}
+
+void Bridge::disposeObject(GuestAddr object) {
+    std::unique_lock guard(lock_);
+    auto it = handleByGuest_.find(object);
+    if (it != handleByGuest_.end() && !adopted_.count(it->second)) {
+        // Swift's factory initializers dispose of the object they allocated
+        // and never initialized; its sentinel goes with it and forgets the handle.
+        id host = handleObjects_[it->second];
+        guard.unlock();
+        object_dispose(host);
+        return;
+    }
+    guestObjectDestroyed(object);
+    rt_.heap().free(object);
+}
+
 void Bridge::forget(uint32_t handle) {
     std::lock_guard guard(lock_);
     guestByHost_.erase(handleObjects_[handle]);
     handleByGuest_.erase(handleGuests_[handle]);
-    rt_.heap().free(handleGuests_[handle]);
+    if (!adopted_.erase(handle)) rt_.heap().free(handleGuests_[handle]);
     handleObjects_[handle] = nil;
     handleGuests_[handle] = 0;
     freeHandles_.push_back(handle);
@@ -831,6 +896,7 @@ id Bridge::toHost(GuestAddr addr) {
                   rt_.thunks().nameOf(addr & 0xffffff).c_str());
         GuestMemory &mem = rt_.mem();
         ClassInfo *isa = mem.isMapped(addr) ? classInfo(mem.read<uint32_t>(addr)) : nullptr;
+        if (isa && isa->isGuest && !isa->isMeta && isa->host) return adoptGuestObject(addr, isa);
         if (mem.isMapped(addr))
             fatal("0x%08x is not a live object (from 0x%08x; isa %s; words %08x %08x %08x %08x)", addr,
                   Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
@@ -839,6 +905,15 @@ id Bridge::toHost(GuestAddr addr) {
         fatal("0x%08x is not a live object (unmapped; thread %x)", addr, pthread_mach_thread_np(pthread_self()));
     }
     uint32_t handle = it->second;
+    if (auto adopted = adopted_.find(handle); adopted != adopted_.end()) {
+        // The guest freed it and reused the memory for an object of another class.
+        GuestAddr isaAddr = rt_.mem().read<uint32_t>(addr);
+        if (isaAddr != adopted->second) {
+            guestObjectDestroyed(addr);
+            guard.unlock();
+            return toHost(addr);
+        }
+    }
     id object = handleObjects_[handle];
     if (!mutableBuffers_.empty()) syncMutableBytes(object);
     return object;
