@@ -43,6 +43,7 @@ Cpu &Runtime::threadCpu() {
     rt.mem_->map(stackBottom, layout::kStackSize);
     cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
     currentCpuForThread = cpu.get();
+    cpu->bindToCurrentThread();
     rt.attachedCpus_.push_back(std::move(cpu));
     return *currentCpuForThread;
 }
@@ -70,6 +71,7 @@ uint32_t Runtime::runThread(uint32_t slot, GuestAddr fn, GuestAddr arg) {
     if (!mem_->isMapped(stackBottom)) mem_->map(stackBottom, layout::kStackSize);
     cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
     currentCpuForThread = cpu.get();
+    cpu->bindToCurrentThread();
     void *pool = objc_autoreleasePoolPush();
     uint32_t result = 0;
     try {
@@ -80,6 +82,7 @@ uint32_t Runtime::runThread(uint32_t slot, GuestAddr fn, GuestAddr arg) {
         std::exit(request.status);
     }
     objc_autoreleasePoolPop(pool);
+    cpu->unbindThread();
     currentCpuForThread = nullptr;
     return result;
 }
@@ -329,6 +332,7 @@ int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::st
     GuestAddr sp = buildProcessStack(stackBottom + layout::kStackSize, argv, envp, &argvAddr, &envpAddr, &appleAddr);
     cpu_->setReg(Cpu::SP, sp);
     currentCpuForThread = cpu_.get();
+    cpu_->bindToCurrentThread();
     // Catches host objects autoreleased outside any guest pool.
     void *pool = objc_autoreleasePoolPush();
     struct PoolPop {
