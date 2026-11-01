@@ -4,8 +4,11 @@
 
 #include "core/mem/GuestMemory.h"
 
+#include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <mutex>
 #include <vector>
 
 namespace b32 {
@@ -48,14 +51,61 @@ public:
     // Ends the current run() as if the sentinel were reached (exit()).
     void stop() { stopRequested_ = true; }
 
+    // The host thread running this Cpu, by its Mach port (what the guest's
+    // mach_thread_self returns), for Mach's thread calls.
+    void bindToCurrentThread();
+    void unbindThread();
+    static Cpu *forThread(uint32_t port);
+    static std::vector<uint32_t> threadPorts();
+
+    // Suspension from another thread (Mach thread_suspend, which garbage
+    // collectors use to stop the world): suspend() returns once the thread
+    // isn't running guest code, and it doesn't run any more until resumed.
+    // A thread inside a thunk carries on with it; its registers stay as they
+    // were at the SVC.
+    void suspend();
+    void resume();
+    int suspendCount();
+
+    // Guest signal handlers (sigaction), process-wide. A guest access to
+    // unmapped memory goes to the SIGSEGV (or SIGBUS) handler when there is
+    // one: Mono turns those faults into NullReferenceExceptions.
+    struct SignalAction {
+        GuestAddr handler = 0;  // 0 is SIG_DFL, 1 SIG_IGN
+        uint32_t mask = 0, flags = 0;
+    };
+    static SignalAction signalAction(int sig);
+    static SignalAction setSignalAction(int sig, SignalAction action);  // returns the old one
+    static bool guestHandlesFaults();
+
 protected:
     // Executes until an SVC; returns its immediate. The PC is left after it.
     virtual uint32_t runUntilSvc() = 0;
+
+    // Runs the guest's handler for a fault at `addr` by the instruction at
+    // the PC, as the kernel would: with siginfo and a ucontext of the
+    // faulting state on the stack, resuming from whatever state the handler
+    // leaves there. Fatal when there's no handler.
+    void deliverFault(uint32_t addr, bool write);
+
+    // Bracket each stretch of guest execution in runUntilSvc: enterGuest
+    // waits out a suspension, leaveGuest lets suspend() return.
+    void enterGuest();
+    void leaveGuest();
+    // Makes the running guest code return to runUntilSvc soon; called from
+    // another thread.
+    virtual void requestHalt() = 0;
 
 private:
     GuestMemory &mem_;
     SvcHandler handler_;
     bool stopRequested_ = false;
+
+    std::mutex suspendLock_;
+    std::condition_variable suspendChanged_;
+    int suspendCount_ = 0;
+    bool inGuest_ = false;
+    uint32_t thread_ = 0;
 };
 
 }  // namespace b32
