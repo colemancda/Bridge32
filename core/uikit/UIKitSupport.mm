@@ -370,6 +370,12 @@ static void startWindowDumps() {
     if (!getenv("B32_DUMP_WINDOW")) return;
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"b32-window.png"];
     NSTimer *timer = [NSTimer timerWithTimeInterval:5 repeats:YES block:^(NSTimer *) {
+        // ...and every guest window's view hierarchy to b32-window.txt.
+        NSMutableString *views = [NSMutableString string];
+        for (UIWindow *w in guestWindows)
+            [views appendFormat:@"%@\n\n", [w performSelector:NSSelectorFromString(@"recursiveDescription")]];
+        [views writeToFile:[path.stringByDeletingPathExtension stringByAppendingPathExtension:@"txt"] atomically:YES
+                  encoding:NSUTF8StringEncoding error:nil];
         UIWindow *window = uikit::guestKeyWindow();
         if (!window) return;
         // A GLKView's drawing isn't in its layer for drawViewHierarchy to
