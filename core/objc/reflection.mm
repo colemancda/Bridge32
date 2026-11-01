@@ -92,6 +92,8 @@ void Bridge::setMethodImp(GuestAddr method, GuestAddr imp) {
 }
 
 GuestAddr Bridge::addMethod(ClassInfo *cls, GuestAddr sel, GuestAddr imp, const std::string &types, bool replace) {
+    // Swizzling code passes method_getName of a method a class lacks: NULL.
+    if (!sel) return 0;
     std::lock_guard guard(lock_);
     if (auto it = cls->methods.find(sel); it != cls->methods.end() && it->second.entry) {
         if (!replace) return 0;
@@ -336,8 +338,52 @@ B32_THUNK(_property_copyAttributeList) {
 B32_THUNK(_property_getName) { c.ret(fieldOf(c, c.args.ptr(), 0)); }
 B32_THUNK(_property_getAttributes) { c.ret(fieldOf(c, c.args.ptr(), 4)); }
 
+// char *property_copyAttributeValue(objc_property_t, const char *name): the
+// value of one attribute ("T@\"NSString\",&,N,V_name" has T, &, N and V), in
+// a buffer the guest frees; NULL when the property doesn't have it.
+B32_THUNK(_property_copyAttributeValue) {
+    GuestAddr attributes = fieldOf(c, c.args.ptr(), 4);
+    GuestAddr nameAddr = c.args.ptr();
+    if (!attributes || !nameAddr) {
+        c.ret(0);
+        return;
+    }
+    std::string all = c.mem.cstr(attributes), name = c.mem.cstr(nameAddr);
+    size_t start = 0;
+    while (start <= all.size()) {
+        // Commas inside a quoted type name ("T@\"<P1,P2>\"") don't end the attribute.
+        size_t end = start;
+        bool quoted = false;
+        for (; end < all.size() && (quoted || all[end] != ','); end++)
+            if (all[end] == '"') quoted = !quoted;
+        std::string attribute = all.substr(start, end - start);
+        if (attribute.compare(0, name.size(), name) == 0) {
+            std::string value = attribute.substr(name.size());
+            GuestAddr out = c.heap.alloc(uint32_t(value.size() + 1));
+            c.mem.copyIn(out, value.c_str(), value.size() + 1);
+            c.ret(out);
+            return;
+        }
+        start = end + 1;
+    }
+    c.ret(0);
+}
+
 // protocol_t { isa, const char *name, ... }
 B32_THUNK(_protocol_getName) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + 4)); }
+// BOOL protocol_isEqual(Protocol *, Protocol *): the same protocol, or two of the same name.
+B32_THUNK(_protocol_isEqual) {
+    GuestAddr a = c.args.ptr(), b = c.args.ptr();
+    if (a == b) {
+        c.ret(a != 0);
+        return;
+    }
+    if (!a || !b) {
+        c.ret(0);
+        return;
+    }
+    c.ret(std::strcmp(c.mem.cstr(c.mem.read<uint32_t>(a + 4)), c.mem.cstr(c.mem.read<uint32_t>(b + 4))) == 0);
+}
 B32_THUNK(_NSStringFromProtocol) {
     GuestAddr protocol = c.args.ptr();
     c.ret(protocol ? bridge(c).toGuest(@(c.mem.cstr(c.mem.read<uint32_t>(protocol + 4)))) : 0);
