@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cmath>
+#include <csignal>
 #include <cstring>
 #include <ctime>
 #include <unistd.h>
@@ -168,6 +169,7 @@ B32_THUNK(_getgid) { c.ret(getgid()); }
 B32_THUNK(_getuid) { c.ret(getuid()); }
 B32_THUNK(_getpid) { c.ret(uint32_t(getpid())); }
 B32_THUNK(_getppid) { c.ret(uint32_t(getppid())); }
+B32_THUNK(_getdtablesize) { c.ret(uint32_t(getdtablesize())); }
 
 B32_THUNK(_time) {
     GuestAddr out = c.args.ptr();
@@ -185,7 +187,28 @@ B32_THUNK(_statfs) {
 
 // Used for "don't back up" flags; nothing to back up from here.
 B32_THUNK(_setxattr) { c.ret(0); }
-B32_THUNK(_sigaction) { c.ret(0); }
+
+// int sigaction(int sig, const struct sigaction *act, struct sigaction *oact):
+// the guest's struct is { handler, sa_mask, sa_flags }. Handlers are only
+// recorded; Cpu calls the SIGSEGV/SIGBUS one for guest faults, and no other
+// signal is ever delivered.
+B32_THUNK(_sigaction) {
+    int sig = c.args.i32();
+    GuestAddr act = c.args.ptr(), oact = c.args.ptr();
+    Cpu::SignalAction old = Cpu::signalAction(sig);
+    if (act) {
+        Cpu::SignalAction action{c.mem.read<uint32_t>(act), c.mem.read<uint32_t>(act + 4), c.mem.read<uint32_t>(act + 8)};
+        Cpu::setSignalAction(sig, action);
+        if ((sig == SIGSEGV || sig == SIGBUS) && action.handler > 1)
+            log("guest handles signal %d at 0x%08x", sig, action.handler);
+    }
+    if (oact) {
+        c.mem.write<uint32_t>(oact, old.handler);
+        c.mem.write<uint32_t>(oact + 4, old.mask);
+        c.mem.write<uint32_t>(oact + 8, old.flags);
+    }
+    c.ret(0);
+}
 
 // --- file descriptors -----------------------------------------------------------------------
 
