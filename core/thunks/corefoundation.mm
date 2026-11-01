@@ -75,6 +75,9 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFWriteStreamCanAcceptBytes", "B:o"}, {"CFWriteStreamSetProperty", "B:ooo"}, {"CFWriteStreamCopyError", "o:o"},
     {"CFRunLoopAddSource", "v:ooo"}, {"CFRunLoopRemoveSource", "v:ooo"}, {"CFRunLoopAddObserver", "v:ooo"},
     {"CFRunLoopRemoveObserver", "v:ooo"}, {"CFRunLoopObserverInvalidate", "v:o"},
+    {"CFRunLoopSourceSignal", "v:o"}, {"CFRunLoopSourceInvalidate", "v:o"}, {"CFRunLoopSourceIsValid", "B:o"},
+    {"CFDictionaryCreateMutableCopy", "o:ozo"}, {"CFLocaleGetValue", "o:oo"}, {"CFURLCopyQueryString", "o:oo"},
+    {"CFRunLoopIsWaiting", "B:o"}, {"CFRunLoopRemoveTimer", "v:ooo"},
     // CFError, more CFString, CFHTTPMessage and stream calls (PopCap games).
     {"CFStringCreateExternalRepresentation", "o:oouu"}, {"CFStringCreateFromExternalRepresentation", "o:oou"},
     {"CFStringCreateWithCStringNoCopy", "o:opuo"}, {"CFURLCopyScheme", "o:o"},
@@ -669,4 +672,55 @@ B32_THUNK(_CFReadStreamSetClient) {
     auto *client = new GuestStreamClient{callback, context ? c.mem.read<uint32_t>(context + 4) : 0, guestStream};
     CFStreamClientContext hostContext = {0, client, nullptr, nullptr, nullptr};
     c.ret(CFReadStreamSetClient(stream, events, streamEvent, &hostContext));
+}
+
+// --- run loop sources ----------------------------------------------------------------------
+
+namespace {
+// A version 0 source's guest callbacks: schedule(info, runLoop, mode),
+// cancel(info, runLoop, mode) and perform(info).
+struct GuestSource {
+    GuestAddr info, schedule, cancel, perform;
+};
+
+void sourceScheduled(void *data, CFRunLoopRef runLoop, CFRunLoopMode mode) {
+    auto *s = static_cast<GuestSource *>(data);
+    objc::Bridge &b = *objc::Bridge::shared();
+    if (s->schedule) Runtime::threadCpu().call(s->schedule, {s->info, b.toGuest((id)runLoop), b.toGuest((id)mode)});
+}
+void sourceCancelled(void *data, CFRunLoopRef runLoop, CFRunLoopMode mode) {
+    auto *s = static_cast<GuestSource *>(data);
+    objc::Bridge &b = *objc::Bridge::shared();
+    if (s->cancel) Runtime::threadCpu().call(s->cancel, {s->info, b.toGuest((id)runLoop), b.toGuest((id)mode)});
+}
+void sourcePerformed(void *data) {
+    auto *s = static_cast<GuestSource *>(data);
+    if (s->perform) Runtime::threadCpu().call(s->perform, {s->info});
+}
+}  // namespace
+
+// CFRunLoopSourceRef CFRunLoopSourceCreate(CFAllocatorRef, CFIndex order, CFRunLoopSourceContext *)
+// The guest context is { version, info, retain, release, copyDescription, equal,
+// hash, schedule, cancel, perform }; only version 0 sources (signalled ones)
+// are supported, and info is kept as given.
+B32_THUNK(_CFRunLoopSourceCreate) {
+    c.args.ptr();
+    CFIndex order = c.args.i32();
+    GuestAddr context = c.args.ptr();
+    if (!context || c.mem.read<uint32_t>(context) != 0) fatal("only version 0 run loop sources are supported");
+    auto *s = new GuestSource{c.mem.read<uint32_t>(context + 4), c.mem.read<uint32_t>(context + 28),
+                              c.mem.read<uint32_t>(context + 32), c.mem.read<uint32_t>(context + 36)};
+    CFRunLoopSourceContext host = {};
+    host.info = s;
+    host.schedule = sourceScheduled;
+    host.cancel = sourceCancelled;
+    host.perform = sourcePerformed;
+    c.ret(bridge(c).toGuest((id)CFRunLoopSourceCreate(nullptr, order, &host)));
+}
+
+// CFTypeRef CFAutorelease(CFTypeRef): an autorelease of the host object.
+B32_THUNK(_CFAutorelease) {
+    GuestAddr object = c.args.ptr();
+    if (object) CFAutorelease((CFTypeRef)bridge(c).toHost(object));
+    c.ret(object);
 }
