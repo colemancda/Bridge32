@@ -4,6 +4,9 @@
 #include "core/Runtime.h"
 #include "core/mem/Layout.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace b32 {
 
 namespace {
@@ -50,6 +53,11 @@ void ThunkTable::dispatch(Runtime &rt, Cpu &cpu, uint32_t index) {
         name = entries_[index].name.c_str();
     }
     if (!fn) fatal("missing symbol %s (called from 0x%08x)", name, cpu.reg(Cpu::LR));
+    // B32_TRACE_THUNKS=1 logs every import called; any other value only the
+    // imports whose names contain it.
+    static const char *trace = getenv("B32_TRACE_THUNKS");
+    if (trace && (!strcmp(trace, "1") || strstr(name, trace)))
+        log("%s from 0x%08x", name, cpu.reg(Cpu::LR));
     Call call{rt, cpu, rt.mem(), rt.heap(), Args(cpu), name};
     fn(call);
 }
