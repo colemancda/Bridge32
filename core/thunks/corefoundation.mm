@@ -407,6 +407,21 @@ B32_THUNK(_CFNumberGetValue) {
     }
 }
 
+// CFNumberType CFNumberGetType(CFNumberRef): types whose size differs in the
+// guest (long, CFIndex, NSInteger, CGFloat are 64-bit here) are reported by
+// their explicit 64-bit names, which mean the same in both.
+B32_THUNK(_CFNumberGetType) {
+    CFNumberType type = CFNumberGetType((CFNumberRef)bridge(c).toHost(c.args.ptr()));
+    switch (type) {
+    case kCFNumberLongType: case kCFNumberCFIndexType: case kCFNumberNSIntegerType: type = kCFNumberSInt64Type; break;
+    case kCFNumberCGFloatType: type = kCFNumberFloat64Type; break;
+    default: break;
+    }
+    c.ret(uint32_t(type));
+}
+// CFIndex CFNumberGetByteSize(CFNumberRef): after that translation, the sizes agree.
+B32_THUNK(_CFNumberGetByteSize) { c.ret(uint32_t(CFNumberGetByteSize((CFNumberRef)bridge(c).toHost(c.args.ptr())))); }
+
 // CFNumberRef CFNumberCreate(CFAllocatorRef, CFNumberType, const void *valuePtr)
 B32_THUNK(_CFNumberCreate) {
     c.args.ptr();
