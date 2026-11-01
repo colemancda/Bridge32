@@ -156,6 +156,24 @@ B32_THUNK(_strtoul) {
     c.ret(uint32_t(std::min<unsigned long long>(value, UINT32_MAX)));
 }
 
+B32_THUNK(_strtoll) {
+    GuestAddr str = c.args.ptr(), endptr = c.args.ptr();
+    int base = c.args.i32();
+    const char *s = c.mem.cstr(str);
+    char *end;
+    long long value = std::strtoll(s, &end, base);
+    if (endptr) c.mem.write<uint32_t>(endptr, str + GuestAddr(end - s));
+    c.ret64(uint64_t(value));
+}
+B32_THUNK(_strtoull) {
+    GuestAddr str = c.args.ptr(), endptr = c.args.ptr();
+    int base = c.args.i32();
+    const char *s = c.mem.cstr(str);
+    char *end;
+    unsigned long long value = std::strtoull(s, &end, base);
+    if (endptr) c.mem.write<uint32_t>(endptr, str + GuestAddr(end - s));
+    c.ret64(uint64_t(value));
+}
 B32_THUNK(_atoi) { c.ret(uint32_t(std::atoi(c.mem.cstr(c.args.ptr())))); }
 
 // --- string.h --------------------------------------------------------------
@@ -598,6 +616,7 @@ B32_THUNK(_ftello) { c.ret64(uint64_t(::ftello(hostFile(c, c.args.ptr())))); }
 B32_THUNK(_rewind) { std::rewind(hostFile(c, c.args.ptr())); }
 B32_THUNK(_feof) { c.ret(uint32_t(std::feof(hostFile(c, c.args.ptr())))); }
 B32_THUNK(_ferror) { c.ret(uint32_t(std::ferror(hostFile(c, c.args.ptr())))); }
+B32_THUNK(_clearerr) { std::clearerr(hostFile(c, c.args.ptr())); }
 B32_THUNK(_fflush) {
     GuestAddr f = c.args.ptr();
     c.ret(uint32_t(std::fflush(f ? hostFile(c, f) : nullptr)));
