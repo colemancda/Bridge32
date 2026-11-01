@@ -924,6 +924,13 @@ B32_THUNK(_execvp) {
     setGuestErrno(c, ENOTSUP);
     c.ret(uint32_t(-1));
 }
+// int system(const char *command): no shell either; system(NULL) asks
+// whether there is one.
+B32_THUNK(_system) {
+    GuestAddr command = c.args.ptr();
+    if (command) log("system(\"%s\") ignored", c.mem.cstr(command));
+    c.ret(command ? uint32_t(-1) : 0);
+}
 
 // --- logging: os_log goes nowhere -----------------------------------------------------------------
 // os_log_type_enabled says no, so code that checks first skips building messages.
