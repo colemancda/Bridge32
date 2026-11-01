@@ -180,6 +180,20 @@ GuestAddr guestCopyOfBytes(OverrideCall &o) {
 B32_OVERRIDE_WHEN(isData, "bytes") { o.c.ret(guestCopyOfBytes(o)); }
 B32_OVERRIDE_WHEN(isData, "mutableBytes") { o.c.ret(o.bridge.mutableBytes(o.receiver)); }
 
+// - (void)enumerateByteRangesUsingBlock:(void (^)(const void *bytes, NSRange, BOOL *stop))
+// Host data (dispatch_data from NSURLSession) may be in several pieces, but
+// the guest's copy is contiguous: one range, the whole of it.
+B32_OVERRIDE_WHEN(isData, "enumerateByteRangesUsingBlock:") {
+    GuestAddr block = o.args.ptr();
+    NSData *data = o.receiver;
+    if (!block || data.length == 0) return;
+    GuestAddr stop = o.c.heap.alloc(1);
+    o.c.mem.write<uint8_t>(stop, 0);
+    Runtime::threadCpu().call(o.c.mem.read<uint32_t>(block + 12),
+                              {block, guestCopyOfBytes(o), 0, uint32_t(data.length), stop});
+    o.c.heap.free(stop);
+}
+
 // --- method lookup ------------------------------------------------------------------------------
 // An IMP the guest can call: a guest class's own method, or else
 // objc_msgSend itself, which reaches the method (on the host) for any
