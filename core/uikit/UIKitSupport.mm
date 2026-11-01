@@ -455,27 +455,55 @@ B32_OVERRIDE_WHEN(isTraits, "userInterfaceIdiom") { o.c.ret(guestIdiom()); }
 // A view controller presented before the scene connects (a launch dialog
 // shown from main) has no window to appear in yet, and UIKit would drop it:
 // it's presented once the scene has attached the guest's windows, with the
-// guest's completion block called after.
+// guest's completion block called after. A presentation the guest dismisses
+// before then is dropped, or it would stay up over the game for good.
 namespace {
 bool presentsBeforeScene(id receiver) { return !guestScene && [receiver isKindOfClass:[UIViewController class]]; }
+NSMutableArray<NSArray *> *heldPresentations;  // [presenter, presented] pairs not yet presented
+
+// The held pair a dismissal by this view controller (either side) would end.
+NSArray *heldPresentationFor(id controller) {
+    for (NSArray *pair in heldPresentations)
+        if (pair[0] == controller || pair[1] == controller) return pair;
+    return nil;
+}
+bool dismissesHeldPresentation(id receiver) { return heldPresentationFor(receiver) != nil; }
+
+void callGuestBlock(GuestAddr block) {
+    // block_layout { isa, flags, reserved, invoke, ... }
+    if (block) Runtime::threadCpu().call(Runtime::threadCpu().mem().read<uint32_t>(block + 12), {block});
+}
 }  // namespace
 B32_OVERRIDE_WHEN(presentsBeforeScene, "presentViewController:animated:completion:") {
     UIViewController *presenter = o.receiver;
     UIViewController *presented = o.bridge.toHost(o.args.ptr());
-    BOOL animated = o.args.u32() != 0;
+    o.args.u32();  // animated
     GuestAddr completion = o.args.ptr();
-    [presenter retain];
-    [presented retain];
+    NSArray *pair = @[ presenter, presented ];
+    if (!heldPresentations) heldPresentations = [[NSMutableArray alloc] init];
+    [heldPresentations addObject:pair];
     if (!heldLaunchWork) heldLaunchWork = [[NSMutableArray alloc] init];
     [heldLaunchWork addObject:[[^{
-        [presenter presentViewController:presented animated:animated completion:^{
-            // block_layout { isa, flags, reserved, invoke, ... }
-            if (completion) Runtime::threadCpu().call(Runtime::threadCpu().mem().read<uint32_t>(completion + 12), {completion});
-        }];
-        [presenter release];
-        [presented release];
+        if (![heldPresentations containsObject:pair]) return;  // dismissed while held
+        [heldPresentations removeObject:pair];
+        // Over the presenter, which stays in the window: launch screens are
+        // dismissed and then have their view removed by hand (Black Ops
+        // Zombies), after which UIKit never puts a covered presenter's view
+        // back, and the game gets no touches.
+        presented.modalPresentationStyle = UIModalPresentationOverFullScreen;
+        [presenter presentViewController:presented animated:NO completion:^{ callGuestBlock(completion); }];
     } copy] autorelease]];
     log("holding the presentation of %s until the scene connects", object_getClassName(presented));
+}
+
+// - (void)dismissViewControllerAnimated:(BOOL)flag completion:(void (^)(void))completion
+B32_OVERRIDE_WHEN(dismissesHeldPresentation, "dismissViewControllerAnimated:completion:") {
+    o.args.u32();
+    GuestAddr completion = o.args.ptr();
+    NSArray *pair = heldPresentationFor(o.receiver);
+    log("dropping the held presentation of %s, dismissed before it was shown", object_getClassName(pair[1]));
+    [heldPresentations removeObject:pair];
+    callGuestBlock(completion);
 }
 
 B32_OVERRIDE_WHEN(isMainBundle, "bundlePath") { o.c.ret(o.bridge.toGuest([o.receiver resourcePath])); }
