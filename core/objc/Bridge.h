@@ -131,6 +131,8 @@ public:
     std::vector<GuestAddr> guestClasses();
 
     ClassInfo *classInfo(GuestAddr cls);
+    // A class the guest built at run time (objc_readClassPair: Swift's generic classes).
+    ClassInfo *addGuestClass(GuestAddr cls) { return realizeGuestClass(cls); }
     ClassInfo *classOf(GuestAddr object);  // via the object's isa
     ClassInfo *stubFor(Class hostClass);
 
@@ -160,6 +162,15 @@ public:
 
     // Called by the sentinel when a host object with a guest side deallocates.
     void forget(uint32_t handle);
+    // The guest is freeing an object it allocated itself (objc_destructInstance):
+    // drops the host half made for it, if any.
+    void guestObjectDestroyed(GuestAddr object);
+    // object_dispose: a bridged object is disposed of on the host; one the
+    // guest allocated itself is freed.
+    void disposeObject(GuestAddr object);
+    // class_createInstance: both halves without +alloc, the guest half with
+    // `extra` bytes after the ivars (swift_allocError keeps the error there).
+    GuestAddr createInstance(GuestAddr cls, uint32_t extra);
 
     // The guest ivar named `key` or `_key` in the class chain of a guest
     // object, for KVC (nib outlets connected straight to ivars).
@@ -183,6 +194,7 @@ private:
     std::string hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const std::string &guestTypes);
     void collectProtocols(GuestAddr protocolList, std::vector<std::string> &names);
     GuestAddr allocObject(id object, ClassInfo *isa, uint32_t size);
+    id adoptGuestObject(GuestAddr addr, ClassInfo *isa);
     id cfstringToHost(GuestAddr addr);
 
     // `direct`: call this IMP instead of sending the message (no overrides).
@@ -219,6 +231,9 @@ private:
     std::vector<uint32_t> freeHandles_;
     std::unordered_map<id, GuestAddr> guestByHost_;
     std::unordered_map<GuestAddr, uint32_t> handleByGuest_;
+    // Objects the guest allocated itself (Swift's swift_allocObject) whose
+    // host half was made later: handle -> the guest isa it was made for.
+    std::unordered_map<uint32_t, GuestAddr> adopted_;
 
     // __cfstring constants: guest address -> immortal host string.
     GuestAddr cfstringIsa_ = 0;
