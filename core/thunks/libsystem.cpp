@@ -167,6 +167,7 @@ B32_THUNK(_sysctl) {
 B32_THUNK(_getgid) { c.ret(getgid()); }
 B32_THUNK(_getuid) { c.ret(getuid()); }
 B32_THUNK(_getpid) { c.ret(uint32_t(getpid())); }
+B32_THUNK(_getppid) { c.ret(uint32_t(getppid())); }
 
 B32_THUNK(_time) {
     GuestAddr out = c.args.ptr();
