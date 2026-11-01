@@ -322,6 +322,7 @@ B32_THUNK(_pthread_get_stackaddr_np) {
     GuestAddr slot = (sp - layout::kStackBase) / layout::kStackSize;
     c.ret(layout::kStackBase + (slot + 1) * layout::kStackSize);
 }
+B32_THUNK(_pthread_get_stacksize_np) { c.ret(layout::kStackSize); }
 
 // --- named semaphores: host ones, as guest handles ------------------------------------------
 
@@ -469,6 +470,12 @@ B32_THUNK(_pthread_attr_setstacksize) { c.ret(0); }
 B32_THUNK(_pthread_attr_setdetachstate) { c.ret(0); }
 B32_THUNK(_pthread_attr_setscope) { c.ret(0); }
 B32_THUNK(_pthread_attr_setschedparam) { c.ret(0); }
+// int pthread_attr_getschedparam(const pthread_attr_t *, struct sched_param *)
+B32_THUNK(_pthread_attr_getschedparam) {
+    c.args.ptr();
+    if (GuestAddr param = c.args.ptr()) c.mem.write<int32_t>(param, 31);  // the default priority
+    c.ret(0);
+}
 B32_THUNK(_pthread_attr_getdetachstate) {
     c.args.ptr();
     c.mem.write<int32_t>(c.args.ptr(), 1);  // PTHREAD_CREATE_JOINABLE
