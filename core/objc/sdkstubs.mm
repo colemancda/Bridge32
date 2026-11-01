@@ -59,6 +59,12 @@ constexpr Rule kRules[] = {
     {"Google Analytics", "GANTracker", nullptr},
     {"Crashlytics", "Crashlytics", nullptr},
     {"Crashlytics", "Fabric", nullptr},
+    // Gameplay recording, which needs CVOpenGLESTextureCaches over the
+    // game's GL context (Nimble Quest).
+    {"Everyplay", "Everyplay", nullptr},
+    {"Everyplay", "EveryplayCapture", nullptr},
+    {"Everyplay", "EveryplayFeatures", nullptr},
+    {"Everyplay", "EveryplayFaceCam", nullptr},
 };
 
 // mov r0, #0; mov r1, #0; bx lr: nil, 0, NO, 0.0 (soft-float) and 64-bit 0 alike.
