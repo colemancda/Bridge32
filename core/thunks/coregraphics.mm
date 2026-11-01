@@ -324,6 +324,7 @@ constexpr CFunction kCoreGraphics[] = {
     {"CGContextSetFillColorWithColor", "v:oo"}, {"CGContextSetStrokeColorWithColor", "v:oo"},
     {"CGContextSetInterpolationQuality", "v:oi"}, {"CGContextSetLineJoin", "v:oi"}, {"CGContextSetLineCap", "v:oi"},
     {"CGContextSetTextDrawingMode", "v:oi"}, {"CGContextAddPath", "v:oo"}, {"CGContextSetShouldAntialias", "v:ou"},
+    {"CGContextSetAllowsFontSubpixelPositioning", "v:ou"},
     {"CGContextSetAllowsAntialiasing", "v:ou"}, {"CGContextDrawPath", "v:oi"}, {"CGContextEOFillPath", "v:o"},
     {"CGContextRelease", "v:o"}, {"CGContextRetain", "o:o"}, {"CGContextFlush", "v:o"},
     {"CGBitmapContextCreateImage", "o:o"}, {"CGBitmapContextGetWidth", "z:o"},
@@ -336,7 +337,7 @@ constexpr CFunction kCoreGraphics[] = {
     {"CGFontGetAscent", "i:o"}, {"CGFontGetDescent", "i:o"}, {"CGFontGetLeading", "i:o"},
     {"CGFontGetCapHeight", "i:o"}, {"CGFontGetXHeight", "i:o"}, {"CGFontGetNumberOfGlyphs", "z:o"},
     {"CGFontCopyTableForTag", "o:ou"}, {"CGFontCreateWithFontName", "o:o"},
-    {"CGFontGetGlyphWithGlyphName", "u:oo"},
+    {"CGFontGetGlyphWithGlyphName", "u:oo"}, {"CGFontCopyFullName", "o:o"},
 };
 }  // namespace
 
@@ -445,6 +446,13 @@ B32_THUNK(_CGContextSetTextPosition) {
     auto ctx = ref<CGContextRef>(c);
     CGFloat x = cgf(c);
     CGContextSetTextPosition(ctx, x, cgf(c));
+}
+// CGPoint CGContextGetTextPosition(CGContextRef), returned through r0
+B32_THUNK(_CGContextGetTextPosition) {
+    GuestAddr out = c.args.ptr();
+    CGPoint at = CGContextGetTextPosition(ref<CGContextRef>(c));
+    c.mem.write<float>(out, float(at.x));
+    c.mem.write<float>(out + 4, float(at.y));
 }
 
 // void CGContextDrawLinearGradient(CGContextRef, CGGradientRef, CGPoint start, CGPoint end, CGGradientDrawingOptions)
@@ -576,6 +584,10 @@ B32_THUNK(_CGRectDivide) {
 }
 
 B32_THUNK(_CGAffineTransformIsIdentity) { c.ret(CGAffineTransformIsIdentity(transform(c))); }
+B32_THUNK(_CGAffineTransformEqualToTransform) {
+    CGAffineTransform a = transform(c);
+    c.ret(CGAffineTransformEqualToTransform(a, transform(c)));
+}
 
 // --- fonts and data providers -----------------------------------------------------------------
 
@@ -597,6 +609,23 @@ B32_THUNK(_CGFontGetGlyphAdvances) {
     size_t count = c.args.u32();
     GuestAddr advances = c.args.ptr();
     c.ret(CGFontGetGlyphAdvances(font, c.mem.ptr<CGGlyph>(glyphs), count, c.mem.ptr<int>(advances)));
+}
+
+// bool CGFontGetGlyphBBoxes(CGFontRef, const CGGlyph glyphs[], size_t count, CGRect bboxes[]):
+// the guest's CGRects are four floats.
+B32_THUNK(_CGFontGetGlyphBBoxes) {
+    auto font = ref<CGFontRef>(c);
+    GuestAddr glyphs = c.args.ptr();
+    size_t count = c.args.u32();
+    GuestAddr bboxes = c.args.ptr();
+    std::vector<CGRect> rects(count);
+    bool ok = CGFontGetGlyphBBoxes(font, c.mem.ptr<CGGlyph>(glyphs), count, rects.data());
+    for (size_t i = 0; ok && i < count; i++) {
+        const CGRect &r = rects[i];
+        const float v[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
+        c.mem.copyIn(bboxes + GuestAddr(i * sizeof v), v, sizeof v);
+    }
+    c.ret(ok);
 }
 
 // CGContextShowGlyphsAtPoint is gone from the macOS SDK; it's drawn with
@@ -631,11 +660,9 @@ B32_THUNK(_CGContextSetFontSize) {
 }
 
 // void CGContextShowGlyphsAtPoint(CGContextRef, CGFloat x, CGFloat y, const CGGlyph glyphs[], size_t count)
-B32_THUNK(_CGContextShowGlyphsAtPoint) {
-    auto ctx = ref<CGContextRef>(c);
-    CGFloat x = cgf(c), y = cgf(c);
-    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
-    size_t count = c.args.u32();
+namespace {
+// Draws the glyphs from (x, y) and returns where the pen ends up.
+CGFloat showGlyphsAt(CGContextRef ctx, CGFloat x, CGFloat y, const CGGlyph *glyphs, size_t count) {
     TextState state;
     {
         std::lock_guard guard(textLock);
@@ -651,6 +678,24 @@ B32_THUNK(_CGContextShowGlyphsAtPoint) {
         pen += advances[i] * scale;
     }
     CGContextShowGlyphsAtPositions(ctx, glyphs, positions.data(), count);
+    return pen;
+}
+}  // namespace
+
+B32_THUNK(_CGContextShowGlyphsAtPoint) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat x = cgf(c), y = cgf(c);
+    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
+    showGlyphsAt(ctx, x, y, glyphs, c.args.u32());
+}
+// void CGContextShowGlyphs(CGContextRef, const CGGlyph glyphs[], size_t count): from the text
+// position, which moves past them.
+B32_THUNK(_CGContextShowGlyphs) {
+    auto ctx = ref<CGContextRef>(c);
+    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
+    size_t count = c.args.u32();
+    CGPoint at = CGContextGetTextPosition(ctx);
+    CGContextSetTextPosition(ctx, showGlyphsAt(ctx, at.x, at.y, glyphs, count), at.y);
 }
 
 // --- transparency layers, masks, shadings, transformed paths ---------------------------------------
