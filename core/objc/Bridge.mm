@@ -565,6 +565,27 @@ const char *anyProtocolTypes(SEL sel, bool instance) {
 }
 }  // namespace
 
+namespace {
+// Whether two encodings take the same number of arguments, with objects in
+// the same places, as a protocol method and its implementation do.
+bool sameShape(const char *host, const std::string &guest) {
+    NSMethodSignature *h = nil, *g = nil;
+    @try {
+        h = [NSMethodSignature signatureWithObjCTypes:host];
+        g = [NSMethodSignature signatureWithObjCTypes:guest.c_str()];
+    } @catch (NSException *) {
+        return true;  // an encoding Foundation can't read: trust the host's, as before
+    }
+    if (!h || !g) return true;
+    if (h.numberOfArguments != g.numberOfArguments) return false;
+    auto isObject = [](const char *type) { return type[0] == '@' || type[0] == '#'; };
+    if (isObject(h.methodReturnType) != isObject(g.methodReturnType)) return false;
+    for (NSUInteger i = 2; i < h.numberOfArguments; i++)
+        if (isObject([h getArgumentTypeAtIndex:i]) != isObject([g getArgumentTypeAtIndex:i])) return false;
+    return true;
+}
+}  // namespace
+
 std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const std::string &guestTypes) {
     // An override of a host method: the host's encoding is authoritative.
     if (Method m = class_getInstanceMethod(lookup, sel)) return method_getTypeEncoding(m);
@@ -607,8 +628,11 @@ std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const 
     }
 
     // ...or one of any host protocol: older code implements delegate methods
-    // without declaring the protocol. Indexed once, by selector.
-    if (const char *types = anyProtocolTypes(sel, !owner->isMeta)) return types;
+    // without declaring the protocol. Indexed once, by selector. A method that
+    // only shares the name isn't one: Monopoly's animationTimerFired: takes
+    // its NSTimer, where some host protocol's takes a double.
+    if (const char *types = anyProtocolTypes(sel, !owner->isMeta))
+        if (sameShape(types, guestTypes)) return types;
 
     // A method only the guest knows: derive host types from the guest's,
     // widening geometry structs to CGFloat = double.
