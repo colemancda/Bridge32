@@ -724,3 +724,37 @@ B32_THUNK(_CFAutorelease) {
     if (object) CFAutorelease((CFTypeRef)bridge(c).toHost(object));
     c.ret(object);
 }
+
+// Boolean CFURLCreateDataAndPropertiesFromResource(CFAllocatorRef, CFURLRef, CFDataRef *data,
+//     CFDictionaryRef *properties, CFArrayRef desiredProperties, SInt32 *errorCode)
+// Long deprecated, but games still read files with it. Only the data is
+// fetched; properties come back NULL.
+B32_THUNK(_CFURLCreateDataAndPropertiesFromResource) {
+    c.args.ptr();
+    CFURLRef url = (CFURLRef)bridge(c).toHost(c.args.ptr());
+    GuestAddr dataOut = c.args.ptr(), propertiesOut = c.args.ptr();
+    c.args.ptr();
+    GuestAddr errorOut = c.args.ptr();
+    NSData *data = url ? [NSData dataWithContentsOfURL:(__bridge NSURL *)url] : nil;
+    if (dataOut) c.mem.write<uint32_t>(dataOut, data ? bridge(c).toGuest((id)CFBridgingRetain(data)) : 0);
+    if (propertiesOut) c.mem.write<uint32_t>(propertiesOut, 0);
+    if (errorOut) c.mem.write<int32_t>(errorOut, data ? 0 : kCFURLResourceNotFoundError);
+    c.ret(data ? 1 : 0);
+}
+
+// CFPropertyListRef CFPropertyListCreateFromXMLData(CFAllocatorRef, CFDataRef,
+//     CFOptionFlags mutabilityOption, CFStringRef *errorString)
+B32_THUNK(_CFPropertyListCreateFromXMLData) {
+    c.args.ptr();
+    CFDataRef data = (CFDataRef)bridge(c).toHost(c.args.ptr());
+    CFOptionFlags options = c.args.u32();
+    GuestAddr errorOut = c.args.ptr();
+    CFErrorRef error = nullptr;
+    CFPropertyListRef list = data ? CFPropertyListCreateWithData(nullptr, data, options, nullptr, &error) : nullptr;
+    if (errorOut) {
+        CFStringRef message = error ? CFErrorCopyDescription(error) : nullptr;
+        c.mem.write<uint32_t>(errorOut, message ? bridge(c).toGuest((id)message) : 0);
+    }
+    if (error) CFRelease(error);
+    c.ret(list ? bridge(c).toGuest((id)list) : 0);
+}
