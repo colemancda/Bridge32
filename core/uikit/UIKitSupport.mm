@@ -363,12 +363,31 @@ UIWindow *b32::uikit::guestKeyWindow() {
     return front;
 }
 
+// B32_DUMP_WINDOW=1: every 5 seconds the guest's key window is drawn into
+// $TMPDIR/b32-window.png, so UIKit apps can be checked without a screen (or
+// with the display asleep), as B32_DUMP_FRAMES does for OpenGL ES.
+static void startWindowDumps() {
+    if (!getenv("B32_DUMP_WINDOW")) return;
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"b32-window.png"];
+    NSTimer *timer = [NSTimer timerWithTimeInterval:5 repeats:YES block:^(NSTimer *) {
+        UIWindow *window = uikit::guestKeyWindow();
+        if (!window) return;
+        UIGraphicsImageRenderer *renderer = [[[UIGraphicsImageRenderer alloc] initWithBounds:window.bounds] autorelease];
+        NSData *png = [renderer PNGDataWithActions:^(UIGraphicsImageRendererContext *) {
+            [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
+        }];
+        [png writeToFile:path atomically:YES];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+}
+
 void b32::uikit::configureHost() {
     NSArray *families = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"B32GuestDeviceFamily"];
     if ([families isKindOfClass:[NSArray class]] && ![families containsObject:@1] && [families containsObject:@2])
         device::useIPad();
     log("guest device %s, screen %.0fx%.0f", device::current().machine, screenWidth(), screenHeight());
     startController();
+    startWindowDumps();
     mainQueueHold = [](void *queue, void *block) {
         return uikit::holdLaunchWork((dispatch_queue_t)queue, (dispatch_block_t)block);
     };
