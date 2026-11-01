@@ -7,8 +7,10 @@
 #include <dynarmic/interface/A32/config.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <optional>
 #include <string>
 
@@ -24,10 +26,28 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
     Dynarmic::A32::Jit *jit = nullptr;
     std::optional<uint32_t> pendingSvc;
 
+    // A data access to unmapped memory the guest has a signal handler for:
+    // the access reads zeros (writes go nowhere), and the JIT stops right
+    // after it with the PC on it (check_halt_on_memory_access) for
+    // runUntilSvc to deliver the fault.
+    struct Fault {
+        uint32_t addr;
+        bool write;
+    };
+    bool faultChecks = false;  // whether the JIT was built with check_halt_on_memory_access
+    std::optional<Fault> pendingFault;
+    uint8_t faultScratch[16] = {};
+
     explicit Callbacks(GuestMemory &m) : mem(m) {}
 
-    uint8_t *at(VAddr addr, size_t size, const char *what) {
+    uint8_t *at(VAddr addr, size_t size, const char *what, bool code = false) {
         if (!mem.isMapped(addr) || !mem.isMapped(addr + uint32_t(size) - 1)) {
+            if (!code && faultChecks && Cpu::guestHandlesFaults()) {
+                if (!pendingFault) pendingFault = Fault{addr, what[0] != 'r'};
+                jit->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
+                std::memset(faultScratch, 0, sizeof faultScratch);
+                return faultScratch;
+            }
             const auto &r = jit->Regs();
             log("guest registers: r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x", r[0], r[1], r[2],
                 r[3], r[4], r[5], r[6], r[7]);
@@ -58,7 +78,11 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
         return __atomic_compare_exchange_n(p, &expected, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     }
 
-    std::optional<uint32_t> MemoryReadCode(VAddr addr) override { return load<uint32_t>(addr); }
+    std::optional<uint32_t> MemoryReadCode(VAddr addr) override {
+        uint32_t v;
+        std::memcpy(&v, at(addr, sizeof v, "instruction fetch", true), sizeof v);
+        return v;
+    }
     uint8_t MemoryRead8(VAddr addr) override { return load<uint8_t>(addr); }
     uint16_t MemoryRead16(VAddr addr) override { return load<uint16_t>(addr); }
     uint32_t MemoryRead32(VAddr addr) override { return load<uint32_t>(addr); }
@@ -118,8 +142,10 @@ std::unique_ptr<Dynarmic::ExclusiveMonitor> DynarmicCpu::makeMonitor() {
 
 DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarmic::ExclusiveMonitor *monitor,
                          size_t processorId)
-    : Cpu(mem, std::move(handler)), callbacks_(std::make_unique<Callbacks>(mem)) {
-    Dynarmic::A32::UserConfig config;
+    : Cpu(mem, std::move(handler)),
+      callbacks_(std::make_unique<Callbacks>(mem)),
+      config_(std::make_unique<Dynarmic::A32::UserConfig>()) {
+    Dynarmic::A32::UserConfig &config = *config_;
     config.callbacks = callbacks_.get();
     config.arch_version = arch == Arch::V6K ? Dynarmic::A32::ArchVersion::v6K : Dynarmic::A32::ArchVersion::v7;
     // B32_NO_FASTMEM=1 routes every guest access through the callbacks. It's
@@ -133,9 +159,26 @@ DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarm
     // ARMv6 apps sometimes rely on unaligned word accesses, which the A5 and
     // later cores allow, so don't trap misalignment.
     config.detect_misaligned_access_via_page_table = 0;
-    jit_ = std::make_unique<JitHolder>(config);
-    callbacks_->jit = &jit_->jit;
+    buildJit();
     jit_->jit.SetCpsr(0x10);  // user mode, ARM state
+}
+
+// The halt checks after every memory access cost a little everywhere, so
+// they're only compiled in once the guest has a fault handler; the JIT is
+// rebuilt then, carrying its state over. Only called outside Jit::Run.
+void DynarmicCpu::buildJit() {
+    bool checks = Cpu::guestHandlesFaults();
+    config_->check_halt_on_memory_access = checks;
+    auto jit = std::make_unique<JitHolder>(*config_);
+    if (jit_) {
+        jit->jit.Regs() = jit_->jit.Regs();
+        jit->jit.ExtRegs() = jit_->jit.ExtRegs();
+        jit->jit.SetCpsr(jit_->jit.Cpsr());
+        jit->jit.SetFpscr(jit_->jit.Fpscr());
+    }
+    jit_ = std::move(jit);
+    callbacks_->jit = &jit_->jit;
+    callbacks_->faultChecks = checks;
 }
 
 DynarmicCpu::~DynarmicCpu() = default;
@@ -150,10 +193,27 @@ void DynarmicCpu::setExtReg(int n, uint32_t value) { jit_->jit.ExtRegs()[n] = va
 uint32_t DynarmicCpu::runUntilSvc() {
     callbacks_->pendingSvc.reset();
     while (!callbacks_->pendingSvc) {
+        if (callbacks_->faultChecks != Cpu::guestHandlesFaults()) buildJit();
+        enterGuest();
         jit_->jit.Run();
+        leaveGuest();
+        // A suspension's halt request arriving after this is left for the
+        // next Run, which then returns at once.
         jit_->jit.ClearHalt();
+        if (auto fault = callbacks_->pendingFault) {
+            callbacks_->pendingFault.reset();
+            static std::atomic<int> logged{0};
+            if (logged++ < 10)
+                log("guest %s of unmapped 0x%08x at pc=0x%08x: calling the guest's signal handler",
+                    fault->write ? "write" : "read", fault->addr, reg(PC));
+            deliverFault(fault->addr, fault->write);
+            // The handler's own calls ended in SVCs of their own.
+            callbacks_->pendingSvc.reset();
+        }
     }
     return *callbacks_->pendingSvc;
 }
+
+void DynarmicCpu::requestHalt() { jit_->jit.HaltExecution(); }
 
 }  // namespace b32
