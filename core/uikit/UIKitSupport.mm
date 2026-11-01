@@ -372,6 +372,14 @@ static void startWindowDumps() {
     NSTimer *timer = [NSTimer timerWithTimeInterval:5 repeats:YES block:^(NSTimer *) {
         UIWindow *window = uikit::guestKeyWindow();
         if (!window) return;
+        // A GLKView's drawing isn't in its layer for drawViewHierarchy to
+        // find; it renders a fresh frame for its own snapshot.
+        UIView *view = window.rootViewController.view;
+        if ([view isKindOfClass:NSClassFromString(@"GLKView")]) {
+            UIImage *frame = ((UIImage * (*)(id, SEL))objc_msgSend)(view, @selector(snapshot));
+            [UIImagePNGRepresentation(frame) writeToFile:path atomically:YES];
+            return;
+        }
         UIGraphicsImageRenderer *renderer = [[[UIGraphicsImageRenderer alloc] initWithBounds:window.bounds] autorelease];
         NSData *png = [renderer PNGDataWithActions:^(UIGraphicsImageRendererContext *) {
             [window drawViewHierarchyInRect:window.bounds afterScreenUpdates:NO];
