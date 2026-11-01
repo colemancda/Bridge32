@@ -69,8 +69,11 @@ B32_THUNK(_sqlite3_close) {
     c.ret(uint32_t(rc));
 }
 
-// int sqlite3_prepare_v2(sqlite3 *, const char *sql, int nByte, sqlite3_stmt **, const char **tail)
-B32_THUNK(_sqlite3_prepare_v2) {
+// int sqlite3_prepare_v2(sqlite3 *, const char *sql, int nByte, sqlite3_stmt **, const char **tail),
+// and the legacy sqlite3_prepare with the same arguments.
+namespace {
+using Prepare = int (*)(sqlite3 *, const char *, int, sqlite3_stmt **, const char **);
+void prepare(Call &c, Prepare function, const char *name) {
     sqlite3 *db = object<sqlite3>(c.args.u32());
     GuestAddr sql = c.args.ptr();
     int bytes = c.args.i32();
@@ -78,13 +81,16 @@ B32_THUNK(_sqlite3_prepare_v2) {
     GuestAddr outTail = c.args.ptr();
     sqlite3_stmt *stmt = nullptr;
     const char *tail = nullptr;
-    int rc = sqlite3_prepare_v2(db, c.mem.cstr(sql), bytes, &stmt, &tail);
+    int rc = function(db, c.mem.cstr(sql), bytes, &stmt, &tail);
     if (outStmt) c.mem.write<uint32_t>(outStmt, handleFor(stmt));
     // The tail points into the guest's own SQL string.
     if (outTail) c.mem.write<uint32_t>(outTail, tail ? c.mem.guestAddrOf(tail) : 0);
-    if (rc != SQLITE_OK) log("sqlite3_prepare_v2 failed: %s", sqlite3_errmsg(db));
+    if (rc != SQLITE_OK) log("%s failed: %s", name, sqlite3_errmsg(db));
     c.ret(uint32_t(rc));
 }
+}  // namespace
+B32_THUNK(_sqlite3_prepare_v2) { prepare(c, sqlite3_prepare_v2, "sqlite3_prepare_v2"); }
+B32_THUNK(_sqlite3_prepare) { prepare(c, sqlite3_prepare, "sqlite3_prepare"); }
 
 B32_THUNK(_sqlite3_step) {
     sqlite3_stmt *stmt = object<sqlite3_stmt>(c.args.u32());
