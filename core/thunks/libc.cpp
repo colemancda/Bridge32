@@ -56,6 +56,17 @@ B32_THUNK(_snprintf) {
     c.ret(uint32_t(s.size()));
 }
 
+// int asprintf(char **ret, const char *format, ...): the string is allocated in
+// guest memory, for the guest to free.
+B32_THUNK(_asprintf) {
+    GuestAddr out = c.args.ptr();
+    std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
+    GuestAddr str = c.heap.alloc(uint32_t(s.size() + 1));
+    c.mem.copyIn(str, s.c_str(), s.size() + 1);
+    if (out) c.mem.write<uint32_t>(out, str);
+    c.ret(uint32_t(s.size()));
+}
+
 B32_THUNK(_sprintf) {
     GuestAddr buf = c.args.ptr();
     std::string s = formatGuest(c, c.mem.cstr(c.args.ptr()), c.args);
