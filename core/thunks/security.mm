@@ -64,6 +64,91 @@ B32_THUNK(_CCCrypt) {
     c.ret(uint32_t(status));
 }
 
+// CCCryptorRef: the guest holds a handle to the host's cryptor.
+namespace {
+CCCryptorRef cryptor(Call &c) { return static_cast<CCCryptorRef>(hostPointer(c.args.u32())); }
+void *bytesAt(Call &c, GuestAddr p) { return p ? c.mem.ptr<void>(p) : nullptr; }
+}  // namespace
+
+// CCCryptorStatus CCCryptorCreate(CCOperation, CCAlgorithm, CCOptions, const void *key,
+//     size_t keyLength, const void *iv, CCCryptorRef *cryptorRef)
+B32_THUNK(_CCCryptorCreate) {
+    CCOperation op = c.args.u32();
+    CCAlgorithm algorithm = c.args.u32();
+    CCOptions options = c.args.u32();
+    GuestAddr key = c.args.ptr();
+    size_t keyLength = c.args.u32();
+    GuestAddr iv = c.args.ptr(), out = c.args.ptr();
+    CCCryptorRef ref = nullptr;
+    CCCryptorStatus status = CCCryptorCreate(op, algorithm, options, bytesAt(c, key), keyLength, bytesAt(c, iv), &ref);
+    if (out) c.mem.write<uint32_t>(out, ref ? hostHandle(ref) : 0);
+    c.ret(uint32_t(status));
+}
+// CCCryptorStatus CCCryptorUpdate(CCCryptorRef, const void *dataIn, size_t dataInLength,
+//     void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved)
+B32_THUNK(_CCCryptorUpdate) {
+    CCCryptorRef ref = cryptor(c);
+    GuestAddr in = c.args.ptr();
+    size_t inLength = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    size_t outAvailable = c.args.u32();
+    GuestAddr moved = c.args.ptr();
+    size_t outMoved = 0;
+    CCCryptorStatus status = CCCryptorUpdate(ref, bytesAt(c, in), inLength, bytesAt(c, out), outAvailable, &outMoved);
+    if (moved) c.mem.write<uint32_t>(moved, uint32_t(outMoved));
+    c.ret(uint32_t(status));
+}
+// CCCryptorStatus CCCryptorFinal(CCCryptorRef, void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved)
+B32_THUNK(_CCCryptorFinal) {
+    CCCryptorRef ref = cryptor(c);
+    GuestAddr out = c.args.ptr();
+    size_t outAvailable = c.args.u32();
+    GuestAddr moved = c.args.ptr();
+    size_t outMoved = 0;
+    CCCryptorStatus status = CCCryptorFinal(ref, bytesAt(c, out), outAvailable, &outMoved);
+    if (moved) c.mem.write<uint32_t>(moved, uint32_t(outMoved));
+    c.ret(uint32_t(status));
+}
+// size_t CCCryptorGetOutputLength(CCCryptorRef, size_t inputLength, bool final)
+B32_THUNK(_CCCryptorGetOutputLength) {
+    CCCryptorRef ref = cryptor(c);
+    size_t inLength = c.args.u32();
+    c.ret(uint32_t(CCCryptorGetOutputLength(ref, inLength, c.args.u32() & 0xff)));
+}
+// CCCryptorStatus CCCryptorReset(CCCryptorRef, const void *iv)
+B32_THUNK(_CCCryptorReset) {
+    CCCryptorRef ref = cryptor(c);
+    c.ret(uint32_t(CCCryptorReset(ref, bytesAt(c, c.args.ptr()))));
+}
+// CCCryptorStatus CCCryptorRelease(CCCryptorRef)
+B32_THUNK(_CCCryptorRelease) {
+    CCCryptorRef ref = cryptor(c);
+    if (!ref) {
+        c.ret(0);
+        return;
+    }
+    forgetHostHandle(ref);
+    c.ret(uint32_t(CCCryptorRelease(ref)));
+}
+
+// int CCKeyDerivationPBKDF(CCPBKDFAlgorithm, const char *password, size_t passwordLen,
+//     const uint8_t *salt, size_t saltLen, CCPseudoRandomAlgorithm prf, unsigned rounds,
+//     uint8_t *derivedKey, size_t derivedKeyLen)
+B32_THUNK(_CCKeyDerivationPBKDF) {
+    CCPBKDFAlgorithm algorithm = c.args.u32();
+    GuestAddr password = c.args.ptr();
+    size_t passwordLength = c.args.u32();
+    GuestAddr salt = c.args.ptr();
+    size_t saltLength = c.args.u32();
+    CCPseudoRandomAlgorithm prf = c.args.u32();
+    unsigned rounds = c.args.u32();
+    GuestAddr key = c.args.ptr();
+    size_t keyLength = c.args.u32();
+    c.ret(uint32_t(CCKeyDerivationPBKDF(algorithm, static_cast<const char *>(bytesAt(c, password)), passwordLength,
+                                        static_cast<const uint8_t *>(bytesAt(c, salt)), saltLength, prf, rounds,
+                                        static_cast<uint8_t *>(bytesAt(c, key)), keyLength)));
+}
+
 // int SecRandomCopyBytes(SecRandomRef, size_t count, uint8_t *bytes)
 B32_THUNK(_SecRandomCopyBytes) {
     c.args.ptr();
