@@ -668,6 +668,18 @@ void Bridge::forget(uint32_t handle) {
     freeHandles_.push_back(handle);
 }
 
+namespace {
+// Whether an object is a Protocol, decided from its class chain: a message
+// (isKindOfClass:) would reach an NSProxy's forwarding, which is often the
+// guest's own code, and back here.
+bool isProtocolObject(id object) {
+    static Class protocolClass = objc_getClass("Protocol");
+    for (Class k = object_getClass(object); k; k = class_getSuperclass(k))
+        if (k == protocolClass) return true;
+    return false;
+}
+}  // namespace
+
 GuestAddr Bridge::toGuest(id object) {
     if (!object) return 0;
     std::lock_guard guard(lock_);
@@ -679,7 +691,7 @@ GuestAddr Bridge::toGuest(id object) {
     }
     if (auto it = guestByHost_.find(object); it != guestByHost_.end()) return it->second;
     if (GuestAddr block = blocks::toGuest(*this, object)) return block;
-    if ([object isKindOfClass:objc_getClass("Protocol")]) {
+    if (isProtocolObject(object)) {
         // The guest's own protocol_t by that name, or a minimal one { isa, name }.
         std::string name = protocol_getName((Protocol *)object);
         if (auto it = guestProtocolByName_.find(name); it != guestProtocolByName_.end()) return it->second;
