@@ -160,7 +160,16 @@ B32_THUNK(_atoi) { c.ret(uint32_t(std::atoi(c.mem.cstr(c.args.ptr())))); }
 
 // --- string.h --------------------------------------------------------------
 
-B32_THUNK(_strlen) { c.ret(uint32_t(std::strlen(c.mem.cstr(c.args.ptr())))); }
+B32_THUNK(_strlen) {
+    GuestAddr s = c.args.ptr();
+    if (!c.mem.isMapped(s)) {
+        std::string frames;
+        for (uint32_t fp = c.cpu.reg(7), i = 0; i < 12 && fp && c.mem.isMapped(fp); i++, fp = c.mem.read<uint32_t>(fp))
+            frames += " " + std::to_string(c.mem.read<uint32_t>(fp + 4));
+        fatal("strlen(0x%08x): unmapped (from 0x%08x; frames%s)", s, c.cpu.reg(Cpu::LR), frames.c_str());
+    }
+    c.ret(uint32_t(std::strlen(c.mem.cstr(s))));
+}
 
 B32_THUNK(_strcpy) {
     GuestAddr dst = c.args.ptr();
