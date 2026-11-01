@@ -57,13 +57,15 @@ def main():
                  "landscape-right": "UIInterfaceOrientationLandscapeRight"}
         merged["B32Orientation"] = names[orientation]
     elif "UIInterfaceOrientation" not in guest:
-        # Newer games only list the orientations they support; one that
-        # supports no portrait orientation starts in the first one listed.
+        # Newer games only list the orientations they support. With no device
+        # orientation to go by, iOS starts in the first one listed, so a game
+        # that lists a landscape orientation first starts in it (Angry Birds
+        # Friends supports all four, landscape first).
         ipad_only = merged["B32GuestDeviceFamily"] == [2]
         supported = (guest.get("UISupportedInterfaceOrientations~ipad" if ipad_only else
                                "UISupportedInterfaceOrientations~iphone")
                      or guest.get("UISupportedInterfaceOrientations") or [])
-        if supported and not any("Portrait" in o for o in supported):
+        if supported and "Portrait" not in supported[0]:
             merged["B32Orientation"] = supported[0]
     # Apps from before iOS 13 never saw dark mode: they set light backgrounds
     # and leave text in the default label color, which dark mode turns white.
