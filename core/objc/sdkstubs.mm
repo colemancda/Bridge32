@@ -83,6 +83,28 @@ GuestAddr selfRoutine(Runtime &rt) {
     return routine;
 }
 
+// ldr r0, [pc]; bx lr; .word string: an empty NSString, for stubbed getters
+// whose callers go straight on to -UTF8String (Flurry's
+// +getFlurryAgentVersion in Angry Birds Friends, fed to strlen).
+GuestAddr emptyStringRoutine(Bridge &bridge, Runtime &rt) {
+    static GuestAddr routine = [&] {
+        GuestAddr empty = bridge.toGuest(@"");
+        const uint32_t code[] = {0xe59f0000, 0xe12fff1e, empty};
+        GuestAddr addr = rt.heap().alloc(sizeof code);
+        rt.mem().copyIn(addr, code, sizeof code);
+        return addr;
+    }();
+    return routine;
+}
+
+// An object getter whose name says it hands back text.
+bool returnsText(const GuestMethod &method, const char *name) {
+    if (method.types.empty() || method.types[0] != '@' || std::strchr(name, ':')) return false;
+    for (const char *word : {"Version", "version", "Name", "name", "Identifier", "identifier", "String", "Key", "ID"})
+        if (std::strstr(name, word)) return true;
+    return false;
+}
+
 bool startsWith(const char *s, const char *prefix) { return std::strncmp(s, prefix, std::strlen(prefix)) == 0; }
 
 bool listed(const char *const *selectors, const char *name) {
@@ -115,6 +137,7 @@ void stubSdkClass(Bridge &bridge, Runtime &rt, ClassInfo *cls) {
                 bool singleton = info->isMeta && (startsWith(name, "shared") || startsWith(name, "default"));
                 if (singleton) continue;
                 if (!info->isMeta && startsWith(name, "init")) imp = selfRoutine(rt);
+                else if (returnsText(method, name)) imp = emptyStringRoutine(bridge, rt);
             }
             method.imp = imp;
             // The guest's own method_t too, where its runtime and reflection read the IMP.
@@ -126,7 +149,7 @@ void stubSdkClass(Bridge &bridge, Runtime &rt, ClassInfo *cls) {
     static std::set<std::string> logged;
     std::lock_guard guard(lock);
     if (logged.insert(rule->sdk).second) log("stubbing the %s SDK compiled into the app", rule->sdk);
-    log("  %s: %zu methods return nil/0", cls->name.c_str(), count);
+    log("  %s: %zu methods return nil/0 (or an empty string)", cls->name.c_str(), count);
 }
 
 }  // namespace b32::objc
