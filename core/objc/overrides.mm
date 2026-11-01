@@ -8,6 +8,8 @@
 
 #import <Foundation/Foundation.h>
 #include <objc/message.h>
+
+#include <algorithm>
 #include <objc/runtime.h>
 
 using namespace b32;
@@ -404,4 +406,138 @@ B32_OVERRIDE_WHEN(isStoreCoordinator, "addPersistentStoreWithType:configuration:
         o.receiver, o.sel, type, configuration, url, local, &error);
     if (!store && errorOut) o.c.mem.write<uint32_t>(errorOut, o.bridge.toGuest(error));
     returnObject(o, store);
+}
+
+// --- NSMapTable with non-object sides (NSPointerFunctions personalities) --------------------------
+// A side configured for opaque pointers, integers, C strings or structs holds
+// plain guest values, not objects: the host table keeps them as opaque
+// pointers and these overrides pass them through unconverted. Struct values
+// with copy-in are copied into the guest heap, sized by the guest's own size
+// function. The guest's callbacks (size, hash, description...) are kept here
+// and never handed to the host, which would call guest code natively.
+
+namespace {
+
+constexpr NSUInteger kPersonalityMask = 0xFF00, kMemoryMask = 0xFF;
+constexpr NSUInteger kObjectPersonality = 0, kObjectPointerPersonality = 0x200, kStructPersonality = 0x400;
+constexpr NSUInteger kCopyIn = 0x10000;
+
+char kOptionsKey, kSizeFunctionKey, kTableSidesKey;
+
+bool isPointerFunctions(id receiver) {
+    return [receiver isKindOfClass:objc_getClass("NSPointerFunctions")] ||
+           receiver == (id)objc_getClass("NSPointerFunctions");
+}
+bool isMapTable(id receiver) {
+    return [receiver isKindOfClass:objc_getClass("NSMapTable")] || receiver == (id)objc_getClass("NSMapTable");
+}
+
+bool holdsObjects(NSUInteger options) {
+    NSUInteger personality = options & kPersonalityMask;
+    return personality == kObjectPersonality || personality == kObjectPointerPersonality;
+}
+
+// How one side of a guest map table holds its values.
+struct Side {
+    bool raw = false;            // plain guest values, not objects
+    GuestAddr copyStructSize = 0;  // a struct personality with copy-in: the guest's size function
+};
+struct Sides {
+    Side key, value;
+};
+
+Side sideFor(NSPointerFunctions *functions) {
+    NSUInteger options = [objc_getAssociatedObject(functions, &kOptionsKey) unsignedIntegerValue];
+    Side side;
+    side.raw = !holdsObjects(options);
+    if ((options & kPersonalityMask) == kStructPersonality && (options & kCopyIn))
+        side.copyStructSize = GuestAddr([objc_getAssociatedObject(functions, &kSizeFunctionKey) unsignedIntValue]);
+    return side;
+}
+
+// Host pointer functions for a side: raw ones become opaque pointers kept as they are.
+NSPointerFunctions *hostFunctions(NSPointerFunctions *functions, const Side &side) {
+    if (!side.raw) return functions;
+    return [NSPointerFunctions pointerFunctionsWithOptions:NSPointerFunctionsOpaquePersonality |
+                                                           NSPointerFunctionsOpaqueMemory];
+}
+
+const Sides *sidesOf(id table) {
+    NSValue *value = objc_getAssociatedObject(table, &kTableSidesKey);
+    return value ? static_cast<const Sides *>(value.pointerValue) : nullptr;
+}
+
+const void *hostKeyOrValue(OverrideCall &o, const Side &side, GuestAddr value) {
+    if (!side.raw) return (const void *)o.bridge.toHost(value);
+    if (side.copyStructSize && value) {
+        uint32_t size = uint32_t(Runtime::threadCpu().call(side.copyStructSize, {value}));
+        GuestAddr copy = o.c.heap.alloc(std::max(size, 1u));
+        o.c.mem.copyIn(copy, o.c.mem.ptr<void>(value), size);
+        value = copy;
+    }
+    return reinterpret_cast<const void *>(uintptr_t(value));
+}
+GuestAddr guestKeyOrValue(OverrideCall &o, const Side &side, const void *value) {
+    return side.raw ? GuestAddr(uintptr_t(value)) : o.bridge.toGuest((id)value);
+}
+
+bool isRawMapTable(id receiver) { return isMapTable(receiver) && sidesOf(receiver); }
+
+}  // namespace
+
+// + (NSPointerFunctions *)pointerFunctionsWithOptions:(NSPointerFunctionsOptions)options
+// - (instancetype)initWithOptions:(NSPointerFunctionsOptions)options: the options are remembered.
+B32_OVERRIDE_WHEN(isPointerFunctions, "pointerFunctionsWithOptions:") {
+    NSUInteger options = o.args.u32();
+    NSPointerFunctions *functions = [NSPointerFunctions pointerFunctionsWithOptions:options];
+    objc_setAssociatedObject(functions, &kOptionsKey, @(options), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    returnObject(o, functions);
+}
+B32_OVERRIDE_WHEN(isPointerFunctions, "initWithOptions:") {
+    NSUInteger options = o.args.u32();
+    NSPointerFunctions *functions = [static_cast<NSPointerFunctions *>(o.receiver) initWithOptions:options];
+    objc_setAssociatedObject(functions, &kOptionsKey, @(options), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    returnObject(o, functions);
+}
+// The size function is kept for struct copy-in; the guest's other callbacks
+// have nothing to do on a side the host holds as opaque pointers.
+B32_OVERRIDE_WHEN(isPointerFunctions, "setSizeFunction:") {
+    objc_setAssociatedObject(o.receiver, &kSizeFunctionKey, @(o.args.ptr()), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+B32_OVERRIDE_WHEN(isPointerFunctions, "setHashFunction:", "setIsEqualFunction:", "setDescriptionFunction:",
+                  "setAcquireFunction:", "setRelinquishFunction:") {
+    o.args.ptr();
+}
+
+// - (instancetype)initWithKeyPointerFunctions:(NSPointerFunctions *)keyFunctions
+//       valuePointerFunctions:(NSPointerFunctions *)valueFunctions capacity:(NSUInteger)capacity
+B32_OVERRIDE_WHEN(isMapTable, "initWithKeyPointerFunctions:valuePointerFunctions:capacity:") {
+    NSPointerFunctions *keys = o.bridge.toHost(o.args.ptr());
+    NSPointerFunctions *values = o.bridge.toHost(o.args.ptr());
+    NSUInteger capacity = o.args.u32();
+    Side keySide = sideFor(keys), valueSide = sideFor(values);
+    NSMapTable *table = [static_cast<NSMapTable *>(o.receiver) initWithKeyPointerFunctions:hostFunctions(keys, keySide)
+                                                                    valuePointerFunctions:hostFunctions(values, valueSide)
+                                                                                 capacity:capacity];
+    if (table && (keySide.raw || valueSide.raw))
+        objc_setAssociatedObject(table, &kTableSidesKey, [NSValue valueWithPointer:new Sides{keySide, valueSide}],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    returnObject(o, table);
+}
+
+B32_OVERRIDE_WHEN(isRawMapTable, "setObject:forKey:") {
+    const Sides *sides = sidesOf(o.receiver);
+    const void *value = hostKeyOrValue(o, sides->value, o.args.ptr());
+    const void *key = hostKeyOrValue(o, Side{sides->key.raw, 0}, o.args.ptr());
+    [static_cast<NSMapTable *>(o.receiver) setObject:(id)value forKey:(id)key];
+}
+B32_OVERRIDE_WHEN(isRawMapTable, "objectForKey:") {
+    const Sides *sides = sidesOf(o.receiver);
+    const void *key = hostKeyOrValue(o, Side{sides->key.raw, 0}, o.args.ptr());
+    o.c.ret(guestKeyOrValue(o, sides->value, (const void *)[static_cast<NSMapTable *>(o.receiver) objectForKey:(id)key]));
+}
+B32_OVERRIDE_WHEN(isRawMapTable, "removeObjectForKey:") {
+    const Sides *sides = sidesOf(o.receiver);
+    const void *key = hostKeyOrValue(o, Side{sides->key.raw, 0}, o.args.ptr());
+    [static_cast<NSMapTable *>(o.receiver) removeObjectForKey:(id)key];
 }
