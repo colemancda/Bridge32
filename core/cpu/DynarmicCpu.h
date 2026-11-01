@@ -6,7 +6,10 @@
 
 namespace Dynarmic {
 class ExclusiveMonitor;
+namespace A32 {
+struct UserConfig;
 }
+}  // namespace Dynarmic
 
 namespace b32 {
 
@@ -32,10 +35,14 @@ public:
 
 protected:
     uint32_t runUntilSvc() override;
+    void requestHalt() override;
 
 private:
+    void buildJit();
+
     struct Callbacks;
     std::unique_ptr<Callbacks> callbacks_;
+    std::unique_ptr<Dynarmic::A32::UserConfig> config_;
     struct JitHolder;
     std::unique_ptr<JitHolder> jit_;
 };
