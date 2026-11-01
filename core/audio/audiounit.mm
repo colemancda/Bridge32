@@ -168,6 +168,13 @@ B32_THUNK(_AudioUnitSetProperty) {
         c.ret(0);
         return;
     }
+    // Nor is recording: turning on the input bus (element 1) would only make
+    // macOS ask for the microphone and block AudioOutputUnitStart until it's
+    // answered (Black Ops Zombies' voice chat).
+    if (property == kAudioOutputUnitProperty_EnableIO && scope == kAudioUnitScope_Input && element == 1) {
+        c.ret(0);
+        return;
+    }
     c.ret(uint32_t(AudioUnitSetProperty(unit->host, property, scope, element, data ? c.mem.ptr<void>(data) : nullptr, size)));
 }
 
