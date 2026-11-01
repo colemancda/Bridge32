@@ -37,6 +37,9 @@ namespace blocks {
 // Whether `object`'s isa is one of the guest's block classes.
 bool isGuestBlock(Bridge &bridge, GuestAddr object);
 
+// Whether `object` is a guest block still on the stack (never copied).
+bool isGuestStackBlock(Bridge &bridge, GuestAddr object);
+
 // The host block for a guest block (+0: cached, or autoreleased when new), or
 // nil if `object` isn't a guest block.
 id toHost(Bridge &bridge, GuestAddr object);
