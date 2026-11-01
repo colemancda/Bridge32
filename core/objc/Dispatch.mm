@@ -16,6 +16,8 @@
 
 #include <pthread.h>
 
+#include <cstring>
+
 #import <Foundation/Foundation.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -181,6 +183,19 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             return;
         }
         start = classOf(receiver);
+        if (!start && guestProtocols_.count(receiver)) {
+            // Protocols are objects that live forever: their memory
+            // management does nothing, as the runtime's does; anything else
+            // goes to the host's protocol of the same name.
+            const char *name = selName(sel);
+            if (!std::strcmp(name, "retain") || !std::strcmp(name, "autorelease") || !std::strcmp(name, "copy")) {
+                cpu.setReg(0, receiver);
+                return;
+            }
+            if (!std::strcmp(name, "release")) return;
+            hostDispatch(c, receiver, sel, nullptr, stret);
+            return;
+        }
         if (!start && (blocks::isGuestBlock(*this, receiver) || isAlias(receiver))) {
             // Blocks answer copy, retain, release... as their host blocks, and
             // framework globals (&_dispatch_main_q) as the host objects they stand for.
