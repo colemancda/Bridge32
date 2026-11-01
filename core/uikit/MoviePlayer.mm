@@ -121,3 +121,52 @@ using namespace b32;
 }
 
 @end
+
+// MPMusicPlayerController: games ask the iPod player whether the player's own
+// music is on, to keep it playing instead of theirs. On the Mac that reaches
+// the Music library, and the system ends a wrapped app that does so without a
+// usage description. This player has nothing to play, so it is always stopped.
+@interface B32Compat_MPMusicPlayerController : NSObject
+@property (nonatomic) NSInteger repeatMode, shuffleMode;
+@property (nonatomic) float volume;
+@property (nonatomic) double currentPlaybackTime, currentPlaybackRate;
+@end
+
+@implementation B32Compat_MPMusicPlayerController
+
++ (instancetype)iPodMusicPlayer {
+    static B32Compat_MPMusicPlayerController *player = [[B32Compat_MPMusicPlayerController alloc] init];
+    return player;
+}
++ (instancetype)systemMusicPlayer { return [self iPodMusicPlayer]; }
++ (instancetype)applicationMusicPlayer { return [self iPodMusicPlayer]; }
++ (instancetype)applicationQueuePlayer { return [self iPodMusicPlayer]; }
+
+- (instancetype)init {
+    if ((self = [super init])) _volume = 1;
+    return self;
+}
+
+- (NSInteger)playbackState { return MPMusicPlaybackStateStopped; }
+- (id)nowPlayingItem { return nil; }
+- (void)setNowPlayingItem:(id)item {}
+- (NSUInteger)indexOfNowPlayingItem { return NSNotFound; }
+- (BOOL)isPreparedToPlay { return NO; }
+- (void)beginGeneratingPlaybackNotifications {}
+- (void)endGeneratingPlaybackNotifications {}
+- (void)setQueueWithQuery:(id)query {}
+- (void)setQueueWithItemCollection:(id)collection {}
+- (void)setQueueWithStoreIDs:(NSArray *)ids {}
+- (void)setQueueWithDescriptor:(id)descriptor {}
+- (void)prepareToPlay {}
+- (void)play {}
+- (void)pause {}
+- (void)stop {}
+- (void)skipToNextItem {}
+- (void)skipToPreviousItem {}
+- (void)skipToBeginning {}
+- (void)beginSeekingForward {}
+- (void)beginSeekingBackward {}
+- (void)endSeeking {}
+
+@end
