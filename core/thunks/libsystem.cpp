@@ -12,6 +12,8 @@
 #include <runetype.h>
 #include <sys/mount.h>
 #include <sys/sysctl.h>
+#include <net/if.h>
+#include <mach/mach_time.h>
 #include <mach/mach_error.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
@@ -494,3 +496,32 @@ B32_THUNK(_OSAtomicTestAndSet) { c.ret(testAndChangeBit(c, true)); }
 B32_THUNK(_OSAtomicTestAndSetBarrier) { c.ret(testAndChangeBit(c, true)); }
 B32_THUNK(_OSAtomicTestAndClear) { c.ret(testAndChangeBit(c, false)); }
 B32_THUNK(_OSAtomicTestAndClearBarrier) { c.ret(testAndChangeBit(c, false)); }
+
+// --- more of libSystem (Angry Birds Friends) ------------------------------------------------
+
+// int atexit_b(void (^)(void)): guest exit handlers aren't run.
+B32_THUNK(_atexit_b) { c.ret(0); }
+B32_THUNK(_getegid) { c.ret(getegid()); }
+B32_THUNK(_srand48) { ::srand48(c.args.i32()); }
+B32_THUNK(_drand48) { c.retF64(::drand48()); }
+B32_THUNK(___isnand) { c.ret(std::isnan(c.args.f64()) ? 1 : 0); }
+B32_THUNK(___isnanf) { c.ret(std::isnan(c.args.f32()) ? 1 : 0); }
+B32_THUNK(_logbf) { c.retF32(std::logb(c.args.f32())); }
+// kern_return_t mach_wait_until(uint64_t deadline): in mach_absolute_time units.
+B32_THUNK(_mach_wait_until) { c.ret(::mach_wait_until(c.args.u64())); }
+// Condition variables carry no attributes the guest can set.
+B32_THUNK(_pthread_condattr_init) { c.ret(0); }
+B32_THUNK(_pthread_condattr_destroy) { c.ret(0); }
+// long pathconf(const char *, int): long is 32-bit in the guest.
+B32_THUNK(_pathconf) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(int32_t(::pathconf(path, c.args.i32()))));
+}
+// char *if_indextoname(unsigned, char *name): name holds IF_NAMESIZE bytes.
+B32_THUNK(_if_indextoname) {
+    unsigned index = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    c.ret(::if_indextoname(index, c.mem.ptr<char>(name)) ? name : 0);
+}
+// clock_t clock(void): a 32-bit count of CLOCKS_PER_SEC (1,000,000) ticks in the guest.
+B32_THUNK(_clock) { c.ret(uint32_t(::clock())); }
