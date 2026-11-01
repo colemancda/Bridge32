@@ -144,13 +144,35 @@ B32_MACH_FAILS(_thread_resume)
 B32_MACH_FAILS(_thread_info)
 B32_MACH_FAILS(_task_threads)
 B32_MACH_FAILS(_task_info)
-B32_MACH_FAILS(_host_statistics)
 B32_MACH_FAILS(_mach_make_memory_entry_64)
 B32_MACH_FAILS(_vm_map)
 B32_THUNK(_mach_port_deallocate) { c.ret(KERN_SUCCESS); }
 B32_THUNK(_mach_thread_self) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_host_self) { c.ret(mach_host_self()); }
 B32_THUNK(_pthread_mach_thread_np) { c.ret(mach_thread_self()); }
+
+// kern_return_t host_statistics(host_t, host_flavor_t, host_info_t, mach_msg_type_number_t *count):
+// HOST_VM_INFO only, as a 512 MB iPhone (the hw.memsize the guest is told)
+// with about half its 4 KiB pages free, so games' free-memory checks pass.
+// vm_statistics_data_t is 15 natural_t words on both sides.
+B32_THUNK(_host_statistics) {
+    c.args.u32();
+    int flavor = c.args.i32();
+    GuestAddr info = c.args.ptr(), countOut = c.args.ptr();
+    if (flavor != HOST_VM_INFO || !countOut || c.mem.read<uint32_t>(countOut) < HOST_VM_INFO_COUNT) {
+        c.ret(KERN_FAILURE);
+        return;
+    }
+    constexpr uint32_t pages = (512u << 20) / 4096;
+    vm_statistics_data_t stats = {};
+    stats.free_count = pages / 2;
+    stats.active_count = pages / 4;
+    stats.inactive_count = pages / 8;
+    stats.wire_count = pages - stats.free_count - stats.active_count - stats.inactive_count;
+    c.mem.copyIn(info, &stats, sizeof stats);
+    c.mem.write<uint32_t>(countOut, HOST_VM_INFO_COUNT);
+    c.ret(KERN_SUCCESS);
+}
 
 B32_DATA(_vm_page_size, 4) { rt.mem().write<uint32_t>(addr, 4096); }
 B32_DATA(_vm_page_mask, 4) { rt.mem().write<uint32_t>(addr, 4095); }
