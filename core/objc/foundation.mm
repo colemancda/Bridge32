@@ -75,6 +75,13 @@ B32_THUNK(_CGSizeFromString) {
     c.mem.write<float>(out, float(size.width));
     c.mem.write<float>(out + 4, float(size.height));
 }
+// CGPoint CGPointFromString(NSString *): 8 bytes, returned through r0.
+B32_THUNK(_CGPointFromString) {
+    GuestAddr out = c.args.ptr();
+    CGPoint point = CGPointFromString(bridge(c).toHost(c.args.ptr()));
+    c.mem.write<float>(out, float(point.x));
+    c.mem.write<float>(out + 4, float(point.y));
+}
 
 // NSRange NSIntersectionRange(NSRange, NSRange): each NSRange is two words; the
 // 8-byte result goes through r0.
