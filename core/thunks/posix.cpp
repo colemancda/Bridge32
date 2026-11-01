@@ -329,6 +329,19 @@ B32_THUNK(_gmtime) {
     c.ret(guestTm(c, result));
 }
 
+// char *tzname[2]: the standard and daylight saving names of the host's time
+// zone, copied into guest memory (Marmalade reads tzname[0] for the device's
+// time zone).
+B32_DATA(_tzname, 8) {
+    ::tzset();
+    for (uint32_t i = 0; i < 2; i++) {
+        const char *name = ::tzname[i] ? ::tzname[i] : "";
+        GuestAddr copy = rt.heap().alloc(uint32_t(std::strlen(name) + 1));
+        rt.mem().copyIn(copy, name, std::strlen(name) + 1);
+        rt.mem().write<uint32_t>(addr + 4 * i, copy);
+    }
+}
+
 // --- Mach -----------------------------------------------------------------------------------
 
 B32_DATA(_mach_task_self_, 4) { rt.mem().write<uint32_t>(addr, mach_task_self()); }
