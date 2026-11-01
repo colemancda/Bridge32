@@ -129,7 +129,11 @@ GuestAddr processArgs(Call &c) {
 B32_THUNK(__NSGetArgc) { c.ret(processArgs(c)); }
 B32_THUNK(__NSGetArgv) { c.ret(processArgs(c) + 4); }
 
-B32_THUNK(_exit) { c.rt.exit(c.args.i32()); }
+B32_THUNK(_exit) {
+    int status = c.args.i32();
+    log("guest called exit(%d) from 0x%08x", status, c.cpu.reg(Cpu::LR));
+    c.rt.exit(status);
+}
 B32_THUNK(__exit) { c.rt.exit(c.args.i32()); }
 B32_THUNK(_abort) { fatal("guest called abort() from 0x%08x", c.cpu.reg(Cpu::LR)); }
 
@@ -448,6 +452,9 @@ B32_THUNK(__dyld_lazy_symbol_binding_entry_point) {
 
 namespace {
 constexpr GuestAddr kDlHandle = 0xD1000000;  // any non-null value; never dereferenced
+// dlopen(NULL) is RTLD_DEFAULT on iOS, and Mono only looks a P/Invoke up in
+// its table of registered symbols when the handle is exactly that.
+constexpr GuestAddr kRtldDefault = 0xFFFFFFFE;
 }  // namespace
 
 // Guest libraries get real handles (their index in the runtime's library
@@ -461,7 +468,7 @@ constexpr uint32_t kMaxLibraryHandle = 0x10000;
 B32_THUNK(_dlopen) {
     GuestAddr path = c.args.ptr();
     if (!path) {
-        c.ret(kDlHandle);
+        c.ret(kRtldDefault);
         return;
     }
     std::string name = c.mem.cstr(path);
