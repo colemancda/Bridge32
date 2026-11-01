@@ -322,8 +322,18 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
 
     alignas(16) uint8_t result[256] = {};
     if (sig.ret.hostSize() > sizeof result) fatal("return type of %s is too large", name);
-    ffi_call(&hc.cif, direct ? FFI_FN(direct) : superInfo ? FFI_FN(objc_msgSendSuper) : FFI_FN(objc_msgSend), result,
-             values.data());
+    // The guest can't catch a host exception (no unwinding into guest
+    // frames), so one thrown right here reads as the call returning zero:
+    // the guest's @catch doesn't run, but code like SWRevealViewController,
+    // which tries segues that may not exist, carries on.
+    @try {
+        ffi_call(&hc.cif, direct ? FFI_FN(direct) : superInfo ? FFI_FN(objc_msgSendSuper) : FFI_FN(objc_msgSend),
+                 result, values.data());
+    } @catch (NSException *e) {
+        log("%c[%s %s] threw %s: %s; returning zero to the guest", object_isClass(recv) ? '+' : '-',
+            object_getClassName(recv), name, e.name.UTF8String, e.reason.UTF8String);
+        std::memset(result, 0, sizeof result);
+    }
 
     for (const auto &out : outParams) toGuestValue(*out.type, out.host, mem.ptr<uint8_t>(out.guest));
 
@@ -393,6 +403,52 @@ struct Trampoline {
 std::mutex trampolinesLock;
 std::unordered_map<void *, Trampoline *> trampolines;  // closure code -> its trampoline
 
+// A host pointer argument (a stack buffer or out-parameter) that the guest
+// can't reach: the guest gets a copy in its heap, copied back after the call.
+struct Bounce {
+    void *host;
+    GuestAddr guest;
+    uint32_t size;
+    const Type *pointee;  // converted value by value; null for raw bytes
+};
+
+GuestAddr bounceIn(Bridge &bridge, GuestAddr sel, const Signature &sig, void **args, size_t i,
+                   std::vector<Bounce> &bounces) {
+    const Type &type = sig.args[i];
+    if (type.code != '^') return 0;
+    void *p = *static_cast<void **>(args[i]);
+    GuestMemory &mem = bridge.runtime().mem();
+    auto *bytes = static_cast<uint8_t *>(p);
+    if (!p || (bytes >= mem.base() && bytes < mem.base() + GuestMemory::kSize)) return 0;
+    GuestHeap &heap = bridge.runtime().heap();
+    // -getCharacters:range: fills a unichar buffer as long as the range.
+    if (i == 2 && sig.args.size() == 4 && std::strcmp(bridge.selName(sel), "getCharacters:range:") == 0) {
+        uint32_t size = uint32_t(static_cast<NSRange *>(args[3])->length * 2);
+        GuestAddr buffer = heap.alloc(size ? size : 1);
+        bounces.push_back({p, buffer, size, nullptr});
+        return buffer;
+    }
+    const Type *pointee = type.pointee.get();
+    if (!pointee || pointee->code == 'v' || pointee->code == '?' || !pointee->guestSize()) return 0;
+    GuestAddr buffer = heap.calloc(1, pointee->guestSize());
+    // Objects are out-parameters (NSError **): their incoming value may be garbage.
+    if (!pointee->isObject())
+        bridge.toGuestValue(*pointee, bytes, mem.ptr<uint8_t>(buffer));
+    bounces.push_back({p, buffer, pointee->guestSize(), pointee});
+    return buffer;
+}
+
+void bounceOut(Bridge &bridge, const std::vector<Bounce> &bounces) {
+    for (const Bounce &b : bounces) {
+        uint8_t *guest = bridge.runtime().mem().ptr<uint8_t>(b.guest);
+        if (b.pointee)
+            bridge.toHostValue(*b.pointee, guest, static_cast<uint8_t *>(b.host));
+        else
+            std::memcpy(b.host, guest, b.size);
+        bridge.runtime().heap().free(b.guest);
+    }
+}
+
 void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
     auto *t = static_cast<Trampoline *>(user);
     Bridge &bridge = *t->bridge;
@@ -414,14 +470,20 @@ void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
     if (ClassInfo *cls = bridge.classOf(self); cls && cls->isGuest && !cls->initialized) bridge.ensureInitialized(cls);
     words.push_back(self);
     words.push_back(t->sel);
+    std::vector<Bounce> bounces;
     for (size_t i = 2; i < sig.args.size(); i++) {
         const Type &type = sig.args[i];
+        if (GuestAddr buffer = bounceIn(bridge, t->sel, sig, args, i, bounces)) {
+            words.push_back(buffer);
+            continue;
+        }
         std::vector<uint32_t> w(wordsFor(type.guestSize()));
         bridge.toGuestValue(type, static_cast<const uint8_t *>(args[i]), reinterpret_cast<uint8_t *>(w.data()));
         words.insert(words.end(), w.begin(), w.end());
     }
 
     uint64_t r = cpu->call(t->imp, words);
+    bounceOut(bridge, bounces);
 
     const Type &rt_ = sig.ret;
     if (rt_.code == 'v') return;
