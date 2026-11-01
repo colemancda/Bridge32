@@ -182,6 +182,8 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             cpu.setReg(1, 0);
             return;
         }
+        if (!mem.isMapped(receiver) || !mem.isMapped(receiver + 3))
+            fatal("-[%s] sent to unmapped 0x%08x (from 0x%08x)", selName(sel), receiver, cpu.reg(Cpu::LR));
         start = classOf(receiver);
         if (!start && guestProtocols_.count(receiver)) {
             // Protocols are objects that live forever: their memory
@@ -195,6 +197,17 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             if (!std::strcmp(name, "release")) return;
             hostDispatch(c, receiver, sel, nullptr, stret);
             return;
+        }
+        if (!start && blocks::isGuestStackBlock(*this, receiver)) {
+            // As on iOS, a stack block's -retain, -release and -autorelease do
+            // nothing. Converting it would make a new autoreleased host block
+            // for each message, and a -release would free that one while its
+            // pool still holds it.
+            const char *name = selName(sel);
+            if (!std::strcmp(name, "retain") || !std::strcmp(name, "autorelease") || !std::strcmp(name, "release")) {
+                cpu.setReg(0, receiver);
+                return;
+            }
         }
         if (!start && (blocks::isGuestBlock(*this, receiver) || isAlias(receiver))) {
             // Blocks answer copy, retain, release... as their host blocks, and
