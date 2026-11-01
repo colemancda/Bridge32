@@ -213,10 +213,12 @@ B32_OBJC_CONSTANT(kEAGLColorFormatSRGBA8)
 // to $TMPDIR/b32-frame.png, so rendering can be checked without a screen (or
 // with the display asleep).
 
+#import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#include "core/objc/Bridge.h"
 #include "core/objc/Dispatch.h"
 #include "core/uikit/UIKitSupport.h"
 #include <objc/message.h>
@@ -376,4 +378,84 @@ B32_THUNK(_glGetStringi) {
     uint32_t name = c.args.u32();
     const char *value = getStringi(name, c.args.u32());
     c.ret(value ? c.rt.internString(value) : 0);
+}
+
+// CVReturn CVOpenGLESTextureCacheCreate(CFAllocatorRef, CFDictionaryRef, EAGLContext *,
+//     CFDictionaryRef, CVOpenGLESTextureCacheRef *out): no texture caches,
+// which would need pixel buffers shared with the host's GL. Their users
+// (Unity's video capture, Everyplay's recording) fall back to plain pixel
+// buffers.
+B32_THUNK(_CVOpenGLESTextureCacheCreate) {
+    for (int i = 0; i < 4; i++) c.args.u32();
+    if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, 0);
+    c.ret(uint32_t(kCVReturnUnsupported));
+}
+
+// Pixel buffers are host CVPixelBuffers over guest heap memory, so the guest
+// can write the pixels at the base address it's given. Packed formats only.
+namespace {
+uint32_t bytesPerPixel(OSType format) {
+    switch (format) {
+    case kCVPixelFormatType_32BGRA:
+    case kCVPixelFormatType_32ARGB:
+    case kCVPixelFormatType_32RGBA:
+    case kCVPixelFormatType_32ABGR: return 4;
+    case kCVPixelFormatType_24RGB:
+    case kCVPixelFormatType_24BGR: return 3;
+    case kCVPixelFormatType_16LE565:
+    case kCVPixelFormatType_16LE5551:
+    case kCVPixelFormatType_16Gray: return 2;
+    case kCVPixelFormatType_OneComponent8: return 1;
+    default: return 0;
+    }
+}
+CVPixelBufferRef pixelBuffer(b32::Call &c) { return (CVPixelBufferRef)c.rt.bridge().toHost(c.args.ptr()); }
+}  // namespace
+
+// CVReturn CVPixelBufferCreate(CFAllocatorRef, size_t width, size_t height, OSType,
+//     CFDictionaryRef attributes, CVPixelBufferRef *out)
+B32_THUNK(_CVPixelBufferCreate) {
+    c.args.u32();
+    uint32_t width = c.args.u32(), height = c.args.u32();
+    OSType format = c.args.u32();
+    auto attributes = (CFDictionaryRef)c.rt.bridge().toHost(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    uint32_t bpp = bytesPerPixel(format);
+    if (!bpp || !width || !height) {
+        log("CVPixelBufferCreate: pixel format '%.4s' isn't supported", (const char *)&format);
+        if (out) c.mem.write<uint32_t>(out, 0);
+        c.ret(uint32_t(kCVReturnInvalidPixelFormat));
+        return;
+    }
+    size_t bytesPerRow = (size_t(width) * bpp + 63) & ~size_t(63);
+    GuestAddr pixels = c.heap.calloc(1, uint32_t(bytesPerRow * height));
+    auto release = [](void *refCon, const void *) {
+        objc::Bridge::shared()->runtime().heap().free(GuestAddr(uintptr_t(refCon)));
+    };
+    CVPixelBufferRef buffer = nullptr;
+    CVReturn status = CVPixelBufferCreateWithBytes(nullptr, width, height, format, c.mem.ptr<void>(pixels), bytesPerRow,
+                                                   release, (void *)uintptr_t(pixels), attributes, &buffer);
+    if (status != kCVReturnSuccess) c.heap.free(pixels);
+    if (out) c.mem.write<uint32_t>(out, buffer ? c.rt.bridge().toGuest((id)buffer) : 0);
+    c.ret(uint32_t(status));
+}
+
+B32_THUNK(_CVPixelBufferGetBaseAddress) {
+    void *base = CVPixelBufferGetBaseAddress(pixelBuffer(c));
+    c.ret(base ? c.mem.guestAddrOf(base) : 0);
+}
+B32_THUNK(_CVPixelBufferGetBytesPerRow) { c.ret(uint32_t(CVPixelBufferGetBytesPerRow(pixelBuffer(c)))); }
+B32_THUNK(_CVPixelBufferGetWidth) { c.ret(uint32_t(CVPixelBufferGetWidth(pixelBuffer(c)))); }
+B32_THUNK(_CVPixelBufferGetHeight) { c.ret(uint32_t(CVPixelBufferGetHeight(pixelBuffer(c)))); }
+B32_THUNK(_CVPixelBufferGetPixelFormatType) { c.ret(CVPixelBufferGetPixelFormatType(pixelBuffer(c))); }
+B32_THUNK(_CVPixelBufferLockBaseAddress) {
+    CVPixelBufferRef buffer = pixelBuffer(c);
+    c.ret(uint32_t(CVPixelBufferLockBaseAddress(buffer, c.args.u32())));
+}
+B32_THUNK(_CVPixelBufferUnlockBaseAddress) {
+    CVPixelBufferRef buffer = pixelBuffer(c);
+    c.ret(uint32_t(CVPixelBufferUnlockBaseAddress(buffer, c.args.u32())));
+}
+B32_THUNK(_CVPixelBufferRelease) {
+    if (CVPixelBufferRef buffer = pixelBuffer(c)) CFRelease(buffer);
 }
