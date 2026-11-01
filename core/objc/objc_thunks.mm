@@ -57,6 +57,15 @@ B32_THUNK(_objc_alloc_init) {
 B32_THUNK(_objc_retain) { sendFromR0(c, "retain"); }
 B32_THUNK(_objc_release) { sendFromR0(c, "release"); }
 B32_THUNK(_objc_autorelease) { sendFromR0(c, "autorelease"); }
+// NSObject's own -autorelease, which SwiftObject's calls: into the host pool
+// without a message (the shadow's -autorelease is that same guest method);
+// the pool's release later reaches the guest's -release.
+extern "C" id _objc_rootAutorelease(id);
+B32_THUNK(__objc_rootAutorelease) {
+    GuestAddr object = c.args.ptr();
+    if (object) _objc_rootAutorelease(bridge(c).toHost(object));
+    c.ret(object);
+}
 B32_THUNK(_objc_retainAutoreleasedReturnValue) { sendFromR0(c, "retain"); }
 B32_THUNK(_objc_autoreleaseReturnValue) { sendFromR0(c, "autorelease"); }
 B32_THUNK(_objc_retainAutorelease) {
@@ -172,6 +181,29 @@ B32_THUNK(_class_getSuperclass) {
     c.ret(cls && cls->super ? cls->super->addr : 0);
 }
 
+// void *objc_destructInstance(id): Swift's deallocation of its objects.
+B32_THUNK(_objc_destructInstance) {
+    GuestAddr object = c.args.ptr();
+    if (object) bridge(c).guestObjectDestroyed(object);
+    c.ret(object);
+}
+// id class_createInstance(Class, size_t extraBytes)
+B32_THUNK(_class_createInstance) {
+    GuestAddr cls = c.args.ptr();
+    c.ret(bridge(c).createInstance(cls, c.args.u32()));
+}
+B32_THUNK(_object_dispose) {
+    GuestAddr object = c.args.ptr();
+    if (object) bridge(c).disposeObject(object);
+    c.ret(0);
+}
+// Class objc_readClassPair(Class cls, const struct objc_image_info *)
+B32_THUNK(_objc_readClassPair) {
+    GuestAddr cls = c.args.ptr();
+    ClassInfo *info = bridge(c).addGuestClass(cls);
+    log("objc_readClassPair(%s)", info->name.c_str());
+    c.ret(cls);
+}
 B32_THUNK(_objc_lookUpClass) {
     ClassInfo *info = bridge(c).classNamed(c.mem.cstr(c.args.ptr()));
     c.ret(info ? info->addr : 0);
@@ -181,8 +213,21 @@ B32_THUNK(_object_getClass) {
     c.ret(obj ? c.mem.read<uint32_t>(obj) : 0);
 }
 B32_THUNK(_class_getName) {
-    ClassInfo *info = bridge(c).classInfo(c.args.ptr());
-    c.ret(info ? c.rt.internString(info->name) : 0);
+    GuestAddr cls = c.args.ptr();
+    if (ClassInfo *info = bridge(c).classInfo(cls)) {
+        c.ret(c.rt.internString(info->name));
+        return;
+    }
+    // A guest class nothing has realized yet (Swift metadata the runtime
+    // hasn't handed over): its name is in its class_ro_t (class_t.data and
+    // class_ro_t.name are both at offset 16).
+    if (!cls || !c.mem.isMapped(cls + 16)) {
+        c.ret(c.rt.internString("nil"));
+        return;
+    }
+    GuestAddr ro = c.mem.read<uint32_t>(cls + 16) & ~3u;
+    GuestAddr name = ro && c.mem.isMapped(ro + 16) ? c.mem.read<uint32_t>(ro + 16) : 0;
+    c.ret(name && c.mem.isMapped(name) ? name : c.rt.internString("?"));
 }
 B32_THUNK(_sel_registerName) { c.ret(bridge(c).guestSel(c.mem.cstr(c.args.ptr()))); }
 B32_THUNK(_sel_getUid) { c.ret(bridge(c).guestSel(c.mem.cstr(c.args.ptr()))); }
