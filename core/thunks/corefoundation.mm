@@ -28,7 +28,8 @@ void *coreFoundation() { return RTLD_DEFAULT; }
 constexpr CFunction kCoreFoundation[] = {
     {"CFAbsoluteTimeGetCurrent", "d:"},
     {"CFArrayGetCount", "z:o"}, 
-    {"CFDataGetLength", "z:o"}, {"CFDataCreate", "o:opz"},
+    {"CFDataGetLength", "z:o"}, {"CFDataCreate", "o:opz"}, {"CFDataCreateMutable", "o:oz"},
+    {"CFDataSetLength", "v:oz"},
     {"CFDictionaryGetCount", "z:o"},
     
     {"CFPreferencesAppSynchronize", "B:o"}, {"CFPreferencesCopyAppValue", "o:oo"},
@@ -310,6 +311,21 @@ B32_THUNK(_CFArrayGetValues) {
     for (CFIndex i = 0; i < r.length; i++) c.mem.write<uint32_t>(out + uint32_t(i) * 4, guestValue(c, raw, values[size_t(i)]));
 }
 
+// void CFDictionaryGetKeysAndValues(CFDictionaryRef, const void **keys, const void **values):
+// either array may be NULL.
+B32_THUNK(_CFDictionaryGetKeysAndValues) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    GuestAddr outKeys = c.args.ptr(), outValues = c.args.ptr();
+    int flags = rawFlags(dict);
+    size_t count = size_t(CFDictionaryGetCount((CFDictionaryRef)dict));
+    std::vector<const void *> keys(count), values(count);
+    CFDictionaryGetKeysAndValues((CFDictionaryRef)dict, keys.data(), values.data());
+    for (size_t i = 0; i < count; i++) {
+        if (outKeys) c.mem.write<uint32_t>(outKeys + uint32_t(i) * 4, guestValue(c, flags & kRawKeys, keys[i]));
+        if (outValues) c.mem.write<uint32_t>(outValues + uint32_t(i) * 4, guestValue(c, flags & kRawValues, values[i]));
+    }
+}
+
 B32_THUNK(_CFDictionaryGetValue) {
     id dict = bridge(c).toHost(c.args.ptr());
     int flags = rawFlags(dict);
@@ -375,6 +391,22 @@ B32_THUNK(_CFDataGetBytePtr) {
         return;
     }
     c.ret(bridge(c).guestBytes(bytes, uint32_t(data.length), data));
+}
+
+// UInt8 *CFDataGetMutableBytePtr(CFMutableDataRef): the same guest buffer as -mutableBytes.
+B32_THUNK(_CFDataGetMutableBytePtr) { c.ret(bridge(c).mutableBytes(bridge(c).toHost(c.args.ptr()))); }
+
+// CFStringRef CFStringCreateWithBytesNoCopy(CFAllocatorRef, const UInt8 *bytes, CFIndex numBytes,
+//     CFStringEncoding, Boolean isExternalRepresentation, CFAllocatorRef contentsDeallocator):
+// a copy, since the host mustn't free guest memory with the deallocator.
+B32_THUNK(_CFStringCreateWithBytesNoCopy) {
+    c.args.ptr();
+    GuestAddr bytes = c.args.ptr();
+    CFIndex length = c.args.i32();
+    CFStringEncoding encoding = c.args.u32();
+    Boolean external = Boolean(c.args.u32());
+    CFStringRef string = CFStringCreateWithBytes(nullptr, c.mem.ptr<UInt8>(bytes), length, encoding, external);
+    c.ret(bridge(c).toGuest((id)string));
 }
 
 // void CFDataGetBytes(CFDataRef, CFRange, UInt8 *buffer)
