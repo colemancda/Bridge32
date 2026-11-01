@@ -31,6 +31,9 @@ public:
     GuestHeap &heap() { return *heap_; }
     ThunkTable &thunks() { return *thunks_; }
     const Image &image() const { return image_; }
+    // dyld's image list: the app (0), then the guest libraries in load order.
+    size_t imageCount() const { return 1 + libraries_.size(); }
+    const Image &imageAt(size_t i) const { return i == 0 ? image_ : libraries_[i - 1]; }
     Cpu &mainCpu() { return *cpu_; }
     objc::Bridge &bridge() { return *bridge_; }
 
