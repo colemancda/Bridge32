@@ -170,19 +170,95 @@ B32_MACH_FAILS(_mach_msg)
 B32_MACH_FAILS(_exception_raise)
 B32_MACH_FAILS(_exception_raise_state)
 B32_MACH_FAILS(_exception_raise_state_identity)
-B32_MACH_FAILS(_thread_get_state)
-B32_MACH_FAILS(_thread_suspend)
-B32_MACH_FAILS(_thread_resume)
-B32_MACH_FAILS(_thread_info)
-B32_MACH_FAILS(_task_threads)
 B32_MACH_FAILS(_task_info)
 B32_MACH_FAILS(_mach_make_memory_entry_64)
 B32_MACH_FAILS(_vm_map)
+// Mirrored mappings (TPCircularBuffer's ring buffers) can't be made in guest
+// memory; the callers give up on the buffer.
+B32_MACH_FAILS(_vm_remap)
 B32_THUNK(_mach_port_deallocate) { c.ret(KERN_SUCCESS); }
 B32_THUNK(_mach_thread_self) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_host_self) { c.ret(mach_host_self()); }
 B32_THUNK(_pthread_mach_thread_np) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_error_string) { c.ret(c.rt.internString(::mach_error_string(c.args.i32()))); }
+
+// Guest threads for garbage collectors (Boehm's, in Unity's Mono), which
+// stop the world with task_threads, thread_suspend and thread_get_state. The
+// ports are the host threads' own, as mach_thread_self returns them.
+
+static GuestAddr vmAllocate(Call &c, uint32_t size);
+static Cpu *guestThread(uint32_t port) { return Cpu::forThread(port); }
+
+// kern_return_t task_threads(task_t, thread_act_array_t *list, mach_msg_type_number_t *count):
+// the list is vm_allocate memory, which the caller vm_deallocates.
+B32_THUNK(_task_threads) {
+    c.args.u32();
+    GuestAddr listOut = c.args.ptr(), countOut = c.args.ptr();
+    std::vector<uint32_t> ports = Cpu::threadPorts();
+    GuestAddr list = vmAllocate(c, uint32_t(ports.size()) * 4);
+    for (size_t i = 0; i < ports.size(); i++) c.mem.write<uint32_t>(list + uint32_t(i) * 4, ports[i]);
+    c.mem.write<uint32_t>(listOut, list);
+    c.mem.write<uint32_t>(countOut, uint32_t(ports.size()));
+    c.ret(KERN_SUCCESS);
+}
+
+B32_THUNK(_thread_suspend) {
+    Cpu *cpu = guestThread(c.args.u32());
+    if (!cpu || cpu == &c.cpu) {
+        c.ret(cpu ? KERN_SUCCESS : KERN_INVALID_ARGUMENT);
+        return;
+    }
+    cpu->suspend();
+    c.ret(KERN_SUCCESS);
+}
+
+B32_THUNK(_thread_resume) {
+    Cpu *cpu = guestThread(c.args.u32());
+    if (!cpu) {
+        c.ret(KERN_INVALID_ARGUMENT);
+        return;
+    }
+    if (cpu != &c.cpu) cpu->resume();
+    c.ret(KERN_SUCCESS);
+}
+
+// kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t, thread_state_t, mach_msg_type_number_t *count):
+// ARM_THREAD_STATE (1) only, the 32-bit arm_thread_state_t { r[13], sp, lr, pc, cpsr }.
+B32_THUNK(_thread_get_state) {
+    Cpu *cpu = guestThread(c.args.u32());
+    int flavor = c.args.i32();
+    GuestAddr state = c.args.ptr(), countOut = c.args.ptr();
+    constexpr uint32_t kArmThreadState = 1, kArmThreadStateCount = 17;
+    if (!cpu || flavor != kArmThreadState || c.mem.read<uint32_t>(countOut) < kArmThreadStateCount) {
+        c.ret(KERN_INVALID_ARGUMENT);
+        return;
+    }
+    for (int r = 0; r < 16; r++) c.mem.write<uint32_t>(state + r * 4, cpu->reg(r));
+    c.mem.write<uint32_t>(state + 64, cpu->cpsr());
+    c.mem.write<uint32_t>(countOut, kArmThreadStateCount);
+    c.ret(KERN_SUCCESS);
+}
+
+// kern_return_t thread_info(thread_act_t, thread_flavor_t, thread_info_t, mach_msg_type_number_t *count):
+// THREAD_BASIC_INFO only, for its run state and suspend count (ten integer_t
+// words on both sides).
+B32_THUNK(_thread_info) {
+    Cpu *cpu = guestThread(c.args.u32());
+    int flavor = c.args.i32();
+    GuestAddr info = c.args.ptr(), countOut = c.args.ptr();
+    if (!cpu || flavor != THREAD_BASIC_INFO || c.mem.read<uint32_t>(countOut) < THREAD_BASIC_INFO_COUNT) {
+        c.ret(KERN_INVALID_ARGUMENT);
+        return;
+    }
+    thread_basic_info_data_t basic = {};
+    basic.suspend_count = cpu->suspendCount();
+    basic.run_state = basic.suspend_count ? TH_STATE_STOPPED : TH_STATE_RUNNING;
+    basic.policy = POLICY_TIMESHARE;
+    static_assert(sizeof basic == THREAD_BASIC_INFO_COUNT * 4);
+    c.mem.copyIn(info, &basic, sizeof basic);
+    c.mem.write<uint32_t>(countOut, THREAD_BASIC_INFO_COUNT);
+    c.ret(KERN_SUCCESS);
+}
 
 // kern_return_t host_statistics(host_t, host_flavor_t, host_info_t, mach_msg_type_number_t *count):
 // HOST_VM_INFO only, as a 512 MB iPhone (the hw.memsize the guest is told)
@@ -224,17 +300,17 @@ namespace {
 std::mutex vmLock;
 std::unordered_map<GuestAddr, GuestAddr> vmBlocks;  // aligned address -> heap allocation
 }  // namespace
+static GuestAddr vmAllocate(Call &c, uint32_t size) {
+    GuestAddr raw = c.heap.calloc(1, size + 4096);
+    GuestAddr aligned = (raw + 4095) & ~4095u;
+    std::lock_guard guard(vmLock);
+    vmBlocks[aligned] = raw;
+    return aligned;
+}
 B32_THUNK(_vm_allocate) {
     c.args.u32();
     GuestAddr out = c.args.ptr();
-    uint32_t size = c.args.u32();
-    GuestAddr raw = c.heap.calloc(1, size + 4096);
-    GuestAddr aligned = (raw + 4095) & ~4095u;
-    {
-        std::lock_guard guard(vmLock);
-        vmBlocks[aligned] = raw;
-    }
-    c.mem.write<uint32_t>(out, aligned);
+    c.mem.write<uint32_t>(out, vmAllocate(c, c.args.u32()));
     c.ret(KERN_SUCCESS);
 }
 B32_THUNK(_vm_deallocate) {
