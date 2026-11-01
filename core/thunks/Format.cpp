@@ -100,7 +100,9 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             break;
         case 's': {
             GuestAddr s = args.ptr();
-            const char *host = s ? c.mem.cstr(s) : "(null)";
+            // A missing argument (KSCrash's "Could not stat %s: %s" passes one)
+            // reads whatever word follows, which a device tolerates more often.
+            const char *host = !s ? "(null)" : c.mem.isMapped(s) ? c.mem.cstr(s) : "(bad pointer)";
             int n = std::snprintf(nullptr, 0, (spec + 's').c_str(), host);
             std::string tmp(size_t(n) + 1, '\0');
             std::snprintf(tmp.data(), tmp.size(), (spec + 's').c_str(), host);
