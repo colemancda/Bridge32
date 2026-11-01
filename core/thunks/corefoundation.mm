@@ -42,7 +42,8 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFStringCompare", "z:ooz"}, {"CFStringGetIntValue", "i:o"}, {"CFStringGetDoubleValue", "d:o"},
     {"CFUUIDCreate", "o:o"}, {"CFUUIDCreateString", "o:oo"},
     {"CFGetTypeID", "z:o"}, {"CFStringGetTypeID", "z:"}, {"CFNumberGetTypeID", "z:"},
-    {"CFArrayGetTypeID", "z:"}, {"CFDictionaryGetTypeID", "z:"}, {"CFDataGetTypeID", "z:"},
+    {"CFArrayGetTypeID", "z:"}, {"CFDictionaryGetTypeID", "z:"}, {"CFDataGetTypeID", "z:"}, {"CFBooleanGetTypeID", "z:"}, {"CFErrorGetTypeID", "z:"},
+    {"CFSetGetTypeID", "z:"}, {"CFDateGetTypeID", "z:"}, {"CFNullGetTypeID", "z:"}, {"CFURLGetTypeID", "z:"},
     {"CFBooleanGetValue", "B:o"}, {"CFNumberIsFloatType", "B:o"}, {"CFEqual", "B:oo"}, {"CFHash", "z:o"},
     {"CFURLCreateWithFileSystemPath", "o:ooiu"}, {"CFBundleGetMainBundle", "o:"},
     {"CFBundleCopyResourceURL", "o:oooo"}, {"CFBundleGetValueForInfoDictionaryKey", "o:oo"},
@@ -514,6 +515,40 @@ B32_THUNK(_CFStringCreateWithFormat) {
     c.args.ptr();
     NSString *format = (NSString *)bridge(c).toHost(c.args.ptr());
     std::string s = formatGuest(c, format.UTF8String, c.args, objc::describeObject);
+    c.ret(bridge(c).toGuest([[NSString alloc] initWithUTF8String:s.c_str()]));
+}
+
+// void CFStringGetCharacters(CFStringRef, CFRange, UniChar *buffer): the guest's CFRange is two words.
+B32_THUNK(_CFStringGetCharacters) {
+    auto string = (CFStringRef)bridge(c).toHost(c.args.ptr());
+    CFIndex location = c.args.i32(), length = c.args.i32();
+    CFStringGetCharacters(string, CFRangeMake(location, length), c.mem.ptr<UniChar>(c.args.ptr()));
+}
+
+// Boolean CFStringFindWithOptions(CFStringRef, CFStringRef toFind, CFRange rangeToSearch,
+//                                 CFStringCompareFlags, CFRange *result)
+B32_THUNK(_CFStringFindWithOptions) {
+    auto string = (CFStringRef)bridge(c).toHost(c.args.ptr());
+    auto toFind = (CFStringRef)bridge(c).toHost(c.args.ptr());
+    CFIndex location = c.args.i32(), length = c.args.i32();
+    CFStringCompareFlags flags = c.args.u32();
+    GuestAddr resultOut = c.args.ptr();
+    CFRange found;
+    Boolean ok = CFStringFindWithOptions(string, toFind, CFRangeMake(location, length), flags, &found);
+    if (ok && resultOut) {
+        c.mem.write<int32_t>(resultOut, int32_t(found.location));
+        c.mem.write<int32_t>(resultOut + 4, int32_t(found.length));
+    }
+    c.ret(ok);
+}
+
+// CFStringRef CFStringCreateWithFormatAndArguments(CFAllocatorRef, CFDictionaryRef options, CFStringRef format, va_list)
+B32_THUNK(_CFStringCreateWithFormatAndArguments) {
+    c.args.ptr();
+    c.args.ptr();
+    NSString *format = (NSString *)bridge(c).toHost(c.args.ptr());
+    Args va = Args::fromVaList(c.cpu, c.args.ptr());
+    std::string s = formatGuest(c, format.UTF8String, va, objc::describeObject);
     c.ret(bridge(c).toGuest([[NSString alloc] initWithUTF8String:s.c_str()]));
 }
 
