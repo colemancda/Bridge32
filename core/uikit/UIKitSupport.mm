@@ -418,7 +418,12 @@ B32_OVERRIDE_WHEN(isScreen, "applicationFrame") {
     writeGuestRect(o.c.mem, o.retPtr, 0, kStatusBarHeight, screenWidth(), screenHeight() - kStatusBarHeight);
 }
 B32_OVERRIDE_WHEN(isScreen, "scale") { o.c.retF32(1.0f); }
-B32_OVERRIDE_WHEN(isScreen, "nativeBounds") { writeGuestRect(o.c.mem, o.retPtr, 0, 0, screenWidth(), screenHeight()); }
+// nativeBounds is in the portrait-up orientation whatever the interface's, so
+// games that swap it for landscape (Angry Birds Friends) get it the right way.
+B32_OVERRIDE_WHEN(isScreen, "nativeBounds") {
+    writeGuestRect(o.c.mem, o.retPtr, 0, 0, std::min(screenWidth(), screenHeight()),
+                   std::max(screenWidth(), screenHeight()));
+}
 B32_OVERRIDE_WHEN(isScreen, "nativeScale") { o.c.retF32(1.0f); }
 
 // The idiom follows the guest's device: Catalyst's own is iPad, which would
