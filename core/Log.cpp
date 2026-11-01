@@ -14,6 +14,9 @@ void log(const char *fmt, ...) {
 }
 
 void fatal(const char *fmt, ...) {
+    // What the guest printed just before (an engine's own error message)
+    // may still be in stdout's buffer.
+    std::fflush(stdout);
     va_list args;
     va_start(args, fmt);
     std::fputs("[b32] fatal: ", stderr);
