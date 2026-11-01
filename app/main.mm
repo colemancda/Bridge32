@@ -50,6 +50,10 @@ int main(int argc, char **argv) {
         // launch at a modal "reopen windows?" alert, and games have no windows to restore.
         [NSUserDefaults.standardUserDefaults registerDefaults:@{@"ApplePersistenceIgnoreState" : @YES}];
 
+        // An iOS app starts in /, and some engines drop the leading slash from
+        // their paths. The Mac sandbox starts us in the container instead.
+        chdir("/");
+
         // SDL in iOS-9-era games names an MFi controller by vendor, product and
         // button mask, and its database only knows Apple's own MFi pads. Brand
         // controllers the Mac reports through GameController (DualSense, DualShock 4,
