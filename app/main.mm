@@ -33,7 +33,10 @@ int main(int argc, char **argv) {
             NSString *logs = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Logs"];
             [[NSFileManager defaultManager] createDirectoryAtPath:logs withIntermediateDirectories:YES attributes:nil error:nil];
             NSString *log = [logs stringByAppendingPathComponent:@"bridge32.log"];
-            std::freopen(log.fileSystemRepresentation, "w", stderr);
+            // Both in append mode: with separate file offsets, stderr's
+            // writes would land on top of stdout's.
+            std::fclose(std::fopen(log.fileSystemRepresentation, "w"));
+            std::freopen(log.fileSystemRepresentation, "a", stderr);
             std::freopen(log.fileSystemRepresentation, "a", stdout);
         }
         setvbuf(stdout, nullptr, _IOLBF, 0);
