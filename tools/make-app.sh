@@ -69,6 +69,16 @@ mkdir -p "$resources"
 (cd "$guest" && tar cf - --exclude _CodeSignature --exclude SC_Info --exclude embedded.mobileprovision \
     --exclude CodeResources --exclude ResourceRules.plist .) | (cd "$resources" && tar xf -)
 
+# Nibs compiled for iOS 7 and 8 are folders of objects-<version>+.nib and
+# runtime.nib; today's UIKit reads keyedobjects.nib from such a folder. The
+# newest of the old archives goes in under that name.
+find "$resources" -type d -name '*.nib' | while IFS= read -r nib; do
+    [ -f "$nib/keyedobjects.nib" ] && continue
+    archive=$(ls "$nib"/objects-*.nib 2>/dev/null | sort -t- -k2 -V | tail -1)
+    [ -n "$archive" ] || archive="$nib/runtime.nib"
+    [ -f "$archive" ] && cp "$archive" "$nib/keyedobjects.nib"
+done
+
 if [ -n "$guest_libs" ]; then
     mkdir -p "$resources/B32GuestLibraries"
     for lib in "$guest_libs"/libstdc++*.dylib "$guest_libs"/libgcc_s*.dylib "$guest_libs"/libxml2*.dylib \
