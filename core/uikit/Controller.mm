@@ -275,7 +275,17 @@ NSMutableSet *activeTouches() {
     if (!window) return;
     CGPoint point = guestPoint(window, screen);
     UIResponder *handler = touchHandler(window, point);
-    if (!handler) return;
+    if (!handler) {
+        // Plain UIKit (a button): UIControl tracks real UITouches only, so
+        // the tap fires the control's touch-up-inside actions instead.
+        for (UIView *v = [window hitTest:point withEvent:nil]; v; v = v.superview)
+            if ([v isKindOfClass:UIControl.class]) {
+                log("scripted tap fires %s's actions", object_getClassName(v));
+                [(UIControl *)v sendActionsForControlEvents:UIControlEventTouchUpInside];
+                break;
+            }
+        return;
+    }
     _touch = [[B32Touch alloc] init];
     _touch.window = window;
     _touch.view = handler;
