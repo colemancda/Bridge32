@@ -463,7 +463,47 @@ void pollBindings() {
 
 @end
 
+// B32_TAPS scripts taps for testing without a person at the Mac: space-
+// separated "seconds:x,y" entries, each a tap at that point on the game's
+// screen (in its points, as the player sees it) that many seconds after
+// launch, or "seconds:x,y-x2,y2" for a drag between two points over a
+// quarter second, e.g. B32_TAPS="20:160,397 25:160,290-160,200".
+static void scheduleScriptedTaps() {
+    const char *spec = getenv("B32_TAPS");
+    if (!spec) return;
+    for (NSString *entry in [@(spec) componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
+        NSArray<NSString *> *parts = [entry componentsSeparatedByString:@":"];
+        if (parts.count != 2) continue;
+        NSArray<NSString *> *ends = [parts[1] componentsSeparatedByString:@"-"];
+        NSArray<NSString *> *xy = [ends[0] componentsSeparatedByString:@","];
+        if (xy.count != 2) continue;
+        NSArray<NSString *> *xy2 = ends.count > 1 ? [ends[1] componentsSeparatedByString:@","] : xy;
+        if (xy2.count != 2) continue;
+        double when = parts[0].doubleValue;
+        CGPoint from = CGPointMake(xy[0].doubleValue, xy[1].doubleValue);
+        CGPoint to = CGPointMake(xy2[0].doubleValue, xy2[1].doubleValue);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(when * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            log("scripted %s at %.0f,%.0f", ends.count > 1 ? "drag" : "tap", from.x, from.y);
+            B32Finger *finger = [[B32Finger alloc] init];
+            [finger moveTo:from];
+            const int steps = 10;
+            for (int i = 1; i <= steps + 1; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(i) * 25 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+                    if (i <= steps) {
+                        CGFloat t = CGFloat(i) / steps;
+                        [finger moveTo:CGPointMake(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)];
+                    } else {
+                        [finger up];
+                        [finger release];
+                    }
+                });
+            }
+        });
+    }
+}
+
 void b32::uikit::startController() {
+    scheduleScriptedTaps();
     bool swipe = enabled(@"swipe");
     size_t count = bindings().size();
     if (!swipe && !count) return;
