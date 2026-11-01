@@ -106,6 +106,16 @@ B32_THUNK(_AudioSessionGetProperty) {
     c.ret(0);
 }
 
+// OSStatus AudioSessionGetPropertySize(AudioSessionPropertyID, UInt32 *outDataSize): the sample
+// rates are Float64s; everything else is a 32-bit value or a CF object.
+B32_THUNK(_AudioSessionGetPropertySize) {
+    uint32_t property = c.args.u32();
+    GuestAddr size = c.args.ptr();
+    bool float64 = property == 'chsr' || property == 'hwsr';  // current and preferred hardware sample rates
+    if (size) c.mem.write<uint32_t>(size, float64 ? 8 : 4);
+    c.ret(0);
+}
+
 // --- OpenAL extensions -----------------------------------------------------------------------
 
 // ALvoid *alcGetProcAddress(ALCdevice *, const ALCchar *funcName) and
