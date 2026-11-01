@@ -12,6 +12,7 @@
 
 #include <mach/clock.h>
 #include <mach/mach.h>
+#include <mach/mach_error.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/xattr.h>
@@ -89,15 +90,46 @@ B32_THUNK(_OSSpinLockTry) {
 }
 B32_THUNK(_OSSpinLockUnlock) { atomicAt(c, c.args.ptr()).store(0); }
 
-// --- dyld's image list: just the app ---------------------------------------------------------------
+// --- dyld's image list: the app, then the guest libraries -------------------------------------------
 
-B32_THUNK(__dyld_image_count) { c.ret(1); }
-B32_THUNK(__dyld_get_image_header) { c.ret(c.args.u32() == 0 ? c.rt.image().base : 0); }
-B32_THUNK(__dyld_get_image_name) { c.ret(c.args.u32() == 0 ? c.rt.internString(c.rt.image().path) : 0); }
-B32_THUNK(__dyld_get_image_vmaddr_slide) { c.ret(0); }
+B32_THUNK(__dyld_image_count) { c.ret(uint32_t(c.rt.imageCount())); }
+B32_THUNK(__dyld_get_image_header) {
+    uint32_t i = c.args.u32();
+    c.ret(i < c.rt.imageCount() ? c.rt.imageAt(i).base : 0);
+}
+B32_THUNK(__dyld_get_image_name) {
+    uint32_t i = c.args.u32();
+    c.ret(i < c.rt.imageCount() ? c.rt.internString(c.rt.imageAt(i).path) : 0);
+}
+B32_THUNK(__dyld_get_image_vmaddr_slide) {
+    uint32_t i = c.args.u32();
+    c.ret(i < c.rt.imageCount() ? c.rt.imageAt(i).slide : 0);
+}
 // void _dyld_register_func_for_add_image(void (*)(const struct mach_header *, intptr_t slide)):
 // called right away for the images already loaded.
-B32_THUNK(__dyld_register_func_for_add_image) { c.cpu.call(c.args.ptr(), {c.rt.image().base, 0}); }
+B32_THUNK(__dyld_register_func_for_add_image) {
+    GuestAddr fn = c.args.ptr();
+    for (size_t i = 0; i < c.rt.imageCount(); i++) c.cpu.call(fn, {c.rt.imageAt(i).base, c.rt.imageAt(i).slide});
+}
+// uint8_t *getsectiondata(const struct mach_header *, const char *segname, const char *sectname,
+//                         unsigned long *size): the section's slid address.
+B32_THUNK(_getsectiondata) {
+    GuestAddr header = c.args.ptr();
+    std::string segname = c.mem.cstr(c.args.ptr()), sectname = c.mem.cstr(c.args.ptr());
+    GuestAddr sizeOut = c.args.ptr();
+    for (size_t i = 0; i < c.rt.imageCount(); i++) {
+        const Image &image = c.rt.imageAt(i);
+        if (image.base != header) continue;
+        if (const Section *s = image.section(segname.c_str(), sectname.c_str())) {
+            if (sizeOut) c.mem.write<uint32_t>(sizeOut, s->size);
+            c.ret(s->addr);
+            return;
+        }
+        break;
+    }
+    if (sizeOut) c.mem.write<uint32_t>(sizeOut, 0);
+    c.ret(0);
+}
 B32_THUNK(__dyld_register_func_for_remove_image) {}
 B32_THUNK(_getsectdatafromheader_64) { c.ret(0); }  // the guest has no 64-bit images
 
@@ -150,6 +182,7 @@ B32_THUNK(_mach_port_deallocate) { c.ret(KERN_SUCCESS); }
 B32_THUNK(_mach_thread_self) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_host_self) { c.ret(mach_host_self()); }
 B32_THUNK(_pthread_mach_thread_np) { c.ret(mach_thread_self()); }
+B32_THUNK(_mach_error_string) { c.ret(c.rt.internString(::mach_error_string(c.args.i32()))); }
 
 // kern_return_t host_statistics(host_t, host_flavor_t, host_info_t, mach_msg_type_number_t *count):
 // HOST_VM_INFO only, as a 512 MB iPhone (the hw.memsize the guest is told)
