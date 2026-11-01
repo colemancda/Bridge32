@@ -95,6 +95,15 @@ B32_THUNK(_dispatch_queue_create) {
     c.ret(guest(c, dispatch_queue_create(label ? c.mem.cstr(label) : nullptr, attr)));
 }
 
+// dispatch_queue_t dispatch_queue_create_with_target(const char *label, dispatch_queue_attr_t,
+//                                                    dispatch_queue_t target)
+B32_THUNK(_dispatch_queue_create_with_target$V2) {
+    GuestAddr label = c.args.ptr();
+    dispatch_queue_attr_t attr = queueAttr(c, c.args.ptr());
+    auto target = object<dispatch_queue_t>(c);
+    c.ret(guest(c, dispatch_queue_create_with_target(label ? c.mem.cstr(label) : nullptr, attr, target)));
+}
+
 B32_THUNK(_dispatch_queue_get_label) {
     const char *label = dispatch_queue_get_label(object<dispatch_queue_t>(c));
     c.ret(label ? c.rt.internString(label) : 0);
