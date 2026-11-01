@@ -39,3 +39,8 @@ B32_THUNK(_SCNetworkReachabilityUnscheduleFromRunLoop) { c.ret(1); }
 // Reachability changes aren't delivered to the guest yet, so there's no
 // queue to schedule them on; accepting it is enough.
 B32_THUNK(_SCNetworkReachabilitySetDispatchQueue) { c.ret(1); }
+
+// CaptiveNetwork: no Wi-Fi details for the guest (macOS only gives them out
+// with location permission), as when an iPhone isn't on Wi-Fi.
+B32_THUNK(_CNCopySupportedInterfaces) { c.ret(0); }
+B32_THUNK(_CNCopyCurrentNetworkInfo) { c.ret(0); }
