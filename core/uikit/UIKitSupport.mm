@@ -304,12 +304,18 @@ void forwardToAppDelegate(SEL selector) {
 
 @end
 
-// Apps from before iOS 13 name their main nib in Info.plist and leave the
-// delegate to it, but UIKit doesn't load NSMainNibFile for scene-based apps.
-// This stands in as the delegate just long enough to load the nib, whose
-// File's Owner (the UIApplication) gets the guest's delegate from it.
+// Apps from before iOS 13 name their main nib in Info.plist and usually leave
+// the delegate to it, but UIKit doesn't load NSMainNibFile for scene-based
+// apps. This stands in as the delegate just long enough to load the nib, whose
+// File's Owner (the UIApplication) gets the guest's delegate from it. An app
+// that also names its delegate class (Tiny Wings) gets that delegate first,
+// as UIKit made it before loading the nib, whose outlets then fill it in.
 @interface B32NibAppDelegate : UIResponder <UIApplicationDelegate>
 @end
+
+namespace {
+NSString *namedDelegateClass;  // the class UIApplicationMain named, if any
+}
 
 @implementation B32NibAppDelegate
 
@@ -328,6 +334,7 @@ void forwardToAppDelegate(SEL selector) {
     // until this method returns (and after, since UIKit may still message it).
     [self retain];
     NSString *nib = [B32NibAppDelegate mainNibName];
+    if (namedDelegateClass) application.delegate = [[NSClassFromString(namedDelegateClass) alloc] init];
     // The nib's objects live for the whole run, as with UIKit's own main nib.
     NSArray *objects = [[[NSBundle mainBundle] loadNibNamed:nib owner:application options:nil] retain];
     log("loaded main nib %s: %lu top-level objects, delegate %s", nib.UTF8String, (unsigned long)objects.count,
@@ -403,7 +410,10 @@ B32_THUNK(_UIApplicationMain) {
         return info && info->host ? @(class_getName(info->host)) : name;
     };
     log("UIApplicationMain(principal %s, delegate %s)", principal.UTF8String ?: "nil", delegate.UTF8String ?: "nil");
-    if (!delegate && [B32NibAppDelegate mainNibName]) delegate = @"B32NibAppDelegate";
+    if ([B32NibAppDelegate mainNibName]) {
+        namedDelegateClass = [hostName(delegate) copy];
+        delegate = @"B32NibAppDelegate";
+    }
     c.ret(uint32_t(UIApplicationMain(*_NSGetArgc(), *_NSGetArgv(), hostName(principal), hostName(delegate))));
 }
 
