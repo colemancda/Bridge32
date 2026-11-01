@@ -24,11 +24,16 @@ using namespace b32;
 
 @implementation B32Compat_MPMoviePlayerController {
     UIView *_view;
-    BOOL _playing, _finished;
+    BOOL _playing, _finished, _skipped;
 }
 
+// shouldAutoplay is YES by default, as in MediaPlayer: games that only call
+// prepareToPlay (Cut the Rope's intro) expect the movie to start, and finish.
 - (instancetype)initWithContentURL:(NSURL *)url {
-    if ((self = [super init])) self.contentURL = url;
+    if ((self = [super init])) {
+        self.contentURL = url;
+        _shouldAutoplay = YES;
+    }
     return self;
 }
 
@@ -57,8 +62,11 @@ using namespace b32;
 - (void)setOrientation:(NSInteger)orientation animated:(BOOL)animated {}
 
 - (void)play {
-    if (_playing) return;
+    // Each movie is skipped once: a game that prepares it (which autoplays)
+    // and then plays it gets one "finished", as it would from a real player.
+    if (_playing || _skipped) return;
     _playing = YES;
+    _skipped = YES;
     log("skipping movie %s", _contentURL.lastPathComponent.UTF8String ?: "?");
     _finished = NO;
     // A player that has played stays alive for the rest of the run: games
