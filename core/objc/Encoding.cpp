@@ -81,7 +81,19 @@ Type parseType(const char *&p) {
     }
     case '[': {
         while (*p >= '0' && *p <= '9') t.count = t.count * 10 + uint32_t(*p++ - '0');
-        t.fields.push_back(parseType(p));
+        if (*p == ']') {
+            // clang encodes SIMD vectors (simd_float3, matrix columns) as
+            // arrays with no element type: kept as opaque 16-byte elements,
+            // the size of a 4-lane vector, so the signature still parses.
+            Type lanes;
+            lanes.code = '[';
+            lanes.count = 16;
+            lanes.fields.push_back(Type{});
+            lanes.fields.back().code = 'C';
+            t.fields.push_back(lanes);
+        } else {
+            t.fields.push_back(parseType(p));
+        }
         if (*p == ']') p++;
         break;
     }
@@ -89,8 +101,17 @@ Type parseType(const char *&p) {
         t.pointee = std::make_shared<Type>(parseType(p));
         break;
     case '@':
-        if (*p == '?') p++;  // block
-        else if (*p == '"') {  // class name annotation
+        if (*p == '?') {  // block, with its own signature in <...> in extended encodings
+            p++;
+            if (*p == '<') {
+                int depth = 0;
+                do {
+                    if (*p == '<') depth++;
+                    else if (*p == '>') depth--;
+                    p++;
+                } while (*p && depth > 0);
+            }
+        } else if (*p == '"') {  // class name annotation
             p++;
             while (*p && *p != '"') p++;
             if (*p) p++;
