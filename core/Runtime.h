@@ -95,6 +95,8 @@ private:
     // Loads the guest library at `path` into the next window; its index in libraries_.
     size_t loadGuestLibrary(const std::string &path);
     std::string findGuestLibrary(const std::string &installName) const;
+    // A CPU for a new guest thread, with its pthread slots (Cpu::tsd).
+    std::unique_ptr<Cpu> newCpu();
     GuestAddr buildProcessStack(GuestAddr stackTop, const std::vector<std::string> &argv,
                                 const std::vector<std::string> &envp, GuestAddr *argvOut, GuestAddr *envpOut,
                                 GuestAddr *appleOut);
