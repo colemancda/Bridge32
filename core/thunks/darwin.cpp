@@ -176,6 +176,9 @@ B32_MACH_FAILS(_vm_map)
 // Mirrored mappings (TPCircularBuffer's ring buffers) can't be made in guest
 // memory; the callers give up on the buffer.
 B32_MACH_FAILS(_vm_remap)
+// Crash reporters walking the address space find nothing to walk.
+B32_MACH_FAILS(_vm_region_recurse_64)
+B32_MACH_FAILS(_vm_read)
 B32_THUNK(_mach_port_deallocate) { c.ret(KERN_SUCCESS); }
 B32_THUNK(_mach_thread_self) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_host_self) { c.ret(mach_host_self()); }
