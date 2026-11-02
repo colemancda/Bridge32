@@ -226,6 +226,8 @@ B32_THUNK(_read) {
     c.ret(uint32_t(n));
 }
 B32_THUNK(_close) { c.ret(uint32_t(::close(c.args.i32()))); }
+// int pipe(int fds[2]): host descriptors, like every other.
+B32_THUNK(_pipe) { c.ret(uint32_t(::pipe(c.mem.ptr<int>(c.args.ptr())))); }
 
 // --- ctype ----------------------------------------------------------------------------------
 
