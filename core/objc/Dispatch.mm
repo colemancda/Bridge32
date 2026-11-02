@@ -241,6 +241,17 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     hostDispatch(c, receiver, sel, kind != SuperKind::None ? info : nullptr, stret);
 }
 
+namespace {
+// A word as a float, for the send trace.
+std::string floatText(uint32_t w) {
+    float f;
+    std::memcpy(&f, &w, 4);
+    char text[32];
+    std::snprintf(text, sizeof text, "%g", f);
+    return text;
+}
+}  // namespace
+
 void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo *superInfo, bool stret, IMP direct) {
     GuestMemory &mem = rt_.mem();
     id recv = toHost(receiver);
@@ -249,8 +260,9 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     // B32_TRACE_SENDS=1 logs every guest-to-host message.
     static const bool trace = getenv("B32_TRACE_SENDS") != nullptr;
     if (trace)
-        log("guest -> host %c[%s %s]%s (thread %x)", object_isClass(recv) ? '+' : '-', object_getClassName(recv), name,
-            superInfo ? " (super)" : "", pthread_mach_thread_np(pthread_self()));
+        log("guest -> host %c[%s %s]%s (thread %x, from 0x%08x)", object_isClass(recv) ? '+' : '-',
+            object_getClassName(recv), name, superInfo ? " (super)" : "", pthread_mach_thread_np(pthread_self()),
+            c.cpu.reg(Cpu::LR));
 
     // A guest method behind a trampoline (a guest category on a host class)
     // runs here in the guest, as the guest's own runtime would run it, rather
@@ -315,7 +327,11 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         const Type &t = sig.args[i];
         std::vector<uint32_t> words(wordsFor(t.guestSize()));
         for (auto &w : words) w = args.u32();
-        if (trace) log("    arg %zu '%c'%s: %zu word(s), first %08x", i, t.code, t.cgfloat ? " (CGFloat)" : "", words.size(), words.empty() ? 0 : words[0]);
+        if (trace) {
+            std::string hex;
+            for (size_t k = 0; k < words.size() && k < 4; k++) hex += (k ? " " : "") + std::to_string(int32_t(words[k])) + "/" + floatText(words[k]);
+            log("    arg %zu '%c'%s: %zu word(s): %s", i, t.code, t.cgfloat ? " (CGFloat)" : "", words.size(), hex.c_str());
+        }
         storage[i].resize(std::max<size_t>(t.hostSize(), 8));
         if (t.code == '^' && !passesThrough(t) && !isCFRef(t)) {
             // Copy in/out through a host temporary laid out for the host.
@@ -375,6 +391,15 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     uint32_t size = r.guestSize();
     alignas(8) uint8_t guest[256] = {};
     toGuestValue(r, result, guest);
+    if (trace && r.isStruct()) {
+        std::string text;
+        for (uint32_t k = 0; k < size / 4 && k < 4; k++) {
+            uint32_t w;
+            std::memcpy(&w, guest + k * 4, 4);
+            text += (k ? " " : "") + floatText(w);
+        }
+        log("    returned {%s}", text.c_str());
+    }
     if (r.isStruct() && size > 4) {
         if (!stret) fatal("%s returns a %u-byte struct but was sent with objc_msgSend", name, size);
         mem.copyIn(retPtr, guest, size);
