@@ -485,6 +485,7 @@ B32_THUNK(__b32_invoke_host_block) {
         std::lock_guard guard(lock);
         auto it = cache.find(types);
         if (it == cache.end()) {
+            if (getenv("B32_TRACE_CALLS")) log("host block signature %s", types);
             auto made = std::make_unique<Call>();
             made->sig = parseSignature(types);
             for (const auto &a : made->sig.args) made->argTypes.push_back(ffiType(a));
