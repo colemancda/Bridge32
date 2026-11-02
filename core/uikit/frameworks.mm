@@ -72,6 +72,10 @@ B32_THUNK(_UIGraphicsGetImageFromCurrentImageContext) {
 }
 B32_THUNK(_UIGraphicsEndImageContext) { UIGraphicsEndImageContext(); }
 
+// AddressBook: there are no contacts to share, so access is denied, as if the
+// person said no; apps check this before creating an address book.
+B32_THUNK(_ABAddressBookGetAuthorizationStatus) { c.ret(2); }  // kABAuthorizationStatusDenied
+
 // void UIAccessibilityPostNotification(UIAccessibilityNotifications, id argument):
 // there's no VoiceOver for guest views to talk to.
 B32_THUNK(_UIAccessibilityPostNotification) {}
