@@ -72,6 +72,11 @@ B32_THUNK(_UIGraphicsGetImageFromCurrentImageContext) {
 }
 B32_THUNK(_UIGraphicsEndImageContext) { UIGraphicsEndImageContext(); }
 
+// void UIAccessibilityPostNotification(UIAccessibilityNotifications, id argument):
+// there's no VoiceOver for guest views to talk to.
+B32_THUNK(_UIAccessibilityPostNotification) {}
+B32_THUNK(_UIAccessibilityIsVoiceOverRunning) { c.ret(0); }
+
 // -[UIDevice uniqueIdentifier] (the UDID, removed in iOS 7): 40 hex digits,
 // stable for this Mac, derived from the vendor identifier.
 namespace {
