@@ -9,5 +9,5 @@ root=$(dirname "$here")
 shell="${B32_SHELL_APP:-$root/build/catalyst/Bridge32.app}/Contents/MacOS/Bridge32"
 for app in "$@"; do
     cp "$shell" "$app/Contents/MacOS/Bridge32"
-    codesign --force --sign - --entitlements "$root/app/Bridge32.entitlements" "$app"
+    "$here/sign-app.sh" "$app"
 done
