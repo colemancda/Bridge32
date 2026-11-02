@@ -84,6 +84,27 @@ B32_THUNK(_CCCryptorCreate) {
     if (out) c.mem.write<uint32_t>(out, ref ? hostHandle(ref) : 0);
     c.ret(uint32_t(status));
 }
+// CCCryptorStatus CCCryptorCreateWithMode(CCOperation, CCMode, CCAlgorithm, CCPadding,
+//     const void *iv, const void *key, size_t keyLength, const void *tweak, size_t tweakLength,
+//     int numRounds, CCModeOptions, CCCryptorRef *cryptorRef)
+B32_THUNK(_CCCryptorCreateWithMode) {
+    CCOperation op = c.args.u32();
+    CCMode mode = c.args.u32();
+    CCAlgorithm algorithm = c.args.u32();
+    CCPadding padding = c.args.u32();
+    GuestAddr iv = c.args.ptr(), key = c.args.ptr();
+    size_t keyLength = c.args.u32();
+    GuestAddr tweak = c.args.ptr();
+    size_t tweakLength = c.args.u32();
+    int rounds = c.args.i32();
+    CCModeOptions options = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    CCCryptorRef ref = nullptr;
+    CCCryptorStatus status = CCCryptorCreateWithMode(op, mode, algorithm, padding, bytesAt(c, iv), bytesAt(c, key),
+                                                     keyLength, bytesAt(c, tweak), tweakLength, rounds, options, &ref);
+    if (out) c.mem.write<uint32_t>(out, ref ? hostHandle(ref) : 0);
+    c.ret(uint32_t(status));
+}
 // CCCryptorStatus CCCryptorUpdate(CCCryptorRef, const void *dataIn, size_t dataInLength,
 //     void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved)
 B32_THUNK(_CCCryptorUpdate) {
