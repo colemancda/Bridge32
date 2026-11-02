@@ -151,6 +151,21 @@ B32_THUNK(_getprogname) {
     c.ret(c.rt.internString(path.substr(path.rfind('/') + 1)));
 }
 
+// const NXArchInfo *NXGetLocalArchInfo(void): the guest's CPU, an armv7.
+// NXArchInfo is { name, cputype, cpusubtype, byteorder, description }.
+B32_THUNK(_NXGetLocalArchInfo) {
+    static GuestAddr info = [&] {
+        GuestAddr p = c.heap.calloc(1, 20);
+        c.mem.write<uint32_t>(p, c.rt.internString("armv7"));
+        c.mem.write<uint32_t>(p + 4, 12);   // CPU_TYPE_ARM
+        c.mem.write<uint32_t>(p + 8, 9);    // CPU_SUBTYPE_ARM_V7
+        c.mem.write<uint32_t>(p + 12, 1);   // NX_LittleEndian
+        c.mem.write<uint32_t>(p + 16, c.rt.internString("arm v7"));
+        return p;
+    }();
+    c.ret(info);
+}
+
 // --- Mach ----------------------------------------------------------------------------------------
 
 #define B32_MACH_FAILS(symbol) \
