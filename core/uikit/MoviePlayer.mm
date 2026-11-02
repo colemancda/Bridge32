@@ -6,6 +6,7 @@
 // player had tapped through it.
 
 #include "core/Log.h"
+#include "core/objc/Dispatch.h"
 
 #import <MediaPlayer/MediaPlayer.h>
 #import <UIKit/UIKit.h>
@@ -101,9 +102,14 @@ using namespace b32;
 
 @implementation B32Compat_MPMoviePlayerViewController
 
+// Over the presenter, which stays in the window: games take the player's view
+// down by hand when it finishes (Shantae), after which UIKit never puts a
+// covered presenter's view back.
 - (instancetype)initWithContentURL:(NSURL *)url {
-    if ((self = [super initWithNibName:nil bundle:nil]))
+    if ((self = [super initWithNibName:nil bundle:nil])) {
         _moviePlayer = [[B32Compat_MPMoviePlayerController alloc] initWithContentURL:url];
+        self.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    }
     return self;
 }
 
@@ -121,6 +127,42 @@ using namespace b32;
 }
 
 @end
+
+// -[UIViewController presentMoviePlayerViewControllerAnimated:] and
+// -dismissMoviePlayerViewControllerAnimated: are MediaPlayer's, for its own
+// MPMoviePlayerViewController. This one is presented over the presenter (see
+// its init). Games of the iOS 7 era take the presenter's view out of the
+// window while the movie covers it (Shantae), counting on the dismissal to
+// put it back and send it -viewWillAppear: and -viewDidAppear:, as UIKit did
+// then; the dismissal here does both.
+namespace {
+bool isViewController(id receiver) { return [receiver isKindOfClass:[UIViewController class]]; }
+bool presentsCompatMoviePlayer(id receiver) {
+    return isViewController(receiver) &&
+           [[receiver presentedViewController] isKindOfClass:[B32Compat_MPMoviePlayerViewController class]];
+}
+NSMapTable<UIViewController *, UIView *> *presenterSuperviews;  // where each presenter's view was
+}  // namespace
+B32_OVERRIDE_WHEN(isViewController, "presentMoviePlayerViewControllerAnimated:") {
+    UIViewController *presenter = o.receiver;
+    UIViewController *player = o.bridge.toHost(o.args.ptr());
+    if (!presenterSuperviews) presenterSuperviews = [[NSMapTable weakToWeakObjectsMapTable] retain];
+    if (presenter.isViewLoaded && presenter.view.superview)
+        [presenterSuperviews setObject:presenter.view.superview forKey:presenter];
+    [presenter presentViewController:player animated:NO completion:nil];
+}
+B32_OVERRIDE_WHEN(presentsCompatMoviePlayer, "dismissMoviePlayerViewControllerAnimated") {
+    UIViewController *presenter = o.receiver;
+    [presenter dismissViewControllerAnimated:NO completion:^{
+        UIView *superview = [presenterSuperviews objectForKey:presenter];
+        [presenterSuperviews removeObjectForKey:presenter];
+        if (!superview || presenter.view.superview) return;
+        [presenter beginAppearanceTransition:YES animated:NO];
+        presenter.view.frame = superview.bounds;
+        [superview addSubview:presenter.view];
+        [presenter endAppearanceTransition];
+    }];
+}
 
 // MPMusicPlayerController: games ask the iPod player whether the player's own
 // music is on, to keep it playing instead of theirs. On the Mac that reaches
