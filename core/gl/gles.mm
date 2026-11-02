@@ -107,6 +107,9 @@ constexpr CFunction kFunctions[] = {
     // blending and discard extensions
     {"glBlendEquationOES", "v:u"}, {"glBlendEquationSeparateOES", "v:uu"}, {"glBlendFuncSeparateOES", "v:uuuu"},
     {"glDiscardFramebufferEXT", "v:uip"},
+    // EXT_texture_storage (Unity allocates its textures with it when listed)
+    {"glTexStorage2DEXT", "v:uiuii"}, {"glTexStorage3DEXT", "v:uiuiii"},
+    {"glTexStorage2D", "v:uiuii"}, {"glTexStorage3D", "v:uiuiii"},
 
     // OpenGL ES 2.0 (beyond what ES 1.1 shares)
     {"glAttachShader", "v:uu"}, {"glBindAttribLocation", "v:uup"}, {"glBlendColor", "v:ffff"},
@@ -200,6 +203,43 @@ B32_THUNK(_glUnmapBufferOES) {
     }
     c.ret(unmap(target));
 }
+
+// --- EXT_map_buffer_range ------------------------------------------------------------------
+// The same shadow scheme over the mapped range. The shadow starts as a copy
+// of the range, so bytes the guest doesn't write keep their contents when
+// it's written back; explicit flushes copy just the flushed part.
+
+namespace {
+void mapRange(Call &c, const char *name) {
+    uint32_t target = c.args.u32();
+    int32_t offset = c.args.i32(), length = c.args.i32();
+    uint32_t access = c.args.u32();
+    using Map = void *(*)(uint32_t, intptr_t, intptr_t, uint32_t);
+    void *host = reinterpret_cast<Map>(dlsym(library(), name))(target, offset, length, access);
+    if (!host || length <= 0) {
+        c.ret(0);
+        return;
+    }
+    GuestAddr shadow = c.heap.alloc(uint32_t(length));
+    c.mem.copyIn(shadow, host, uint32_t(length));
+    mappings[target] = {host, shadow, uint32_t(length)};
+    c.ret(shadow);
+}
+void flushRange(Call &c, const char *name) {
+    uint32_t target = c.args.u32();
+    int32_t offset = c.args.i32(), length = c.args.i32();
+    auto it = mappings.find(target);
+    if (it != mappings.end() && offset >= 0 && length > 0 && uint32_t(offset) + uint32_t(length) <= it->second.size)
+        std::memcpy(static_cast<char *>(it->second.host) + offset, c.mem.ptr<char>(it->second.shadow + offset), length);
+    using Flush = void (*)(uint32_t, intptr_t, intptr_t);
+    reinterpret_cast<Flush>(dlsym(library(), name))(target, offset, length);
+}
+}  // namespace
+
+// void *glMapBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access)
+B32_THUNK(_glMapBufferRangeEXT) { mapRange(c, "glMapBufferRangeEXT"); }
+// void glFlushMappedBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length)
+B32_THUNK(_glFlushMappedBufferRangeEXT) { flushRange(c, "glFlushMappedBufferRangeEXT"); }
 
 // EAGL string constants (OpenGL ES is loaded before the guest is bound).
 B32_OBJC_CONSTANT(kEAGLDrawablePropertyRetainedBacking)
