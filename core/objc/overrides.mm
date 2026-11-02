@@ -541,3 +541,71 @@ B32_OVERRIDE_WHEN(isRawMapTable, "removeObjectForKey:") {
     const void *key = hostKeyOrValue(o, Side{sides->key.raw, 0}, o.args.ptr());
     [static_cast<NSMapTable *>(o.receiver) removeObjectForKey:(id)key];
 }
+
+// --- NSPointerArray holding objects -------------------------------------------------------------
+// Its pointers are void *, which the bridge passes through as plain guest
+// values, but an array made for objects (weak or strong) needs host objects:
+// a weak one hands the guest address to the host's weak references, which
+// crashes (AIDA64). Arrays made for objects are marked, and their pointers
+// converted both ways; opaque ones are left as they are.
+
+namespace {
+
+char kObjectArrayKey;
+
+bool isPointerArray(id receiver) {
+    return [receiver isKindOfClass:objc_getClass("NSPointerArray")] || receiver == (id)objc_getClass("NSPointerArray");
+}
+bool isObjectArray(id receiver) {
+    return isPointerArray(receiver) && objc_getAssociatedObject(receiver, &kObjectArrayKey);
+}
+
+void returnPointerArray(OverrideCall &o, NSPointerArray *array, bool objects) {
+    if (array && objects) objc_setAssociatedObject(array, &kObjectArrayKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    returnObject(o, array);
+}
+
+}  // namespace
+
+B32_OVERRIDE_WHEN(isPointerArray, "weakObjectsPointerArray") { returnPointerArray(o, [NSPointerArray weakObjectsPointerArray], true); }
+B32_OVERRIDE_WHEN(isPointerArray, "strongObjectsPointerArray") {
+    returnPointerArray(o, [NSPointerArray strongObjectsPointerArray], true);
+}
+// + (NSPointerArray *)pointerArrayWithOptions:(NSPointerFunctionsOptions)options
+// - (instancetype)initWithOptions:(NSPointerFunctionsOptions)options
+B32_OVERRIDE_WHEN(isPointerArray, "pointerArrayWithOptions:") {
+    NSUInteger options = o.args.u32();
+    returnPointerArray(o, [NSPointerArray pointerArrayWithOptions:options], holdsObjects(options));
+}
+B32_OVERRIDE_WHEN(isPointerArray, "initWithOptions:") {
+    NSUInteger options = o.args.u32();
+    returnPointerArray(o, [static_cast<NSPointerArray *>(o.receiver) initWithOptions:options], holdsObjects(options));
+}
+// + (NSPointerArray *)pointerArrayWithPointerFunctions:(NSPointerFunctions *)functions
+// - (instancetype)initWithPointerFunctions:(NSPointerFunctions *)functions
+B32_OVERRIDE_WHEN(isPointerArray, "pointerArrayWithPointerFunctions:") {
+    NSPointerFunctions *functions = o.bridge.toHost(o.args.ptr());
+    Side side = sideFor(functions);
+    returnPointerArray(o, [NSPointerArray pointerArrayWithPointerFunctions:hostFunctions(functions, side)], !side.raw);
+}
+B32_OVERRIDE_WHEN(isPointerArray, "initWithPointerFunctions:") {
+    NSPointerFunctions *functions = o.bridge.toHost(o.args.ptr());
+    Side side = sideFor(functions);
+    returnPointerArray(o, [static_cast<NSPointerArray *>(o.receiver) initWithPointerFunctions:hostFunctions(functions, side)],
+                       !side.raw);
+}
+
+B32_OVERRIDE_WHEN(isObjectArray, "addPointer:") {
+    [static_cast<NSPointerArray *>(o.receiver) addPointer:o.bridge.toHost(o.args.ptr())];
+}
+B32_OVERRIDE_WHEN(isObjectArray, "insertPointer:atIndex:") {
+    id object = o.bridge.toHost(o.args.ptr());
+    [static_cast<NSPointerArray *>(o.receiver) insertPointer:object atIndex:o.args.u32()];
+}
+B32_OVERRIDE_WHEN(isObjectArray, "replacePointerAtIndex:withPointer:") {
+    NSUInteger index = o.args.u32();
+    [static_cast<NSPointerArray *>(o.receiver) replacePointerAtIndex:index withPointer:o.bridge.toHost(o.args.ptr())];
+}
+B32_OVERRIDE_WHEN(isObjectArray, "pointerAtIndex:") {
+    o.c.ret(o.bridge.toGuest((id)[static_cast<NSPointerArray *>(o.receiver) pointerAtIndex:o.args.u32()]));
+}
