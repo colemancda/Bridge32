@@ -37,8 +37,11 @@ UIWindowScene *guestScene = nil;
 CGFloat deviceRotation() {
     static CGFloat rotation = [] {
         NSBundle *bundle = [NSBundle mainBundle];
-        NSString *orientation = [bundle objectForInfoDictionaryKey:@"B32Orientation"]
-                                    ?: [bundle objectForInfoDictionaryKey:@"UIInterfaceOrientation"];
+        id orientation = [bundle objectForInfoDictionaryKey:@"B32Orientation"]
+                             ?: [bundle objectForInfoDictionaryKey:@"UIInterfaceOrientation"];
+        // Some apps list orientations here, like UISupportedInterfaceOrientations.
+        if ([orientation isKindOfClass:[NSArray class]]) orientation = [orientation firstObject];
+        if (![orientation isKindOfClass:[NSString class]]) return CGFloat(0);
         if ([orientation hasSuffix:@"LandscapeRight"]) return CGFloat(-M_PI_2);
         if ([orientation hasSuffix:@"LandscapeLeft"]) return CGFloat(M_PI_2);
         return CGFloat(0);
