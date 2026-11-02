@@ -193,6 +193,13 @@ B32_THUNK(_CGContextAddArcToPoint) {
     CGFloat x1 = cgf(c), y1 = cgf(c), x2 = cgf(c), y2 = cgf(c);
     CGContextAddArcToPoint(ctx, x1, y1, x2, y2, cgf(c));
 }
+// void CGContextAddArc(CGContextRef, CGFloat x, CGFloat y, CGFloat radius, CGFloat startAngle,
+//                      CGFloat endAngle, int clockwise)
+B32_THUNK(_CGContextAddArc) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat x = cgf(c), y = cgf(c), radius = cgf(c), start = cgf(c), end = cgf(c);
+    CGContextAddArc(ctx, x, y, radius, start, end, c.args.i32());
+}
 B32_THUNK(_CGContextDrawImage) {
     auto ctx = ref<CGContextRef>(c);
     CGRect r = rect(c);
@@ -324,7 +331,7 @@ constexpr CFunction kCoreGraphics[] = {
     {"CGContextSetFillColorWithColor", "v:oo"}, {"CGContextSetStrokeColorWithColor", "v:oo"},
     {"CGContextSetInterpolationQuality", "v:oi"}, {"CGContextSetLineJoin", "v:oi"}, {"CGContextSetLineCap", "v:oi"},
     {"CGContextSetTextDrawingMode", "v:oi"}, {"CGContextAddPath", "v:oo"}, {"CGContextSetShouldAntialias", "v:ou"},
-    {"CGContextSetAllowsFontSubpixelPositioning", "v:ou"},
+    {"CGContextSetAllowsFontSubpixelPositioning", "v:ou"}, {"CGContextSetShouldSubpixelQuantizeFonts", "v:ou"},
     {"CGContextSetAllowsAntialiasing", "v:ou"}, {"CGContextDrawPath", "v:oi"}, {"CGContextEOFillPath", "v:o"},
     {"CGContextRelease", "v:o"}, {"CGContextRetain", "o:o"}, {"CGContextFlush", "v:o"},
     {"CGBitmapContextCreateImage", "o:o"}, {"CGBitmapContextGetWidth", "z:o"},
@@ -703,6 +710,12 @@ B32_THUNK(_CGContextShowGlyphs) {
 B32_THUNK(_CGContextBeginTransparencyLayer) {
     auto ctx = ref<CGContextRef>(c);
     CGContextBeginTransparencyLayer(ctx, ref<CFDictionaryRef>(c));
+}
+// void CGContextBeginTransparencyLayerWithRect(CGContextRef, CGRect, CFDictionaryRef auxiliaryInfo)
+B32_THUNK(_CGContextBeginTransparencyLayerWithRect) {
+    auto ctx = ref<CGContextRef>(c);
+    CGRect r = rect(c);
+    CGContextBeginTransparencyLayerWithRect(ctx, r, ref<CFDictionaryRef>(c));
 }
 B32_THUNK(_CGContextEndTransparencyLayer) { CGContextEndTransparencyLayer(ref<CGContextRef>(c)); }
 // void CGContextClipToMask(CGContextRef, CGRect, CGImageRef mask)
