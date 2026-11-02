@@ -191,18 +191,23 @@ B32_THUNK(_glMapBufferOES) {
     c.ret(shadow);
 }
 
-// GLboolean glUnmapBufferOES(GLenum target)
-B32_THUNK(_glUnmapBufferOES) {
+namespace {
+void unmapBuffer(Call &c, const char *name) {
     uint32_t target = c.args.u32();
-    static auto unmap = glFunction<uint8_t (*)(uint32_t)>("glUnmapBufferOES");
     auto it = mappings.find(target);
     if (it != mappings.end()) {
         std::memcpy(it->second.host, c.mem.ptr<void>(it->second.shadow), it->second.size);
         c.heap.free(it->second.shadow);
         mappings.erase(it);
     }
-    c.ret(unmap(target));
+    c.ret(reinterpret_cast<uint8_t (*)(uint32_t)>(dlsym(library(), name))(target));
 }
+}  // namespace
+
+// GLboolean glUnmapBufferOES(GLenum target)
+B32_THUNK(_glUnmapBufferOES) { unmapBuffer(c, "glUnmapBufferOES"); }
+// GLboolean glUnmapBuffer(GLenum target), ES3
+B32_THUNK(_glUnmapBuffer) { unmapBuffer(c, "glUnmapBuffer"); }
 
 // --- EXT_map_buffer_range ------------------------------------------------------------------
 // The same shadow scheme over the mapped range. The shadow starts as a copy
@@ -240,6 +245,9 @@ void flushRange(Call &c, const char *name) {
 B32_THUNK(_glMapBufferRangeEXT) { mapRange(c, "glMapBufferRangeEXT"); }
 // void glFlushMappedBufferRangeEXT(GLenum target, GLintptr offset, GLsizeiptr length)
 B32_THUNK(_glFlushMappedBufferRangeEXT) { flushRange(c, "glFlushMappedBufferRangeEXT"); }
+// The ES3 versions, unmapped with glUnmapBuffer.
+B32_THUNK(_glMapBufferRange) { mapRange(c, "glMapBufferRange"); }
+B32_THUNK(_glFlushMappedBufferRange) { flushRange(c, "glFlushMappedBufferRange"); }
 
 // EAGL string constants (OpenGL ES is loaded before the guest is bound).
 B32_OBJC_CONSTANT(kEAGLDrawablePropertyRetainedBacking)
