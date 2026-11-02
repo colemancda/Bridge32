@@ -414,7 +414,19 @@ struct Trampoline {
     HostCall *call;
     std::string guestTypes;
     bool fastEnumeration = false;  // -countByEnumeratingWithState:objects:count:
+    IMP hostOriginal = nullptr;    // what host callers get instead (see hostCallersKeepHostMethod)
 };
+
+// Key-value coding: a guest category that replaces it on a Foundation class
+// does so for the guest's own calls, which reach it directly. Host code calls
+// these too, with the usual arguments, and keeps Foundation's methods: a
+// HeyZap category's -[NSUserDefaults valueForKeyPath:] takes an array of
+// keys, and Foundation now sends it key path strings (SuShi).
+bool hostCallersKeepHostMethod(const char *sel) {
+    for (const char *name : {"valueForKey:", "valueForKeyPath:", "setValue:forKey:", "setValue:forKeyPath:"})
+        if (std::strcmp(sel, name) == 0) return true;
+    return false;
+}
 
 std::mutex trampolinesLock;
 std::unordered_map<void *, Trampoline *> trampolines;  // closure code -> its trampoline
@@ -505,8 +517,12 @@ NSUInteger fastEnumerate(Bridge &bridge, Trampoline *t, void **args) {
     return n;
 }
 
-void trampolineEntry(ffi_cif *, void *ret, void **args, void *user) {
+void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
     auto *t = static_cast<Trampoline *>(user);
+    if (t->hostOriginal) {
+        ffi_call(cif, FFI_FN(t->hostOriginal), ret, args);
+        return;
+    }
     if (t->fastEnumeration) {
         *static_cast<ffi_arg *>(ret) = fastEnumerate(*t->bridge, t, args);
         return;
@@ -609,8 +625,11 @@ void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &m
         std::lock_guard guard(trampolinesLock);
         trampolines[code] = t;
     }
-    if (!owner->isGuest && class_getInstanceMethod(target, hsel))
+    if (!owner->isGuest && class_getInstanceMethod(target, hsel)) {
         log("guest category replaces host method %c[%s %s]", owner->isMeta ? '+' : '-', owner->name.c_str(), sel_getName(hsel));
+        if (hostCallersKeepHostMethod(sel_getName(hsel)))
+            t->hostOriginal = method_getImplementation(class_getInstanceMethod(target, hsel));
+    }
     class_replaceMethod(target, hsel, reinterpret_cast<IMP>(code), types.c_str());
 }
 
