@@ -286,6 +286,16 @@ B32_THUNK(_memset_pattern16) {
     GuestAddr pattern = c.args.ptr();
     memset_pattern16(c.mem.ptr<void>(dst), c.mem.ptr<void>(pattern), c.args.u32());
 }
+B32_THUNK(_memset_pattern4) {
+    GuestAddr dst = c.args.ptr();
+    GuestAddr pattern = c.args.ptr();
+    memset_pattern4(c.mem.ptr<void>(dst), c.mem.ptr<void>(pattern), c.args.u32());
+}
+B32_THUNK(_memset_pattern8) {
+    GuestAddr dst = c.args.ptr();
+    GuestAddr pattern = c.args.ptr();
+    memset_pattern8(c.mem.ptr<void>(dst), c.mem.ptr<void>(pattern), c.args.u32());
+}
 B32_THUNK(_memchr) {
     GuestAddr s = c.args.ptr();
     int ch = c.args.i32();
@@ -355,6 +365,12 @@ B32_MATH2(hypot) B32_MATH2(fmax) B32_MATH2(fmin) B32_MATH2(copysign)
 
 B32_THUNK(_lroundf) { c.ret(uint32_t(int32_t(std::lround(c.args.f32())))); }
 B32_THUNK(_lround) { c.ret(uint32_t(int32_t(std::lround(c.args.f64())))); }
+B32_THUNK(_llround) { c.ret64(uint64_t(std::llround(c.args.f64()))); }
+B32_THUNK(_ilogb) { c.ret(uint32_t(std::ilogb(c.args.f64()))); }
+B32_THUNK(_remainder) {
+    double x = c.args.f64();
+    c.retF64(std::remainder(x, c.args.f64()));
+}
 
 // struct tm *localtime_r(const time_t *, struct tm *) and gmtime_r: time_t is
 // 32-bit, and the guest's struct tm is nine ints, then long tm_gmtoff and

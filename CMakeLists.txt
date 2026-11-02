@@ -38,6 +38,7 @@ add_library(b32core OBJECT
     core/thunks/cxxabi.cpp
     core/thunks/corefoundation.mm
     core/thunks/coregraphics.mm
+    core/thunks/coretext.mm
     core/thunks/darwin.cpp core/thunks/dispatch.mm core/thunks/libc.cpp core/thunks/libcxx.cpp core/thunks/locale.cpp core/thunks/network.cpp core/thunks/security.mm core/thunks/zlib.cpp
     core/thunks/libstdcxx.cpp
     core/thunks/libsystem.cpp
@@ -55,7 +56,7 @@ target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # The bridge manages host object lifetimes by hand.
 target_compile_options(b32core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fno-objc-arc>)
-target_link_libraries(b32core PUBLIC "-framework Foundation" "-framework CoreGraphics" "-framework CFNetwork" "-framework Accelerate"
+target_link_libraries(b32core PUBLIC "-framework Foundation" "-framework CoreGraphics" "-framework CFNetwork" "-framework Accelerate" "-framework CoreText"
     "-framework SystemConfiguration" sqlite3 z ffi)
 
 if(B32_HAVE_DYNARMIC)

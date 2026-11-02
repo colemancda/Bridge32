@@ -10,7 +10,9 @@
 
 #import <CoreData/CoreData.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreLocation/CoreLocation.h>
 #import <Foundation/Foundation.h>
+#include <simd/simd.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 
@@ -131,6 +133,11 @@ B32_THUNK(_NSVersionOfLinkTimeLibrary) { c.ret(uint32_t(-1)); }
 B32_THUNK(_CACurrentMediaTime) { c.retF64(CACurrentMediaTime()); }
 
 B32_THUNK(_UIRectFill) { UIRectFill(guestRect(c)); }
+B32_THUNK(_UIRectFillUsingBlendMode) {
+    CGRect r = guestRect(c);
+    UIRectFillUsingBlendMode(r, CGBlendMode(c.args.i32()));
+}
+B32_THUNK(_UIRectFrame) { UIRectFrame(guestRect(c)); }
 B32_THUNK(_UIGraphicsPushContext) { UIGraphicsPushContext((CGContextRef)bridge(c).toHost(c.args.ptr())); }
 B32_THUNK(_UIGraphicsPopContext) { UIGraphicsPopContext(); }
 
@@ -198,6 +205,37 @@ B32_DATA(_NSMergeByPropertyStoreTrumpMergePolicy, 4) {
 // GLKMatrix4Identity: sixteen floats in both ABIs.
 B32_DATA(_GLKMatrix4Identity, 64) {
     for (uint32_t i = 0; i < 4; i++) rt.mem().write<float>(addr + i * 20, 1.0f);
+}
+B32_DATA(_GLKMatrix3Identity, 36) {
+    for (uint32_t i = 0; i < 3; i++) rt.mem().write<float>(addr + i * 16, 1.0f);
+}
+
+// GLKMatrix4 GLKMatrix4Invert(GLKMatrix4, bool *isInvertible) and the 3x3 one:
+// column-major floats by value in argument words, the result through r0. A
+// matrix that can't be inverted gives the identity, as GLKit's does.
+B32_THUNK(_GLKMatrix4Invert) {
+    GuestAddr out = c.args.ptr();
+    simd_float4x4 m;
+    float *f = reinterpret_cast<float *>(&m);
+    for (int i = 0; i < 16; i++) f[i] = c.args.f32();
+    GuestAddr invertibleOut = c.args.ptr();
+    bool invertible = simd_determinant(m) != 0;
+    simd_float4x4 result = invertible ? simd_inverse(m) : matrix_identity_float4x4;
+    if (invertibleOut) c.mem.write<uint8_t>(invertibleOut, invertible);
+    c.mem.copyIn(out, &result, 64);
+}
+B32_THUNK(_GLKMatrix3Invert) {
+    GuestAddr out = c.args.ptr();
+    float in[9];
+    for (float &v : in) v = c.args.f32();
+    GuestAddr invertibleOut = c.args.ptr();
+    simd_float3x3 m = simd_matrix(simd_make_float3(in[0], in[1], in[2]), simd_make_float3(in[3], in[4], in[5]),
+                                  simd_make_float3(in[6], in[7], in[8]));
+    bool invertible = simd_determinant(m) != 0;
+    simd_float3x3 result = invertible ? simd_inverse(m) : matrix_identity_float3x3;
+    if (invertibleOut) c.mem.write<uint8_t>(invertibleOut, invertible);
+    for (int col = 0; col < 3; col++)
+        for (int row = 0; row < 3; row++) c.mem.write<float>(out + uint32_t(col * 3 + row) * 4, result.columns[col][row]);
 }
 
 // CATransform3D CATransform3DMakeScale(CGFloat sx, CGFloat sy, CGFloat sz): through r0.
@@ -272,6 +310,28 @@ B32_THUNK(_CATransform3DInvert) {
     returnTransform(c, out, CATransform3DInvert(transformArg(c)));
 }
 B32_THUNK(_CATransform3DIsIdentity) { c.ret(CATransform3DIsIdentity(transformArg(c))); }
+B32_THUNK(_CATransform3DEqualToTransform) {
+    CATransform3D a = transformArg(c);
+    c.ret(CATransform3DEqualToTransform(a, transformArg(c)));
+}
+
+// CLLocationCoordinate2D { double latitude, longitude }: the same 16 bytes on
+// both sides, by value in four words and returned through r0.
+B32_THUNK(_CLLocationCoordinate2DMake) {
+    GuestAddr out = c.args.ptr();
+    double latitude = c.args.f64();
+    CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(latitude, c.args.f64());
+    c.mem.copyIn(out, &coordinate, sizeof coordinate);
+}
+B32_THUNK(_CLLocationCoordinate2DIsValid) {
+    double latitude = c.args.f64();
+    c.ret(CLLocationCoordinate2DIsValid(CLLocationCoordinate2DMake(latitude, c.args.f64())));
+}
+// NSString *NSStringFromRange(NSRange): two words.
+B32_THUNK(_NSStringFromRange) {
+    NSUInteger location = c.args.u32();
+    c.ret(bridge(c).toGuest(NSStringFromRange(NSMakeRange(location, c.args.u32()))));
+}
 
 // --- CMTime: { int64 value; int32 timescale; uint32 flags; int64 epoch }, 24 bytes, same
 // layout in both ABIs; passed in six words and returned through r0 ---------------------------------

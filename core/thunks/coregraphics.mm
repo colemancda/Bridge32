@@ -346,6 +346,16 @@ constexpr CFunction kCoreGraphics[] = {
     {"CGFontGetCapHeight", "i:o"}, {"CGFontGetXHeight", "i:o"}, {"CGFontGetNumberOfGlyphs", "z:o"},
     {"CGFontCopyTableForTag", "o:ou"}, {"CGFontCreateWithFontName", "o:o"},
     {"CGFontGetGlyphWithGlyphName", "u:oo"}, {"CGFontCopyFullName", "o:o"},
+    {"CGColorSpaceGetBaseColorSpace", "o:o"}, {"CGContextSetShouldSubpixelPositionFonts", "v:ou"},
+    {"CGImageSourceCreateWithDataProvider", "o:oo"}, {"CGImageSourceCreateImageAtIndex", "o:ozo"},
+    {"CFAttributedStringCreate", "o:ooo"}, {"CFAttributedStringCreateWithSubstring", "o:oozz"},
+    {"CFPropertyListCreateDeepCopy", "o:ooz"}, {"CFWriteStreamCopyProperty", "o:oo"},
+    {"CFStringTokenizerCreate", "o:oozzzo"}, {"CFStringTokenizerAdvanceToNextToken", "z:o"},
+    {"CFStringTokenizerCopyBestStringLanguage", "o:ozz"}, {"CFReadStreamCreateWithFile", "o:oo"},
+    {"CFWriteStreamCreateWithFile", "o:oo"}, {"CFDataAppendBytes", "v:opz"},
+    {"CFCharacterSetCreateMutable", "o:o"}, {"CFCharacterSetAddCharactersInRange", "v:ozz"},
+    {"CFCharacterSetInvert", "v:o"}, {"CFRunLoopCopyAllModes", "o:o"}, {"CFSetAddValue", "v:oo"},
+    {"CFSetContainsValue", "B:oo"}, {"CGContextReplacePathWithStrokedPath", "v:o"},
 };
 }  // namespace
 
@@ -766,4 +776,252 @@ B32_THUNK(_vImageBoxConvolve_ARGB8888) {
                                                      kernelHeight, kernelWidth,
                                                      background ? c.mem.ptr<uint8_t>(background) : nullptr, flags);
     c.ret(uint32_t(int32_t(result)));
+}
+
+// --- more colors, rects, paths and images ----------------------------------------------------
+
+B32_THUNK(_CGColorGetAlpha) { c.retF32(float(CGColorGetAlpha(ref<CGColorRef>(c)))); }
+B32_THUNK(_CGRectIsInfinite) { c.ret(CGRectIsInfinite(rect(c))); }
+
+// CGPathRef CGPathCreateWithRect(CGRect, const CGAffineTransform *)
+B32_THUNK(_CGPathCreateWithRect) {
+    CGRect r = rect(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    c.ret(c.rt.bridge().toGuest((id)CGPathCreateWithRect(r, has ? &t : nullptr)));
+}
+// void CGPathAddRoundedRect(CGMutablePathRef, const CGAffineTransform *, CGRect,
+//     CGFloat cornerWidth, CGFloat cornerHeight)
+B32_THUNK(_CGPathAddRoundedRect) {
+    auto path = ref<CGMutablePathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    CGRect r = rect(c);
+    CGFloat w = cgf(c);
+    CGPathAddRoundedRect(path, has ? &t : nullptr, r, w, cgf(c));
+}
+// void CGPathAddArcToPoint(CGMutablePathRef, const CGAffineTransform *, CGFloat x1, CGFloat y1,
+//     CGFloat x2, CGFloat y2, CGFloat radius)
+B32_THUNK(_CGPathAddArcToPoint) {
+    auto path = ref<CGMutablePathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    CGFloat x1 = cgf(c), y1 = cgf(c), x2 = cgf(c), y2 = cgf(c);
+    CGPathAddArcToPoint(path, has ? &t : nullptr, x1, y1, x2, y2, cgf(c));
+}
+
+// CGContextRef CGBitmapContextCreateWithData(void *data, size_t width, size_t height,
+//     size_t bitsPerComponent, size_t bytesPerRow, CGColorSpaceRef, uint32_t bitmapInfo,
+//     CGBitmapContextReleaseDataCallback, void *releaseInfo): like CGBitmapContextCreate.
+// The release callback is guest code, run when the context goes.
+namespace {
+struct ReleaseData {
+    GuestAddr callback, info;
+};
+void releaseBitmapData(void *p, void *data) {
+    auto *r = static_cast<ReleaseData *>(p);
+    Runtime &rt = objc::Bridge::shared()->runtime();
+    if (r->callback) Runtime::threadCpu().call(r->callback, {r->info, rt.mem().guestAddrOf(data)});
+    delete r;
+}
+}  // namespace
+B32_THUNK(_CGBitmapContextCreateWithData) {
+    GuestAddr data = c.args.ptr();
+    size_t width = c.args.u32(), height = c.args.u32(), bpc = c.args.u32(), bytesPerRow = c.args.u32();
+    auto space = ref<CGColorSpaceRef>(c);
+    uint32_t info = c.args.u32();
+    GuestAddr callback = c.args.ptr(), releaseInfo = c.args.ptr();
+    if (!bytesPerRow) {
+        size_t components = space ? CGColorSpaceGetNumberOfComponents(space) + ((info & kCGBitmapAlphaInfoMask) ? 1 : 0) : 1;
+        bytesPerRow = (width * components * bpc / 8 + 15) & ~size_t(15);
+    }
+    // Without a buffer of its own the context would draw into host memory the guest can't see.
+    bool ours = !data;
+    if (ours) data = c.heap.calloc(1, uint32_t(bytesPerRow * height));
+    CGContextRef ctx = CGBitmapContextCreateWithData(c.mem.ptr<void>(data), width, height, bpc, bytesPerRow, space, info,
+                                                     callback && !ours ? releaseBitmapData : nullptr,
+                                                     callback && !ours ? new ReleaseData{callback, releaseInfo} : nullptr);
+    c.ret(c.rt.bridge().toGuest((id)ctx));
+}
+
+// CGImageRef CGImageCreate(size_t width, size_t height, size_t bitsPerComponent, size_t bitsPerPixel,
+//     size_t bytesPerRow, CGColorSpaceRef, CGBitmapInfo, CGDataProviderRef, const CGFloat *decode,
+//     bool shouldInterpolate, CGColorRenderingIntent)
+B32_THUNK(_CGImageCreate) {
+    size_t width = c.args.u32(), height = c.args.u32(), bpc = c.args.u32(), bpp = c.args.u32(), bpr = c.args.u32();
+    auto space = ref<CGColorSpaceRef>(c);
+    CGBitmapInfo info = c.args.u32();
+    auto provider = ref<CGDataProviderRef>(c);
+    GuestAddr decodeIn = c.args.ptr();
+    bool interpolate = c.args.u32() & 0xff;
+    auto intent = CGColorRenderingIntent(c.args.i32());
+    std::vector<CGFloat> decode;
+    if (decodeIn) {
+        size_t n = 2 * (space ? CGColorSpaceGetNumberOfComponents(space) : 1);
+        for (size_t i = 0; i < n; i++) decode.push_back(c.mem.read<float>(decodeIn + uint32_t(i) * 4));
+    }
+    c.ret(c.rt.bridge().toGuest((id)CGImageCreate(width, height, bpc, bpp, bpr, space, info, provider,
+                                                  decodeIn ? decode.data() : nullptr, interpolate, intent)));
+}
+
+// CGAffineTransform CATransform3DGetAffineTransform(CATransform3D): sixteen floats in, six out through r0.
+B32_THUNK(_CATransform3DGetAffineTransform) {
+    GuestAddr out = c.args.ptr();
+    float m[16];
+    for (float &v : m) v = c.args.f32();
+    // m11 m12 . . / m21 m22 . . / . . . . / m41 m42 . .
+    writeTransform(c, out, CGAffineTransformMake(m[0], m[1], m[4], m[5], m[12], m[13]));
+}
+
+// --- Core Foundation odds and ends ---------------------------------------------------------------
+
+// void *CFAllocatorAllocate(CFAllocatorRef, CFIndex size, CFOptionFlags): guest heap memory
+// (CFAllocatorDeallocate frees it the same way).
+B32_THUNK(_CFAllocatorAllocate) {
+    c.args.u32();
+    c.ret(c.heap.alloc(std::max<uint32_t>(c.args.u32(), 1)));
+}
+B32_THUNK(_CFAllocatorDeallocate) {
+    c.args.u32();
+    if (GuestAddr p = c.args.ptr()) c.heap.free(p);
+}
+// CFTypeRef CFMakeCollectable(CFTypeRef): no garbage collection, so the object itself.
+B32_THUNK(_CFMakeCollectable) { c.ret(c.args.ptr()); }
+// CFMutableSetRef CFSetCreateMutable(CFAllocatorRef, CFIndex capacity, const CFSetCallBacks *):
+// the guest's callbacks are its copy of kCFTypeSetCallBacks (or NULL for raw pointers, unsupported).
+B32_THUNK(_CFSetCreateMutable) {
+    c.args.u32();
+    CFIndex capacity = c.args.i32();
+    if (!c.args.ptr()) log("CFSetCreateMutable without callbacks: using CFType callbacks anyway");
+    c.ret(c.rt.bridge().toGuest((id)CFSetCreateMutable(nullptr, capacity, &kCFTypeSetCallBacks)));
+}
+// void CFStreamCreatePairWithSocketToHost(CFAllocatorRef, CFStringRef host, UInt32 port,
+//     CFReadStreamRef *, CFWriteStreamRef *)
+B32_THUNK(_CFStreamCreatePairWithSocketToHost) {
+    c.args.u32();
+    auto host = ref<CFStringRef>(c);
+    UInt32 port = c.args.u32();
+    GuestAddr readOut = c.args.ptr(), writeOut = c.args.ptr();
+    CFReadStreamRef read = nullptr;
+    CFWriteStreamRef write = nullptr;
+    CFStreamCreatePairWithSocketToHost(nullptr, host, port, readOut ? &read : nullptr, writeOut ? &write : nullptr);
+    if (readOut) c.mem.write<uint32_t>(readOut, read ? c.rt.bridge().toGuest((id)read) : 0);
+    if (writeOut) c.mem.write<uint32_t>(writeOut, write ? c.rt.bridge().toGuest((id)write) : 0);
+}
+
+// --- more context and path geometry --------------------------------------------------------
+
+namespace {
+void writeRectTo(Call &c, GuestAddr out, CGRect r) {
+    const float f[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
+    c.mem.copyIn(out, f, sizeof f);
+}
+}  // namespace
+
+// CGAffineTransform CGContextGetCTM(CGContextRef) and the bounding boxes: through r0.
+B32_THUNK(_CGContextGetCTM) {
+    GuestAddr out = c.args.ptr();
+    writeTransform(c, out, CGContextGetCTM(ref<CGContextRef>(c)));
+}
+B32_THUNK(_CGContextGetClipBoundingBox) {
+    GuestAddr out = c.args.ptr();
+    writeRectTo(c, out, CGContextGetClipBoundingBox(ref<CGContextRef>(c)));
+}
+B32_THUNK(_CGContextGetPathBoundingBox) {
+    GuestAddr out = c.args.ptr();
+    writeRectTo(c, out, CGContextGetPathBoundingBox(ref<CGContextRef>(c)));
+}
+B32_THUNK(_CGContextSetMiterLimit) {
+    auto ctx = ref<CGContextRef>(c);
+    CGContextSetMiterLimit(ctx, cgf(c));
+}
+// void CGContextSetLineDash(CGContextRef, CGFloat phase, const CGFloat lengths[], size_t count)
+B32_THUNK(_CGContextSetLineDash) {
+    auto ctx = ref<CGContextRef>(c);
+    CGFloat phase = cgf(c);
+    GuestAddr lengths = c.args.ptr();
+    size_t count = c.args.u32();
+    std::vector<CGFloat> values(count);
+    for (size_t i = 0; i < count; i++) values[i] = c.mem.read<float>(lengths + uint32_t(i) * 4);
+    CGContextSetLineDash(ctx, phase, lengths ? values.data() : nullptr, count);
+}
+// void CGPathAddArc(CGMutablePathRef, const CGAffineTransform *, CGFloat x, CGFloat y, CGFloat radius,
+//     CGFloat startAngle, CGFloat endAngle, bool clockwise)
+B32_THUNK(_CGPathAddArc) {
+    auto path = ref<CGMutablePathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    CGFloat x = cgf(c), y = cgf(c), radius = cgf(c), start = cgf(c), end = cgf(c);
+    CGPathAddArc(path, has ? &t : nullptr, x, y, radius, start, end, c.args.u32() & 0xff);
+}
+// void CGPathAddCurveToPoint(CGMutablePathRef, const CGAffineTransform *, cp1x, cp1y, cp2x, cp2y, x, y)
+B32_THUNK(_CGPathAddCurveToPoint) {
+    auto path = ref<CGMutablePathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    CGFloat a = cgf(c), b = cgf(c), d = cgf(c), e = cgf(c), x = cgf(c);
+    CGPathAddCurveToPoint(path, has ? &t : nullptr, a, b, d, e, x, cgf(c));
+}
+// void CGPathAddQuadCurveToPoint(CGMutablePathRef, const CGAffineTransform *, cpx, cpy, x, y)
+B32_THUNK(_CGPathAddQuadCurveToPoint) {
+    auto path = ref<CGMutablePathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    CGFloat a = cgf(c), b = cgf(c), x = cgf(c);
+    CGPathAddQuadCurveToPoint(path, has ? &t : nullptr, a, b, x, cgf(c));
+}
+// CGPoint CGPathGetCurrentPoint(CGPathRef): through r0.
+B32_THUNK(_CGPathGetCurrentPoint) {
+    GuestAddr out = c.args.ptr();
+    CGPoint at = CGPathGetCurrentPoint(ref<CGPathRef>(c));
+    c.mem.write<float>(out, float(at.x));
+    c.mem.write<float>(out + 4, float(at.y));
+}
+
+// --- more Core Foundation strings and property lists -------------------------------------------
+
+// CFStringRef CFStringCreateWithCharactersNoCopy(CFAllocatorRef, const UniChar *, CFIndex, CFAllocatorRef):
+// copied, since the guest's deallocator can't be honored.
+B32_THUNK(_CFStringCreateWithCharactersNoCopy) {
+    c.args.u32();
+    GuestAddr chars = c.args.ptr();
+    CFIndex length = c.args.i32();
+    c.ret(c.rt.bridge().toGuest((id)CFStringCreateWithCharacters(nullptr, c.mem.ptr<UniChar>(chars), length)));
+}
+// Boolean CFStringFindCharacterFromSet(CFStringRef, CFCharacterSetRef, CFRange, CFStringCompareFlags, CFRange *)
+B32_THUNK(_CFStringFindCharacterFromSet) {
+    auto string = ref<CFStringRef>(c);
+    auto set = ref<CFCharacterSetRef>(c);
+    CFIndex location = c.args.i32(), length = c.args.i32();
+    CFStringCompareFlags flags = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    CFRange found;
+    Boolean ok = CFStringFindCharacterFromSet(string, set, CFRangeMake(location, length), flags, &found);
+    if (ok && out) {
+        c.mem.write<int32_t>(out, int32_t(found.location));
+        c.mem.write<int32_t>(out + 4, int32_t(found.length));
+    }
+    c.ret(ok);
+}
+// CFRange CFStringGetRangeOfComposedCharactersAtIndex(CFStringRef, CFIndex): through r0.
+B32_THUNK(_CFStringGetRangeOfComposedCharactersAtIndex) {
+    GuestAddr out = c.args.ptr();
+    auto string = ref<CFStringRef>(c);
+    CFRange r = CFStringGetRangeOfComposedCharactersAtIndex(string, c.args.i32());
+    c.mem.write<int32_t>(out, int32_t(r.location));
+    c.mem.write<int32_t>(out + 4, int32_t(r.length));
+}
+// CFPropertyListRef CFPropertyListCreateWithData(CFAllocatorRef, CFDataRef, CFOptionFlags,
+//     CFPropertyListFormat *, CFErrorRef *): the format is a 32-bit CFIndex in the guest.
+B32_THUNK(_CFPropertyListCreateWithData) {
+    c.args.u32();
+    auto data = ref<CFDataRef>(c);
+    CFOptionFlags options = c.args.u32();
+    GuestAddr formatOut = c.args.ptr(), errorOut = c.args.ptr();
+    CFPropertyListFormat format = kCFPropertyListBinaryFormat_v1_0;
+    CFErrorRef error = nullptr;
+    CFPropertyListRef plist = CFPropertyListCreateWithData(nullptr, data, options, &format, errorOut ? &error : nullptr);
+    if (formatOut) c.mem.write<int32_t>(formatOut, int32_t(format));
+    if (errorOut) c.mem.write<uint32_t>(errorOut, error ? c.rt.bridge().toGuest((id)error) : 0);
+    c.ret(plist ? c.rt.bridge().toGuest((id)plist) : 0);
 }

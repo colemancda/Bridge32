@@ -22,6 +22,11 @@
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
 
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 using namespace b32;
 using namespace b32::objc;
 
@@ -328,11 +333,91 @@ B32_THUNK(_objc_copyClassNamesForImage) {
 // that asks about them again; they're accepted.
 B32_THUNK(_class_addProtocol) { c.ret(1); }
 B32_THUNK(_class_addProperty) { c.ret(1); }
-B32_THUNK(_class_getProperty) { c.ret(0); }
-B32_THUNK(_property_copyAttributeList) {
-    c.args.ptr();
-    if (GuestAddr outCount = c.args.ptr()) c.mem.write<uint32_t>(outCount, 0);
+// objc_property_t class_getProperty(Class, const char *name): a guest class's
+// property_t from its class_ro_t (or a superclass's); a host class's property
+// gets a guest property_t made once, with its name and attributes.
+B32_THUNK(_class_getProperty) {
+    ClassInfo *cls = classArg(c);
+    GuestAddr nameAddr = c.args.ptr();
+    if (!cls || !nameAddr) {
+        c.ret(0);
+        return;
+    }
+    std::string name = c.mem.cstr(nameAddr);
+    for (ClassInfo *k = cls; k; k = k->super) {
+        if (!k->isGuest) {
+            objc_property_t host = k->host ? class_getProperty(k->host, name.c_str()) : nullptr;
+            if (!host) break;
+            static std::mutex lock;
+            static std::unordered_map<objc_property_t, GuestAddr> made;
+            std::lock_guard guard(lock);
+            GuestAddr &p = made[host];
+            if (!p) {
+                p = c.heap.calloc(1, 8);
+                c.mem.write<uint32_t>(p, c.rt.internString(property_getName(host)));
+                c.mem.write<uint32_t>(p + 4, c.rt.internString(property_getAttributes(host) ?: ""));
+            }
+            c.ret(p);
+            return;
+        }
+        GuestAddr ro = c.mem.read<uint32_t>(k->addr + 16) & ~3u;
+        if (GuestAddr list = c.mem.read<uint32_t>(ro + 36)) {
+            uint32_t entsize = c.mem.read<uint32_t>(list) & ~3u, count = c.mem.read<uint32_t>(list + 4);
+            for (uint32_t i = 0; i < count; i++) {
+                GuestAddr property = list + 8 + i * entsize;
+                if (name == c.mem.cstr(c.mem.read<uint32_t>(property))) {
+                    c.ret(property);
+                    return;
+                }
+            }
+        }
+    }
+    log("class_getProperty(%s, %s): not found", cls->name.c_str(), name.c_str());
     c.ret(0);
+}
+namespace {
+// A property's attribute string split at its commas ("T@\"NSString\",&,N,V_name"
+// has T, &, N and V); commas inside a quoted type name ("T@\"<P1,P2>\"") don't count.
+std::vector<std::string> splitAttributes(const std::string &all) {
+    std::vector<std::string> parts;
+    for (size_t start = 0; start < all.size();) {
+        size_t end = start;
+        bool quoted = false;
+        for (; end < all.size() && (quoted || all[end] != ','); end++)
+            if (all[end] == '"') quoted = !quoted;
+        if (end > start) parts.push_back(all.substr(start, end - start));
+        start = end + 1;
+    }
+    return parts;
+}
+}  // namespace
+
+// objc_property_attribute_t *property_copyAttributeList(objc_property_t, unsigned *outCount):
+// one block the guest frees, holding the { name, value } pairs (two words each,
+// then a null pair) and their strings after them.
+B32_THUNK(_property_copyAttributeList) {
+    GuestAddr attributes = fieldOf(c, c.args.ptr(), 4);
+    GuestAddr outCount = c.args.ptr();
+    std::vector<std::string> parts = attributes ? splitAttributes(c.mem.cstr(attributes)) : std::vector<std::string>{};
+    if (outCount) c.mem.write<uint32_t>(outCount, uint32_t(parts.size()));
+    if (parts.empty()) {
+        c.ret(0);
+        return;
+    }
+    uint32_t size = uint32_t(parts.size() + 1) * 8;
+    for (const std::string &part : parts) size += uint32_t(part.size()) + 2;  // "N\0" and "value\0"
+    GuestAddr block = c.heap.calloc(1, size);
+    GuestAddr strings = block + uint32_t(parts.size() + 1) * 8;
+    for (size_t i = 0; i < parts.size(); i++) {
+        std::string name = parts[i].substr(0, 1), value = parts[i].substr(1);
+        c.mem.copyIn(strings, name.c_str(), 2);
+        c.mem.write<uint32_t>(block + uint32_t(i) * 8, strings);
+        strings += 2;
+        c.mem.copyIn(strings, value.c_str(), value.size() + 1);
+        c.mem.write<uint32_t>(block + uint32_t(i) * 8 + 4, strings);
+        strings += uint32_t(value.size()) + 1;
+    }
+    c.ret(block);
 }
 // property_t { const char *name, *attributes }
 B32_THUNK(_property_getName) { c.ret(fieldOf(c, c.args.ptr(), 0)); }
@@ -348,15 +433,8 @@ B32_THUNK(_property_copyAttributeValue) {
         c.ret(0);
         return;
     }
-    std::string all = c.mem.cstr(attributes), name = c.mem.cstr(nameAddr);
-    size_t start = 0;
-    while (start <= all.size()) {
-        // Commas inside a quoted type name ("T@\"<P1,P2>\"") don't end the attribute.
-        size_t end = start;
-        bool quoted = false;
-        for (; end < all.size() && (quoted || all[end] != ','); end++)
-            if (all[end] == '"') quoted = !quoted;
-        std::string attribute = all.substr(start, end - start);
+    std::string name = c.mem.cstr(nameAddr);
+    for (const std::string &attribute : splitAttributes(c.mem.cstr(attributes))) {
         if (attribute.compare(0, name.size(), name) == 0) {
             std::string value = attribute.substr(name.size());
             GuestAddr out = c.heap.alloc(uint32_t(value.size() + 1));
@@ -364,7 +442,6 @@ B32_THUNK(_property_copyAttributeValue) {
             c.ret(out);
             return;
         }
-        start = end + 1;
     }
     c.ret(0);
 }

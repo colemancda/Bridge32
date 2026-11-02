@@ -16,6 +16,7 @@
 
 #include <pthread.h>
 
+#include <atomic>
 #include <cstring>
 
 #import <Foundation/Foundation.h>
@@ -103,6 +104,11 @@ static void markCGFloats(Signature &sig, const char *selName) {
         size_t colon = name.find(':', start);
         std::string_view keyword = name.substr(start, colon == std::string_view::npos ? std::string_view::npos : colon - start);
         if (sig.args[i].code == 'd' && !namesDouble(keyword)) sig.args[i].cgfloat = true;
+        // CGFloat out-parameters (-getWhite:alpha:, -getRed:green:blue:alpha:):
+        // the guest's variable is a float, and a double written back would
+        // run over what's next to it.
+        Type *pointee = sig.args[i].code == '^' ? sig.args[i].pointee.get() : nullptr;
+        if (pointee && pointee->code == 'd' && !namesDouble(keyword)) pointee->cgfloat = true;
         if (colon == std::string_view::npos) break;
         start = colon + 1;
     }
@@ -113,8 +119,12 @@ static void markCGFloats(Signature &sig, const char *selName) {
 static void markCGFloatsFromGuest(Signature &sig, const std::string &guestTypes) {
     Signature guest = parseSignature(guestTypes.c_str());
     if (sig.ret.code == 'd') sig.ret.cgfloat = guest.ret.code == 'f';
-    for (size_t i = 0; i < sig.args.size() && i < guest.args.size(); i++)
+    for (size_t i = 0; i < sig.args.size() && i < guest.args.size(); i++) {
         if (sig.args[i].code == 'd') sig.args[i].cgfloat = guest.args[i].code == 'f';
+        Type *pointee = sig.args[i].code == '^' ? sig.args[i].pointee.get() : nullptr;
+        const Type *guestPointee = guest.args[i].code == '^' ? guest.args[i].pointee.get() : nullptr;
+        if (pointee && pointee->code == 'd') pointee->cgfloat = guestPointee && guestPointee->code == 'f';
+    }
 }
 
 HostCall &hostCall(const std::string &types, const char *selName, const std::string *guestTypes) {
@@ -301,8 +311,10 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         types = ms.methodReturnType;
         for (NSUInteger i = 0; i < ms.numberOfArguments; i++) types += [ms getArgumentTypeAtIndex:i];
     } else {
-        fatal("unrecognized selector %c[%s %s] (from 0x%08x)", object_isClass(recv) ? '+' : '-',
-              class_getName(object_getClass(recv)), name, c.cpu.reg(Cpu::LR));
+        std::string chain;
+        for (ClassInfo *k = classOf(receiver); k; k = k->super) chain += " " + k->name + (k->isGuest ? "" : " (host)");
+        fatal("unrecognized selector %c[%s %s] (from 0x%08x; classes:%s)", object_isClass(recv) ? '+' : '-',
+              class_getName(object_getClass(recv)), name, c.cpu.reg(Cpu::LR), chain.c_str());
     }
     if (trace) log("    types %s%s", types.c_str(), guestTypes ? " (a guest method)" : "");
     HostCall &hc = hostCall(types, name, guestTypes);
@@ -585,6 +597,15 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
         words.insert(words.end(), w.begin(), w.end());
     }
 
+    if (trace && (traceAll || std::strstr(bridge.selName(t->sel), trace))) {
+        std::string text;
+        for (uint32_t w : words) {
+            char word[12];
+            std::snprintf(word, sizeof word, " %08x", w);
+            text += word;
+        }
+        log("    imp 0x%08x, types %s, words%s", t->imp, t->guestTypes.c_str(), text.c_str());
+    }
     uint64_t r = cpu->call(t->imp, words);
     bounceOut(bridge, bounces);
 
@@ -596,6 +617,20 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
         rt.heap().free(retBuf);
     } else {
         std::memcpy(guest, &r, 8);
+    }
+    // A method declared to return an object whose implementation returns
+    // nothing (a block behind imp_implementationWithBlock, for an id-typed
+    // setter the caller ignores) leaves whatever was in r0; that can't be
+    // converted, and the host caller has no use for it, so it gets nil.
+    if (rt_.code == '@' && !guestStret) {
+        uint32_t value;
+        std::memcpy(&value, guest, 4);
+        if (value && !rt.mem().isMapped(value)) {
+            static std::atomic<int> logged{0};
+            if (logged++ < 5)
+                log("-%s returned 0x%08x, which isn't an object; the host gets nil", bridge.selName(t->sel), value);
+            std::memset(guest, 0, 4);
+        }
     }
     alignas(16) uint8_t host[256] = {};
     bridge.toHostValue(rt_, guest, host);

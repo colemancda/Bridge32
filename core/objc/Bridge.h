@@ -128,6 +128,9 @@ public:
     // Whether a class (guest or host) adopts the protocol named `protocol`,
     // directly, through a protocol it adopts, or through a superclass.
     bool conformsTo(ClassInfo *cls, const std::string &protocol);
+    // The 32-bit type encoding of a method some guest protocol adopted by
+    // `cls` (or a superclass) declares, required or optional, or "".
+    std::string guestProtocolTypes(ClassInfo *cls, const char *sel, bool instance);
 
     // The app's own classes (not metaclasses), for objc_getClassList.
     std::vector<GuestAddr> guestClasses();
@@ -196,6 +199,9 @@ private:
     std::string hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const std::string &guestTypes);
     void collectProtocols(GuestAddr protocolList, std::vector<std::string> &names);
     GuestAddr allocObject(id object, ClassInfo *isa, uint32_t size);
+    // Runs the guest classes' .cxx_construct methods (C++ ivars), superclass
+    // first, on a new guest half; not under lock_, since they're guest code.
+    void constructIvars(ClassInfo *cls, GuestAddr object);
     id adoptGuestObject(GuestAddr addr, ClassInfo *isa);
     id cfstringToHost(GuestAddr addr);
 

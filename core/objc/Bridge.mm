@@ -74,6 +74,22 @@ bool isTaggedPointer(id object) { return (reinterpret_cast<uintptr_t>(object) & 
 namespace {
 Bridge *sharedBridge = nullptr;
 
+// -methodSignatureForSelector: for guest classes that forward with their own
+// -forwardInvocation:. As on iOS, NSObject's answers for the protocols a class
+// adopts too, optional methods included; guest-only protocols are empty on the
+// host, so their methods are looked up in the guest's protocol_t.
+NSMethodSignature *shadowMethodSignature(id self, SEL _cmd, SEL sel) {
+    Bridge &bridge = *Bridge::shared();
+    Class super = object_getClass(self);
+    while (bridge.isShadowClass(super)) super = class_getSuperclass(super);
+    struct objc_super sup{self, super};
+    auto sig = reinterpret_cast<NSMethodSignature *(*)(struct objc_super *, SEL, SEL)>(objc_msgSendSuper)(&sup, _cmd, sel);
+    if (sig) return sig;
+    ClassInfo *cls = bridge.classOf(bridge.toGuest(self));
+    std::string types = cls ? bridge.guestProtocolTypes(cls, sel_getName(sel), true) : "";
+    return types.empty() ? nil : [NSMethodSignature signatureWithObjCTypes:types.c_str()];
+}
+
 // Host KVC falls back to this when a key matches no method or host ivar.
 // Guest ivars live in guest memory, so outlets connected to them land here.
 void shadowSetValueForUndefinedKey(id self, SEL _cmd, id value, NSString *key) {
@@ -512,18 +528,21 @@ void addGuestProperties(Class shadow, GuestMemory &mem, GuestAddr list) {
         GuestAddr property = list + 8 + i * entsize;
         GuestAddr name = mem.read<uint32_t>(property), attributes = mem.read<uint32_t>(property + 4);
         if (!name || !attributes) continue;
-        // "T@\"NSString\",C,N" -> {T, @"NSString"}, {C, ""}, {N, ""}. Type
-        // encodings don't contain commas, so splitting on them is safe.
-        // class_addProperty copies the attributes, so they can be temporaries.
+        // "T@\"NSString\",C,N" -> {T, @"NSString"}, {C, ""}, {N, ""}; commas
+        // inside a quoted type name ("T@\"<P1,P2>\"") don't split. class_addProperty
+        // copies the attributes, so they can be temporaries.
         std::vector<std::string> names, values;
         std::string text = mem.cstr(attributes);
-        for (size_t start = 0; start <= text.size();) {
-            size_t comma = std::min(text.find(',', start), text.size());
-            if (comma > start) {
+        for (size_t start = 0; start < text.size();) {
+            size_t end = start;
+            bool quoted = false;
+            for (; end < text.size() && (quoted || text[end] != ','); end++)
+                if (text[end] == '"') quoted = !quoted;
+            if (end > start) {
                 names.push_back(text.substr(start, 1));
-                values.push_back(text.substr(start + 1, comma - start - 1));
+                values.push_back(text.substr(start + 1, end - start - 1));
             }
-            start = comma + 1;
+            start = end + 1;
         }
         std::vector<objc_property_attribute_t> attrs;
         for (size_t k = 0; k < names.size(); k++) attrs.push_back({names[k].c_str(), values[k].c_str()});
@@ -567,6 +586,8 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr ro) {
     // The bridge runs +initialize itself (ensureInitialized), so the host's runtime doesn't get one.
     for (auto &[sel, method] : cls->meta->methods)
         if (selName(sel) != std::string("initialize")) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
+    if (cls->methods.count(guestSel("forwardInvocation:")) && !cls->methods.count(guestSel("methodSignatureForSelector:")))
+        class_addMethod(shadow, @selector(methodSignatureForSelector:), reinterpret_cast<IMP>(shadowMethodSignature), "@@::");
     // Subclasses of guest classes inherit this from their guest superclass.
     if ((!super || !super->isGuest) && !cls->methods.count(guestSel("setValue:forUndefinedKey:")))
         class_addMethod(shadow, @selector(setValue:forUndefinedKey:), reinterpret_cast<IMP>(shadowSetValueForUndefinedKey),
@@ -761,11 +782,23 @@ void Bridge::guestObjectDestroyed(GuestAddr object) {
 }
 
 GuestAddr Bridge::createInstance(GuestAddr cls, uint32_t extra) {
-    std::lock_guard guard(lock_);
+    std::unique_lock guard(lock_);
     ClassInfo *info = classInfo(cls);
     if (!info || info->isMeta || !info->host) fatal("class_createInstance(0x%08x): not a class the host has", cls);
     id object = class_createInstance(info->host, 0);
-    return allocObject(object, info, (info->isGuest ? info->instanceSize : kObjectHeaderSize) + extra);
+    GuestAddr guest = allocObject(object, info, (info->isGuest ? info->instanceSize : kObjectHeaderSize) + extra);
+    guard.unlock();
+    if (info->isGuest) constructIvars(info, guest);
+    return guest;
+}
+
+void Bridge::constructIvars(ClassInfo *cls, GuestAddr object) {
+    std::vector<GuestAddr> constructors;
+    GuestAddr sel = guestSel(".cxx_construct");
+    for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
+        if (auto it = c->methods.find(sel); it != c->methods.end()) constructors.push_back(it->second.imp);
+    for (auto it = constructors.rbegin(); it != constructors.rend(); ++it)
+        Runtime::threadCpu().call(*it, {object, sel});
 }
 
 void Bridge::disposeObject(GuestAddr object) {
@@ -807,7 +840,7 @@ bool isProtocolObject(id object) {
 
 GuestAddr Bridge::toGuest(id object) {
     if (!object) return 0;
-    std::lock_guard guard(lock_);
+    std::unique_lock guard(lock_);
     if (object_isClass(object)) {
         Class c = (Class)object;
         if (auto it = byHostClass_.find(c); it != byHostClass_.end()) return it->second->addr;
@@ -834,7 +867,11 @@ GuestAddr Bridge::toGuest(id object) {
         auto it = byHostClass_.find(c);
         if (it != byHostClass_.end() && it->second->isGuest) {
             if (c != cls) log("instance of %s is a host subclass of guest class %s", class_getName(cls), class_getName(c));
-            return allocObject(object, it->second, it->second->instanceSize);
+            ClassInfo *info = it->second;
+            GuestAddr guest = allocObject(object, info, info->instanceSize);
+            guard.unlock();
+            constructIvars(info, guest);
+            return guest;
         }
     }
     return allocObject(object, stubFor(cls), kObjectHeaderSize);
@@ -881,6 +918,40 @@ void Bridge::ensureInitialized(ClassInfo *cls) {
             return;
         }
     }
+}
+
+std::string Bridge::guestProtocolTypes(ClassInfo *cls, const char *sel, bool instance) {
+    GuestMemory &mem = rt_.mem();
+    // protocol_t { isa, name, protocols, instanceMethods, classMethods,
+    // optionalInstanceMethods, optionalClassMethods, ... }; method lists are
+    // { entsize, count, { name, types, imp }... }.
+    std::vector<GuestAddr> pending;
+    {
+        std::lock_guard guard(lock_);
+        for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
+            for (GuestAddr list : guestClassProtocols_[c->addr]) {
+                uint32_t count = mem.read<uint32_t>(list);
+                for (uint32_t i = 0; i < count; i++) pending.push_back(mem.read<uint32_t>(list + 4 + i * 4));
+            }
+    }
+    for (size_t i = 0; i < pending.size() && i < 1000; i++) {
+        GuestAddr proto = pending[i];
+        for (uint32_t offset : instance ? std::initializer_list<uint32_t>{12, 20} : std::initializer_list<uint32_t>{16, 24}) {
+            GuestAddr methods = mem.read<uint32_t>(proto + offset);
+            if (!methods) continue;
+            uint32_t entsize = mem.read<uint32_t>(methods) & ~3u, count = mem.read<uint32_t>(methods + 4);
+            for (uint32_t m = 0; m < count; m++) {
+                GuestAddr method = methods + 8 + m * entsize;
+                if (std::strcmp(mem.cstr(mem.read<uint32_t>(method)), sel) == 0)
+                    return mem.cstr(mem.read<uint32_t>(method + 4));
+            }
+        }
+        if (GuestAddr inherited = mem.read<uint32_t>(proto + 8)) {
+            uint32_t count = mem.read<uint32_t>(inherited);
+            for (uint32_t k = 0; k < count; k++) pending.push_back(mem.read<uint32_t>(inherited + 4 + k * 4));
+        }
+    }
+    return "";
 }
 
 bool Bridge::conformsTo(ClassInfo *cls, const std::string &protocol) {
@@ -961,6 +1032,11 @@ id Bridge::toHost(GuestAddr addr) {
             fatal("guest used the code of import %s as an object; it's a data symbol that needs a B32_DATA definition",
                   rt_.thunks().nameOf(addr & 0xffffff).c_str());
         GuestMemory &mem = rt_.mem();
+        // ...or the address of its stub (SVC #index; BX LR).
+        if (mem.isMapped(addr) && (mem.read<uint32_t>(addr) & 0xff000000) == 0xef000000 &&
+            mem.read<uint32_t>(addr + 4) == 0xe12fff1e)
+            fatal("guest used import %s as an object; it's a data symbol that needs a B32_DATA definition",
+                  rt_.thunks().nameOf(mem.read<uint32_t>(addr) & 0xffffff).c_str());
         ClassInfo *isa = mem.isMapped(addr) ? classInfo(mem.read<uint32_t>(addr)) : nullptr;
         if (isa && isa->isGuest && !isa->isMeta && isa->host) return adoptGuestObject(addr, isa);
         if (mem.isMapped(addr))
@@ -968,7 +1044,22 @@ id Bridge::toHost(GuestAddr addr) {
                   Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
                   isa ? isa->name.c_str() : "unknown", mem.read<uint32_t>(addr), mem.read<uint32_t>(addr + 4),
                   mem.read<uint32_t>(addr + 8), mem.read<uint32_t>(addr + 12));
-        fatal("0x%08x is not a live object (unmapped; thread %x)", addr, pthread_mach_thread_np(pthread_self()));
+        std::string frames;
+        if (Cpu *cpu = Runtime::currentCpu()) {
+            // iOS code keeps a frame chain in r7: { saved r7, saved lr }.
+            uint32_t fp = cpu->reg(7);
+            for (int i = 0; i < 12 && fp && (fp & 3) == 0 && mem.isMapped(fp) && mem.isMapped(fp + 7); i++) {
+                char frame[16];
+                std::snprintf(frame, sizeof frame, " %08x", mem.read<uint32_t>(fp + 4));
+                frames += frame;
+                uint32_t next = mem.read<uint32_t>(fp);
+                if (next <= fp) break;
+                fp = next;
+            }
+        }
+        fatal("0x%08x is not a live object (unmapped; thread %x, from 0x%08x; guest return addresses:%s)", addr,
+              pthread_mach_thread_np(pthread_self()), Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
+              frames.c_str());
     }
     uint32_t handle = it->second;
     if (auto adopted = adopted_.find(handle); adopted != adopted_.end()) {
