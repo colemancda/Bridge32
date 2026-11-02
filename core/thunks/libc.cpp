@@ -179,6 +179,8 @@ B32_THUNK(_strtoull) {
     c.ret64(uint64_t(value));
 }
 B32_THUNK(_atoi) { c.ret(uint32_t(std::atoi(c.mem.cstr(c.args.ptr())))); }
+B32_THUNK(_abs) { c.ret(uint32_t(std::abs(c.args.i32()))); }
+B32_THUNK(_labs) { c.ret(uint32_t(std::abs(c.args.i32()))); }  // long is 32-bit in the guest
 
 // --- string.h --------------------------------------------------------------
 
