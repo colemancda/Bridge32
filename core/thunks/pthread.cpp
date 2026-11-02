@@ -270,6 +270,8 @@ B32_THUNK(_pthread_mutexattr_settype) {
     c.ret(0);
 }
 B32_THUNK(_pthread_mutexattr_destroy) { c.ret(0); }
+// Priority inheritance doesn't matter to the guest; host mutexes don't take it.
+B32_THUNK(_pthread_mutexattr_setprotocol) { c.ret(0); }
 
 // --- condition variables -------------------------------------------------------------
 
@@ -372,24 +374,37 @@ B32_THUNK(_sem_wait) {
 
 // --- thread-specific data ------------------------------------------------------------------
 
+// Keys index the thread's slots (Cpu::tsd), which code inlining
+// pthread_getspecific reads directly. Darwin keeps the first 256 for itself.
 namespace {
 std::mutex keysLock;
-uint32_t nextKey = 1;
-thread_local std::unordered_map<uint32_t, GuestAddr> specific;
+uint32_t nextKey = 256;
 }  // namespace
 
 // Destructors aren't run; guest threads rarely depend on them.
 B32_THUNK(_pthread_key_create) {
     GuestAddr out = c.args.ptr();
     std::lock_guard guard(keysLock);
+    if (nextKey >= Cpu::kTsdSlots) {
+        c.ret(uint32_t(EAGAIN));
+        return;
+    }
     c.mem.write<uint32_t>(out, nextKey++);
     c.ret(0);
 }
 B32_THUNK(_pthread_key_delete) { c.ret(0); }
-B32_THUNK(_pthread_getspecific) { c.ret(specific[c.args.u32()]); }
+B32_THUNK(_pthread_getspecific) {
+    uint32_t key = c.args.u32();
+    c.ret(key < Cpu::kTsdSlots ? c.mem.read<uint32_t>(c.cpu.tsd() + key * 4) : 0u);
+}
 B32_THUNK(_pthread_setspecific) {
     uint32_t key = c.args.u32();
-    specific[key] = c.args.ptr();
+    GuestAddr value = c.args.ptr();
+    if (key >= Cpu::kTsdSlots) {
+        c.ret(uint32_t(EINVAL));
+        return;
+    }
+    c.mem.write<uint32_t>(c.cpu.tsd() + key * 4, value);
     c.ret(0);
 }
 
@@ -420,6 +435,11 @@ B32_THUNK(_pthread_testcancel) {}
 B32_THUNK(_pthread_setcanceltype) {
     c.args.i32();
     if (GuestAddr old = c.args.ptr()) c.mem.write<uint32_t>(old, PTHREAD_CANCEL_DEFERRED);
+    c.ret(0);
+}
+B32_THUNK(_pthread_setcancelstate) {
+    c.args.i32();
+    if (GuestAddr old = c.args.ptr()) c.mem.write<uint32_t>(old, PTHREAD_CANCEL_ENABLE);
     c.ret(0);
 }
 B32_THUNK(_sched_get_priority_max) { c.ret(uint32_t(::sched_get_priority_max(c.args.i32()))); }
