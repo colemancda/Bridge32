@@ -9,6 +9,7 @@
 #include "core/objc/Bridge.h"
 #include "core/thunks/CTable.h"
 
+#import <Accelerate/Accelerate.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 
@@ -735,4 +736,34 @@ B32_THUNK(_CGPathCreateCopyByTransformingPath) {
     CGAffineTransform t;
     bool has = optionalTransform(c, c.args.ptr(), t);
     c.ret(c.rt.bridge().toGuest((id)CGPathCreateCopyByTransformingPath(path, has ? &t : nullptr)));
+}
+
+// --- vImage (Accelerate) ---------------------------------------------------------------------
+
+namespace {
+// vImage_Buffer { void *data; vImagePixelCount height, width; size_t rowBytes }:
+// four words in the guest.
+vImage_Buffer imageBuffer(Call &c, GuestAddr p) {
+    if (!p) return {};
+    GuestAddr data = c.mem.read<uint32_t>(p);
+    return {data ? c.mem.ptr<void>(data) : nullptr, c.mem.read<uint32_t>(p + 4), c.mem.read<uint32_t>(p + 8),
+            c.mem.read<uint32_t>(p + 12)};
+}
+}  // namespace
+
+// vImage_Error vImageBoxConvolve_ARGB8888(const vImage_Buffer *src, const vImage_Buffer *dest,
+//     void *tempBuffer, vImagePixelCount srcOffsetToROI_X, vImagePixelCount srcOffsetToROI_Y,
+//     uint32_t kernel_height, uint32_t kernel_width, const Pixel_8888 backgroundColor, vImage_Flags)
+// With kvImageGetTempBufferSize the result is a size rather than an error.
+B32_THUNK(_vImageBoxConvolve_ARGB8888) {
+    vImage_Buffer src = imageBuffer(c, c.args.ptr()), dest = imageBuffer(c, c.args.ptr());
+    GuestAddr temp = c.args.ptr();
+    vImagePixelCount x = c.args.u32(), y = c.args.u32();
+    uint32_t kernelHeight = c.args.u32(), kernelWidth = c.args.u32();
+    GuestAddr background = c.args.ptr();
+    vImage_Flags flags = c.args.u32();
+    vImage_Error result = vImageBoxConvolve_ARGB8888(&src, &dest, temp ? c.mem.ptr<void>(temp) : nullptr, x, y,
+                                                     kernelHeight, kernelWidth,
+                                                     background ? c.mem.ptr<uint8_t>(background) : nullptr, flags);
+    c.ret(uint32_t(int32_t(result)));
 }
