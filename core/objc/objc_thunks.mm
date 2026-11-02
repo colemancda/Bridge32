@@ -192,6 +192,11 @@ B32_THUNK(_class_createInstance) {
     GuestAddr cls = c.args.ptr();
     c.ret(bridge(c).createInstance(cls, c.args.u32()));
 }
+// id NSAllocateObject(Class, NSUInteger extraBytes, NSZone *): zones are ignored.
+B32_THUNK(_NSAllocateObject) {
+    GuestAddr cls = c.args.ptr();
+    c.ret(bridge(c).createInstance(cls, c.args.u32()));
+}
 B32_THUNK(_object_dispose) {
     GuestAddr object = c.args.ptr();
     if (object) bridge(c).disposeObject(object);
