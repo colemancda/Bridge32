@@ -98,6 +98,8 @@ public:
     // like _dispatch_main_q) stand for a host object, both ways.
     void aliasObject(GuestAddr guest, id host);
     bool isAlias(GuestAddr guest);
+    // Whether `object` is one of the app's constant strings (@"..." literals).
+    bool isConstantString(GuestAddr object) const;
     // A protocol by name as a guest protocol_t: the app's own, or one standing
     // for the host's; 0 if neither has it.
     GuestAddr protocolNamed(const std::string &name);
