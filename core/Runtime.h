@@ -43,6 +43,8 @@ public:
     // a host thread that hasn't run guest code before: callbacks from
     // AudioToolbox's or GCD's threads into guest functions.
     static Cpu &threadCpu();
+    // Hands an attached thread's CPU back for reuse when the thread exits.
+    void detachThreadCpu(Cpu *cpu, GuestAddr stackTop);
 
     // Runs fn(arg) as a new guest thread on the calling host thread, with
     // its own CPU and a guest stack in `slot` (1..kMaxThreads-1); returns
@@ -102,7 +104,8 @@ private:
     std::unique_ptr<ThunkTable> thunks_;
     CpuFactory makeCpu_;
     std::mutex attachLock_;
-    std::vector<std::unique_ptr<Cpu>> attachedCpus_;  // never freed; foreign threads are few
+    std::vector<std::unique_ptr<Cpu>> attachedCpus_;  // never freed, but reused:
+    std::vector<std::pair<Cpu *, GuestAddr>> idleCpus_;  // ...those whose threads have exited, with their stack tops
     std::unique_ptr<Cpu> cpu_;
     std::unique_ptr<objc::Bridge> bridge_;
     Image image_;
