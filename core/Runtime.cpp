@@ -26,6 +26,19 @@ struct ExitRequest {
 
 thread_local Cpu *currentCpuForThread = nullptr;
 Runtime *instance = nullptr;
+
+// An attached host thread's CPU, handed back when the thread exits. GCD
+// retires its worker threads and starts new ones all the time, and each
+// that calls into the guest would otherwise keep a stack slot for good
+// (AIDA64 ran out after ten minutes of timers).
+struct AttachedCpu {
+    Cpu *cpu = nullptr;
+    GuestAddr stackTop = 0;
+    ~AttachedCpu() {
+        if (cpu) instance->detachThreadCpu(cpu, stackTop);
+    }
+};
+thread_local AttachedCpu attachedCpu;
 }  // namespace
 
 Cpu *Runtime::currentCpu() { return currentCpuForThread; }
@@ -34,6 +47,15 @@ Cpu &Runtime::threadCpu() {
     if (currentCpuForThread) return *currentCpuForThread;
     Runtime &rt = *instance;
     std::lock_guard guard(rt.attachLock_);
+    if (!rt.idleCpus_.empty()) {
+        auto [cpu, stackTop] = rt.idleCpus_.back();
+        rt.idleCpus_.pop_back();
+        cpu->setReg(Cpu::SP, stackTop);
+        currentCpuForThread = cpu;
+        cpu->bindToCurrentThread();
+        attachedCpu.cpu = cpu, attachedCpu.stackTop = stackTop;
+        return *cpu;
+    }
     // Attached threads take stack slots from the top down; guest threads
     // created with pthread_create take them from the bottom up.
     uint32_t slot = layout::kMaxThreads - 1 - uint32_t(rt.attachedCpus_.size());
@@ -44,8 +66,15 @@ Cpu &Runtime::threadCpu() {
     cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
     currentCpuForThread = cpu.get();
     cpu->bindToCurrentThread();
+    attachedCpu.cpu = cpu.get(), attachedCpu.stackTop = stackBottom + layout::kStackSize - 16;
     rt.attachedCpus_.push_back(std::move(cpu));
     return *currentCpuForThread;
+}
+
+void Runtime::detachThreadCpu(Cpu *cpu, GuestAddr stackTop) {
+    cpu->unbindThread();
+    std::lock_guard guard(attachLock_);
+    idleCpus_.emplace_back(cpu, stackTop);
 }
 
 std::unordered_map<std::string, DataSymbolRegistry::Entry> &DataSymbolRegistry::all() {
