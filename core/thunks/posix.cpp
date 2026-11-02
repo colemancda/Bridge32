@@ -500,6 +500,12 @@ B32_THUNK(_inflateReset) {
     z_stream *z = hostStream(c.args.ptr());
     c.ret(uint32_t(z ? ::inflateReset(z) : Z_STREAM_ERROR));
 }
+// int inflateReset2(z_streamp, int windowBits)
+B32_THUNK(_inflateReset2) {
+    z_stream *z = hostStream(c.args.ptr());
+    int windowBits = c.args.i32();
+    c.ret(uint32_t(z ? ::inflateReset2(z, windowBits) : Z_STREAM_ERROR));
+}
 
 // --- sscanf ------------------------------------------------------------------------------------
 // Each conversion runs through the host's sscanf on its own (with %n to see
