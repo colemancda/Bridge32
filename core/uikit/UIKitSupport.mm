@@ -697,3 +697,47 @@ B32_OVERRIDE_WHEN(dismissesHeldPresentation, "dismissViewControllerAnimated:comp
 }
 
 B32_OVERRIDE_WHEN(isMainBundle, "bundlePath") { o.c.ret(o.bridge.toGuest([o.receiver resourcePath])); }
+
+// The app's own bundle identifier, without the wrapper's ".bridge32" (which
+// gives it a container of its own on the Mac): services check it against the
+// API keys they issued for the iOS app (Google Maps' tile requests get a 401).
+namespace {
+NSString *guestBundleIdentifier() {
+    static NSString *identifier = [] {
+        NSString *host = NSBundle.mainBundle.bundleIdentifier;
+        return [([host hasSuffix:@".bridge32"] ? [host substringToIndex:host.length - 9] : host) copy];
+    }();
+    return identifier;
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isMainBundle, "bundleIdentifier") { o.c.ret(o.bridge.toGuest(guestBundleIdentifier())); }
+B32_OVERRIDE_WHEN(isMainBundle, "objectForInfoDictionaryKey:") {
+    NSString *key = o.bridge.toHost(o.args.ptr());
+    id value = [key isEqualToString:@"CFBundleIdentifier"] ? guestBundleIdentifier()
+                                                           : [o.receiver objectForInfoDictionaryKey:key];
+    o.c.ret(o.bridge.toGuest(value));
+}
+// CFStringRef CFBundleGetIdentifier(CFBundleRef) and
+// CFTypeRef CFBundleGetValueForInfoDictionaryKey(CFBundleRef, CFStringRef): the same for CF.
+B32_THUNK(_CFBundleGetIdentifier) {
+    auto bundle = (CFBundleRef)c.rt.bridge().toHost(c.args.ptr());
+    CFStringRef identifier = bundle == CFBundleGetMainBundle() ? (__bridge CFStringRef)guestBundleIdentifier()
+                                                               : CFBundleGetIdentifier(bundle);
+    c.ret(identifier ? c.rt.bridge().toGuest((id)identifier) : 0);
+}
+B32_THUNK(_CFBundleGetValueForInfoDictionaryKey) {
+    auto bundle = (CFBundleRef)c.rt.bridge().toHost(c.args.ptr());
+    auto key = (CFStringRef)c.rt.bridge().toHost(c.args.ptr());
+    CFTypeRef value = bundle == CFBundleGetMainBundle() && key && CFEqual(key, kCFBundleIdentifierKey)
+                          ? (__bridge CFTypeRef)guestBundleIdentifier()
+                          : CFBundleGetValueForInfoDictionaryKey(bundle, key);
+    c.ret(value ? c.rt.bridge().toGuest((id)value) : 0);
+}
+B32_OVERRIDE_WHEN(isMainBundle, "infoDictionary") {
+    static NSDictionary *info = [] {
+        NSMutableDictionary *copy = [NSBundle.mainBundle.infoDictionary mutableCopy];
+        copy[@"CFBundleIdentifier"] = guestBundleIdentifier();
+        return copy;
+    }();
+    o.c.ret(o.bridge.toGuest(info));
+}
