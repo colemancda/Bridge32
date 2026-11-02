@@ -2,14 +2,19 @@
 
 #include "Layout.h"
 #include "core/Log.h"
+#include "core/Runtime.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace b32 {
 
 namespace {
 constexpr uint32_t kGrain = 16;
+constexpr uint32_t kRedzone = 16;
+const bool redzones = std::getenv("B32_HEAP_REDZONE") != nullptr;
 constexpr uint32_t kCommitChunk = 1 << 22;
 
 uint32_t roundUp(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
@@ -20,7 +25,27 @@ GuestHeap::GuestHeap(GuestMemory &mem)
 
 GuestAddr GuestHeap::alloc(uint32_t size, uint32_t align) {
     std::lock_guard guard(lock_);
-    return allocLocked(size, align);
+    if (!redzones) return allocLocked(size, align);
+    uint32_t usable = roundUp(std::max(size, 1u), kGrain);
+    GuestAddr addr = allocLocked(usable + kRedzone, align);
+    std::memset(mem_.ptr<uint8_t>(addr + usable), 0xfd, kRedzone);
+    Cpu *cpu = Runtime::currentCpu();
+    redzones_[addr] = {usable, cpu ? cpu->reg(Cpu::LR) : 0};
+    return addr;
+}
+
+void GuestHeap::checkRedzone(GuestAddr addr) {
+    auto it = redzones_.find(addr);
+    if (it == redzones_.end()) return;
+    const uint8_t *zone = mem_.ptr<uint8_t>(addr + it->second.size);
+    for (uint32_t i = 0; i < kRedzone; i++)
+        if (zone[i] != 0xfd) {
+            char bytes[3 * kRedzone + 1] = {};
+            for (uint32_t k = 0; k < kRedzone; k++) std::snprintf(bytes + k * 3, 4, "%02x ", zone[k]);
+            fatal("guest heap block 0x%08x (%u bytes, allocated from 0x%08x) was written past its end: %s", addr,
+                  it->second.size, it->second.caller, bytes);
+        }
+    redzones_.erase(it);
 }
 
 GuestAddr GuestHeap::allocLocked(uint32_t size, uint32_t align) {
@@ -67,8 +92,21 @@ GuestAddr GuestHeap::realloc(GuestAddr addr, uint32_t size) {
     auto it = live_.find(addr);
     if (it == live_.end()) fatal("guest realloc of unknown pointer 0x%08x", addr);
     uint32_t oldSize = it->second;
+    if (redzones) {
+        auto zone = redzones_.find(addr);
+        if (zone != redzones_.end()) oldSize = zone->second.size;
+    }
     if (roundUp(size, kGrain) <= oldSize) return addr;
-    GuestAddr fresh = allocLocked(size, kGrain);
+    GuestAddr fresh;
+    if (redzones) {
+        uint32_t usable = roundUp(std::max(size, 1u), kGrain);
+        fresh = allocLocked(usable + kRedzone, kGrain);
+        std::memset(mem_.ptr<uint8_t>(fresh + usable), 0xfd, kRedzone);
+        Cpu *cpu = Runtime::currentCpu();
+        redzones_[fresh] = {usable, cpu ? cpu->reg(Cpu::LR) : 0};
+    } else {
+        fresh = allocLocked(size, kGrain);
+    }
     std::memcpy(mem_.ptr<uint8_t>(fresh), mem_.ptr<uint8_t>(addr), oldSize);
     freeLocked(addr);
     return fresh;
@@ -81,6 +119,7 @@ void GuestHeap::free(GuestAddr addr) {
 }
 
 void GuestHeap::freeLocked(GuestAddr addr) {
+    if (redzones) checkRedzone(addr);
     auto it = live_.find(addr);
     if (it == live_.end()) fatal("guest free of unknown pointer 0x%08x", addr);
     uint32_t size = it->second;
@@ -89,6 +128,13 @@ void GuestHeap::freeLocked(GuestAddr addr) {
     // fresh heap memory is: games read past what they asked for, counting on
     // that (cocos2d-x's base64Decode leaves its result unterminated, and
     // SuShi takes its strlen).
+    // B32_HEAP_QUARANTINE=1, for chasing use-after-free: freed blocks are never
+    // reused and are filled with 0xdeadbeef, so stale pointers fault or show it.
+    static const bool quarantine = std::getenv("B32_HEAP_QUARANTINE") != nullptr;
+    if (quarantine) {
+        for (uint32_t i = 0; i + 4 <= size; i += 4) mem_.write<uint32_t>(addr + i, 0xdeadbeef);
+        return;
+    }
     std::memset(mem_.ptr<uint8_t>(addr), 0, size);
     insertFree(addr, size);
 }
