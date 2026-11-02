@@ -72,6 +72,34 @@ bool guestImplements(id object, SEL sel) {
     return imp && !dladdr((void *)imp, &info);
 }
 
+// The orientations the guest app allows, as iOS 6 and 7 asked: its delegate's
+// -application:supportedInterfaceOrientationsForWindow:, or else the
+// UISupportedInterfaceOrientations of its own Info.plist (the wrapped app's
+// leaves it out), or else iOS's default for the device.
+UIInterfaceOrientationMask guestAppOrientations(UIWindow *window) {
+    id delegate = UIApplication.sharedApplication.delegate;
+    SEL forWindow = @selector(application:supportedInterfaceOrientationsForWindow:);
+    if (delegate && guestImplements(delegate, forWindow))
+        return reinterpret_cast<UIInterfaceOrientationMask (*)(id, SEL, id, id)>(objc_msgSend)(
+            delegate, forWindow, UIApplication.sharedApplication, window);
+    static UIInterfaceOrientationMask fromPlist = [] {
+        NSString *path = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:path];
+        bool iPad = std::string(device::current().model) == "iPad";
+        NSArray *names = (iPad ? info[@"UISupportedInterfaceOrientations~ipad"] : nil) ?: info[@"UISupportedInterfaceOrientations"];
+        UIInterfaceOrientationMask mask = 0;
+        for (NSString *name in names) {
+            if ([name isEqualToString:@"UIInterfaceOrientationPortrait"]) mask |= UIInterfaceOrientationMaskPortrait;
+            if ([name isEqualToString:@"UIInterfaceOrientationPortraitUpsideDown"]) mask |= UIInterfaceOrientationMaskPortraitUpsideDown;
+            if ([name isEqualToString:@"UIInterfaceOrientationLandscapeLeft"]) mask |= UIInterfaceOrientationMaskLandscapeLeft;
+            if ([name isEqualToString:@"UIInterfaceOrientationLandscapeRight"]) mask |= UIInterfaceOrientationMaskLandscapeRight;
+        }
+        if (!mask) mask = iPad ? UIInterfaceOrientationMaskAll : UIInterfaceOrientationMaskAllButUpsideDown;
+        return mask;
+    }();
+    return fromPlist;
+}
+
 // Before iOS 8 the screen stayed portrait, and a root view controller that
 // supported the orientation the app started in was turned to it by UIKit:
 // its view got landscape bounds and the game drew upright (Shantae). Games
@@ -90,8 +118,7 @@ bool viewControllersRotate() {
         UIInterfaceOrientation orientation = deviceOrientation();
         bool rotates;
         if ([[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32GuestSDKVersion"] doubleValue] >= 6) {
-            UIInterfaceOrientationMask allowed = root.supportedInterfaceOrientations &
-                [UIApplication.sharedApplication supportedInterfaceOrientationsForWindow:window];
+            UIInterfaceOrientationMask allowed = root.supportedInterfaceOrientations & guestAppOrientations(window);
             rotates = allowed & (1u << orientation);
         } else {
             // iOS 5's own -shouldAutorotateToInterfaceOrientation: allowed only portrait.
@@ -585,16 +612,8 @@ B32_OVERRIDE_WHEN(isApplication, "setStatusBarHidden:", "setStatusBarHidden:anim
     statusBarHidden() = o.args.u32() & 0xff;
 }
 B32_OVERRIDE_WHEN(isApplication, "isStatusBarHidden") { o.c.ret(uint32_t(statusBarHidden())); }
-// The interface is in the orientation the game started in, and a view
-// controller UIKit would have turned (or any, from iOS 8) is in it too.
+// The interface is in the orientation the game started in.
 B32_OVERRIDE_WHEN(isApplication, "statusBarOrientation") { o.c.ret(uint32_t(deviceOrientation())); }
-namespace {
-bool isController(id receiver) { return [receiver isKindOfClass:[UIViewController class]]; }
-}  // namespace
-B32_OVERRIDE_WHEN(isController, "interfaceOrientation") {
-    bool turned = boundsFollowOrientation() || viewControllersRotate();
-    o.c.ret(uint32_t(turned ? deviceOrientation() : UIInterfaceOrientationPortrait));
-}
 B32_OVERRIDE_WHEN(isScreen, "scale") { o.c.retF32(1.0f); }
 // nativeBounds is in the portrait-up orientation whatever the interface's, so
 // games that swap it for landscape (Angry Birds Friends) get it the right way.
