@@ -58,3 +58,8 @@ B32_OVERRIDE_WHEN(isController, "setControllerPausedHandler:") {
     };
     log("controller: %s's Menu button calls the guest's pause handler", controller.vendorName.UTF8String ?: "?");
 }
+
+// - (BOOL)isAttachedToDevice: iOS 7's first MFi controllers clipped onto the
+// phone, and some games only read one that does (Shantae polls this every
+// frame and ignores a wireless pad); every controller is attached here.
+B32_OVERRIDE_WHEN(isController, "isAttachedToDevice") { o.c.ret(1u); }
