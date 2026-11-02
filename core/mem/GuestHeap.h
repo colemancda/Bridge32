@@ -32,6 +32,15 @@ private:
     GuestAddr committed_; // memory below this is mapped
     std::map<GuestAddr, uint32_t> free_;          // start -> size, coalesced
     std::unordered_map<GuestAddr, uint32_t> live_;  // start -> size
+
+    // B32_HEAP_REDZONE=1: 16 bytes of 0xfd after each block (past its 16-byte
+    // rounding), checked when it's freed, to find writes past the end.
+    struct Redzone {
+        uint32_t size;      // rounded size the caller can use
+        GuestAddr caller;   // guest return address of the allocating call
+    };
+    std::unordered_map<GuestAddr, Redzone> redzones_;
+    void checkRedzone(GuestAddr addr);
 };
 
 }  // namespace b32
