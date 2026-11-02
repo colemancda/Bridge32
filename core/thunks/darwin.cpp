@@ -197,7 +197,6 @@ B32_MACH_FAILS(_vm_read)
 B32_THUNK(_mach_port_deallocate) { c.ret(KERN_SUCCESS); }
 B32_THUNK(_mach_thread_self) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_host_self) { c.ret(mach_host_self()); }
-B32_THUNK(_pthread_mach_thread_np) { c.ret(mach_thread_self()); }
 B32_THUNK(_mach_error_string) { c.ret(c.rt.internString(::mach_error_string(c.args.i32()))); }
 
 // Guest threads for garbage collectors (Boehm's, in Unity's Mono), which
