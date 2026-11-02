@@ -32,7 +32,7 @@ using namespace b32::objc;
 
 @implementation B32Sentinel
 - (void)dealloc {
-    bridge->forget(handle);
+    bridge->destroyGuestHalf(handle);
     [super dealloc];
 }
 @end
@@ -73,6 +73,24 @@ bool isTaggedPointer(id object) { return (reinterpret_cast<uintptr_t>(object) & 
 
 namespace {
 Bridge *sharedBridge = nullptr;
+
+// The current guest thread's return addresses, for error messages: iOS code
+// keeps a frame chain in r7, { saved r7, saved lr }.
+std::string guestFrames(GuestMemory &mem) {
+    std::string frames;
+    Cpu *cpu = Runtime::currentCpu();
+    if (!cpu) return frames;
+    uint32_t fp = cpu->reg(7);
+    for (int i = 0; i < 12 && fp && (fp & 3) == 0 && mem.isMapped(fp) && mem.isMapped(fp + 7); i++) {
+        char frame[16];
+        std::snprintf(frame, sizeof frame, " %08x", mem.read<uint32_t>(fp + 4));
+        frames += frame;
+        uint32_t next = mem.read<uint32_t>(fp);
+        if (next <= fp) break;
+        fp = next;
+    }
+    return frames;
+}
 
 // -methodSignatureForSelector: for guest classes that forward with their own
 // -forwardInvocation:. As on iOS, NSObject's answers for the protocols a class
@@ -816,6 +834,24 @@ void Bridge::disposeObject(GuestAddr object) {
     rt_.heap().free(object);
 }
 
+void Bridge::destroyGuestHalf(uint32_t handle) {
+    GuestAddr object = 0;
+    ClassInfo *cls = nullptr;
+    {
+        std::lock_guard guard(lock_);
+        if (!adopted_.count(handle)) {
+            object = handleGuests_[handle];
+            cls = object ? classInfo(rt_.mem().read<uint32_t>(object)) : nullptr;
+        }
+    }
+    if (cls && cls->isGuest) {
+        GuestAddr sel = guestSel(".cxx_destruct");
+        for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
+            if (auto it = c->methods.find(sel); it != c->methods.end()) Runtime::threadCpu().call(it->second.imp, {object, sel});
+    }
+    forget(handle);
+}
+
 void Bridge::forget(uint32_t handle) {
     std::lock_guard guard(lock_);
     guestByHost_.erase(handleObjects_[handle]);
@@ -1035,8 +1071,9 @@ id Bridge::toHost(GuestAddr addr) {
         // ...or the address of its stub (SVC #index; BX LR).
         if (mem.isMapped(addr) && (mem.read<uint32_t>(addr) & 0xff000000) == 0xef000000 &&
             mem.read<uint32_t>(addr + 4) == 0xe12fff1e)
-            fatal("guest used import %s as an object; it's a data symbol that needs a B32_DATA definition",
-                  rt_.thunks().nameOf(mem.read<uint32_t>(addr) & 0xffffff).c_str());
+            fatal("guest used import %s as an object; it's a data symbol that needs a B32_DATA definition "
+                  "(guest return addresses:%s)",
+                  rt_.thunks().nameOf(mem.read<uint32_t>(addr) & 0xffffff).c_str(), guestFrames(mem).c_str());
         ClassInfo *isa = mem.isMapped(addr) ? classInfo(mem.read<uint32_t>(addr)) : nullptr;
         if (isa && isa->isGuest && !isa->isMeta && isa->host) return adoptGuestObject(addr, isa);
         if (mem.isMapped(addr))
@@ -1044,22 +1081,9 @@ id Bridge::toHost(GuestAddr addr) {
                   Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
                   isa ? isa->name.c_str() : "unknown", mem.read<uint32_t>(addr), mem.read<uint32_t>(addr + 4),
                   mem.read<uint32_t>(addr + 8), mem.read<uint32_t>(addr + 12));
-        std::string frames;
-        if (Cpu *cpu = Runtime::currentCpu()) {
-            // iOS code keeps a frame chain in r7: { saved r7, saved lr }.
-            uint32_t fp = cpu->reg(7);
-            for (int i = 0; i < 12 && fp && (fp & 3) == 0 && mem.isMapped(fp) && mem.isMapped(fp + 7); i++) {
-                char frame[16];
-                std::snprintf(frame, sizeof frame, " %08x", mem.read<uint32_t>(fp + 4));
-                frames += frame;
-                uint32_t next = mem.read<uint32_t>(fp);
-                if (next <= fp) break;
-                fp = next;
-            }
-        }
         fatal("0x%08x is not a live object (unmapped; thread %x, from 0x%08x; guest return addresses:%s)", addr,
               pthread_mach_thread_np(pthread_self()), Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
-              frames.c_str());
+              guestFrames(mem).c_str());
     }
     uint32_t handle = it->second;
     if (auto adopted = adopted_.find(handle); adopted != adopted_.end()) {
