@@ -16,6 +16,7 @@
 #include <cstring>
 #include <cwchar>
 #include <runetype.h>
+#include <xlocale.h>
 #include <string>
 
 using namespace b32;
@@ -93,6 +94,16 @@ B32_THUNK(_strtof) {
     float value = std::strtof(s, &end);
     setEnd(c, endptr, str, s, end);
     c.retF32(value);
+}
+
+// The locale is always the C locale.
+B32_THUNK(_strtod_l) {
+    GuestAddr str = c.args.ptr(), endptr = c.args.ptr();
+    const char *s = c.mem.cstr(str);
+    char *end;
+    double value = ::strtod_l(s, &end, LC_C_LOCALE);
+    setEnd(c, endptr, str, s, end);
+    c.retF64(value);
 }
 
 // long double is double on 32-bit iOS.
