@@ -57,6 +57,8 @@ constexpr Rule kRules[] = {
     {"AdColony", "AdColony", nullptr},
     {"Google Analytics", "GAI", nullptr},
     {"Google Analytics", "GANTracker", nullptr},
+    // Builds a subclass of the app delegate at run time to watch it (AIDA64).
+    {"Firebase Analytics", "FIRAAppDelegateProxy", nullptr},
     {"Crashlytics", "Crashlytics", nullptr},
     {"Crashlytics", "Fabric", nullptr},
     // Gameplay recording, which needs CVOpenGLESTextureCaches over the
