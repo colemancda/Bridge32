@@ -34,9 +34,23 @@ struct Thread {
 
 std::mutex threadsLock;
 std::unordered_map<GuestAddr, Thread *> threads;  // guest pthread_t -> thread
+std::unordered_map<GuestAddr, uint32_t> ports;    // guest pthread_t -> host Mach port
 bool slotsUsed[layout::kMaxThreads] = {true};     // slot 0 is the main thread
 thread_local GuestAddr selfHandle = 0;
-GuestAddr mainHandle = 0;
+
+// Host threads that call into the guest without pthread_create (the main
+// thread, GCD workers, audio threads) get their own pthread_t on first use.
+// Garbage collectors key their thread tables by it, so no two threads may
+// share one: Unity's unregistered the main thread when a worker detached.
+struct HostThreadHandle {
+    GuestAddr handle = 0;
+    ~HostThreadHandle() {
+        if (!handle) return;
+        std::lock_guard guard(threadsLock);
+        ports.erase(handle);
+    }
+};
+thread_local HostThreadHandle hostThreadHandle;
 
 uint32_t takeSlot() {
     std::lock_guard guard(threadsLock);
@@ -150,12 +164,16 @@ B32_THUNK(_pthread_create) {
         threads[handle] = thread;
     }
     Runtime &rt = c.rt;
+    std::lock_guard guard(threadsLock);
     thread->host = std::thread([&rt, thread, handle, start, arg] {
         selfHandle = handle;
         thread->result = rt.runThread(thread->slot, start, arg);
         std::lock_guard guard(threadsLock);
         slotsUsed[thread->slot] = false;
+        ports.erase(handle);
     });
+    // Recorded before the creator can ask for it with pthread_mach_thread_np.
+    ports[handle] = pthread_mach_thread_np(thread->host.native_handle());
     c.mem.write<uint32_t>(out, handle);
     c.ret(0);
 }
@@ -200,10 +218,21 @@ B32_THUNK(_pthread_cancel) {
 
 B32_THUNK(_pthread_self) {
     if (!selfHandle) {
-        if (!mainHandle) mainHandle = c.heap.calloc(1, 16);
-        selfHandle = mainHandle;
+        selfHandle = hostThreadHandle.handle = c.heap.calloc(1, 16);
+        std::lock_guard guard(threadsLock);
+        ports[selfHandle] = pthread_mach_thread_np(pthread_self());
     }
     c.ret(selfHandle);
+}
+
+// mach_port_t pthread_mach_thread_np(pthread_t thread): the thread's host port,
+// which is what mach_thread_self returns on that thread and what
+// thread_suspend takes; 0 once the thread has ended.
+B32_THUNK(_pthread_mach_thread_np) {
+    GuestAddr handle = c.args.ptr();
+    std::lock_guard guard(threadsLock);
+    auto it = ports.find(handle);
+    c.ret(it == ports.end() ? 0 : it->second);
 }
 
 B32_THUNK(_pthread_equal) {
