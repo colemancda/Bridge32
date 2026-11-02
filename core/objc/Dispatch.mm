@@ -198,11 +198,13 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             hostDispatch(c, receiver, sel, nullptr, stret);
             return;
         }
-        if (!start && blocks::isGuestStackBlock(*this, receiver)) {
-            // As on iOS, a stack block's -retain, -release and -autorelease do
-            // nothing. Converting it would make a new autoreleased host block
-            // for each message, and a -release would free that one while its
-            // pool still holds it.
+        if (blocks::isGuestStackBlock(*this, receiver) || isConstantString(receiver)) {
+            // As on iOS, -retain, -release and -autorelease do nothing to a
+            // stack block or a constant string. Converting a stack block would
+            // make a new autoreleased host block for each message, and a
+            // -release would free that one while its pool still holds it; a
+            // constant's host string is kept at +1 and a stray -release (which
+            // apps get away with on iOS) would free it.
             const char *name = selName(sel);
             if (!std::strcmp(name, "retain") || !std::strcmp(name, "autorelease") || !std::strcmp(name, "release")) {
                 cpu.setReg(0, receiver);
@@ -438,6 +440,14 @@ GuestAddr bounceIn(Bridge &bridge, GuestAddr sel, const Signature &sig, void **a
     // -getCharacters:range: fills a unichar buffer as long as the range.
     if (i == 2 && sig.args.size() == 4 && std::strcmp(bridge.selName(sel), "getCharacters:range:") == 0) {
         uint32_t size = uint32_t(static_cast<NSRange *>(args[3])->length * 2);
+        GuestAddr buffer = heap.alloc(size ? size : 1);
+        bounces.push_back({p, buffer, size, nullptr});
+        return buffer;
+    }
+    // -getBytes:maxLength:usedLength:encoding:options:range:remainingRange:
+    // (and -getBytes:maxLength:...) fill a byte buffer of maxLength bytes.
+    if (i == 2 && sig.args.size() > 3 && std::strncmp(bridge.selName(sel), "getBytes:maxLength:", 19) == 0) {
+        uint32_t size = uint32_t(*static_cast<NSUInteger *>(args[3]));
         GuestAddr buffer = heap.alloc(size ? size : 1);
         bounces.push_back({p, buffer, size, nullptr});
         return buffer;
