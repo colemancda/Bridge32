@@ -315,6 +315,24 @@ static void loadMainStoryboard() {
     log("loaded main storyboard %s: %s", name.UTF8String, object_getClassName(root));
 }
 
+// AppKit lines the title bar's separator up with a split view's sidebar
+// (NSThemeFrame's sidebar divider position). For a split view in a scaled
+// guest window it works that out as NaN, and the separator's layer throws on
+// it, killing the app (AIDA64). NaN becomes -1, AppKit's "no divider".
+static void (*originalSetSidebarDividerPosition)(id, SEL, CGFloat);
+static void setSidebarDividerPosition(id self, SEL _cmd, CGFloat position) {
+    originalSetSidebarDividerPosition(self, _cmd, std::isnan(position) ? -1 : position);
+}
+static void guardSidebarDivider() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    Method m = class_getInstanceMethod(NSClassFromString(@"NSTitlebarContainerView"), NSSelectorFromString(@"setSidebarDividerPosition:"));
+    if (!m) return log("no -[NSTitlebarContainerView setSidebarDividerPosition:] to guard");
+    originalSetSidebarDividerPosition = reinterpret_cast<void (*)(id, SEL, CGFloat)>(
+        method_setImplementation(m, reinterpret_cast<IMP>(setSidebarDividerPosition)));
+}
+
 // Named in the shell's UIApplicationSceneManifest.
 @interface B32SceneDelegate : UIResponder <UIWindowSceneDelegate>
 @end
@@ -368,6 +386,7 @@ void forwardToAppDelegate(SEL selector) {
     NSBundle *bundle = [NSBundle mainBundle];
     windowScene.title = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]
                             ?: [bundle objectForInfoDictionaryKey:@"CFBundleName"];
+    guardSidebarDivider();
 
     for (UIWindow *window in pendingWindows) {
         window.windowScene = windowScene;
@@ -376,7 +395,9 @@ void forwardToAppDelegate(SEL selector) {
             reinterpret_cast<void (*)(id, SEL)>(originalMakeKeyAndVisible)(window, @selector(makeKeyAndVisible));
     }
     log("scene connected; attached %lu window(s) created before it", (unsigned long)pendingWindows.count);
-    bool hadWindows = pendingWindows.count > 0;
+    // An app that showed its own window doesn't use the storyboard; a hidden
+    // helper window (AIDA64's 1x1 web view) doesn't count.
+    bool hadWindows = pendingKeyWindows.count > 0;
     // Lay the windows out now, loading their view controllers' views, as
     // iOS does at the end of launch.
     for (UIWindow *window in pendingWindows) [window layoutIfNeeded];
