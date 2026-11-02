@@ -209,6 +209,70 @@ B32_THUNK(_CATransform3DMakeScale) {
     for (int i = 0; i < 16; i++) c.mem.write<float>(out + uint32_t(i) * 4, float(v[i]));
 }
 
+// CATransform3D by value: sixteen floats in the guest, in argument words (the
+// first in whatever registers are left, the rest on the stack) and returned
+// through r0.
+namespace {
+CATransform3D transformArg(Call &c) {
+    CATransform3D t;
+    CGFloat *v = &t.m11;
+    for (int i = 0; i < 16; i++) v[i] = c.args.f32();
+    return t;
+}
+void returnTransform(Call &c, GuestAddr out, const CATransform3D &t) {
+    const CGFloat *v = &t.m11;
+    for (int i = 0; i < 16; i++) c.mem.write<float>(out + uint32_t(i) * 4, float(v[i]));
+}
+}  // namespace
+
+B32_DATA(_CATransform3DIdentity, 64) {
+    for (uint32_t i = 0; i < 4; i++) rt.mem().write<float>(addr + i * 20, 1.0f);
+}
+// CATransform3D CATransform3DMakeRotation(CGFloat angle, CGFloat x, CGFloat y, CGFloat z)
+B32_THUNK(_CATransform3DMakeRotation) {
+    GuestAddr out = c.args.ptr();
+    float angle = c.args.f32(), x = c.args.f32(), y = c.args.f32();
+    returnTransform(c, out, CATransform3DMakeRotation(angle, x, y, c.args.f32()));
+}
+// CATransform3D CATransform3DMakeAffineTransform(CGAffineTransform): six floats by value.
+B32_THUNK(_CATransform3DMakeAffineTransform) {
+    GuestAddr out = c.args.ptr();
+    CGAffineTransform m;
+    m.a = c.args.f32(), m.b = c.args.f32(), m.c = c.args.f32(), m.d = c.args.f32();
+    m.tx = c.args.f32(), m.ty = c.args.f32();
+    returnTransform(c, out, CATransform3DMakeAffineTransform(m));
+}
+// CATransform3D CATransform3DScale/Translate(CATransform3D, CGFloat, CGFloat, CGFloat)
+B32_THUNK(_CATransform3DScale) {
+    GuestAddr out = c.args.ptr();
+    CATransform3D t = transformArg(c);
+    float sx = c.args.f32(), sy = c.args.f32();
+    returnTransform(c, out, CATransform3DScale(t, sx, sy, c.args.f32()));
+}
+B32_THUNK(_CATransform3DTranslate) {
+    GuestAddr out = c.args.ptr();
+    CATransform3D t = transformArg(c);
+    float tx = c.args.f32(), ty = c.args.f32();
+    returnTransform(c, out, CATransform3DTranslate(t, tx, ty, c.args.f32()));
+}
+// CATransform3D CATransform3DRotate(CATransform3D, CGFloat angle, CGFloat x, CGFloat y, CGFloat z)
+B32_THUNK(_CATransform3DRotate) {
+    GuestAddr out = c.args.ptr();
+    CATransform3D t = transformArg(c);
+    float angle = c.args.f32(), x = c.args.f32(), y = c.args.f32();
+    returnTransform(c, out, CATransform3DRotate(t, angle, x, y, c.args.f32()));
+}
+B32_THUNK(_CATransform3DConcat) {
+    GuestAddr out = c.args.ptr();
+    CATransform3D a = transformArg(c);
+    returnTransform(c, out, CATransform3DConcat(a, transformArg(c)));
+}
+B32_THUNK(_CATransform3DInvert) {
+    GuestAddr out = c.args.ptr();
+    returnTransform(c, out, CATransform3DInvert(transformArg(c)));
+}
+B32_THUNK(_CATransform3DIsIdentity) { c.ret(CATransform3DIsIdentity(transformArg(c))); }
+
 // --- CMTime: { int64 value; int32 timescale; uint32 flags; int64 epoch }, 24 bytes, same
 // layout in both ABIs; passed in six words and returned through r0 ---------------------------------
 
