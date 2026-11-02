@@ -452,6 +452,22 @@ B32_THUNK(_CC_SHA256) {
     c.ret(md);
 }
 
+// Incremental digests: CC_MD5_CTX and CC_SHA256_CTX are all 32-bit words on
+// both sides, so the host works on the guest's context in place.
+#define B32_CC_DIGEST(name, Ctx)                                                           \
+    B32_THUNK(_CC_##name##_Init) { c.ret(uint32_t(CC_##name##_Init(c.mem.ptr<Ctx>(c.args.ptr())))); } \
+    B32_THUNK(_CC_##name##_Update) {                                                       \
+        auto *ctx = c.mem.ptr<Ctx>(c.args.ptr());                                          \
+        GuestAddr data = c.args.ptr();                                                     \
+        c.ret(uint32_t(CC_##name##_Update(ctx, c.mem.ptr<void>(data), c.args.u32())));     \
+    }                                                                                      \
+    B32_THUNK(_CC_##name##_Final) {                                                        \
+        auto *md = c.mem.ptr<unsigned char>(c.args.ptr());                                 \
+        c.ret(uint32_t(CC_##name##_Final(md, c.mem.ptr<Ctx>(c.args.ptr()))));              \
+    }
+B32_CC_DIGEST(MD5, CC_MD5_CTX)
+B32_CC_DIGEST(SHA256, CC_SHA256_CTX)
+
 // --- odds and ends ---------------------------------------------------------------------------
 
 // Page-aligned allocation from the guest heap.
