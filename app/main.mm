@@ -40,6 +40,7 @@ int main(int argc, char **argv) {
             std::freopen(log.fileSystemRepresentation, "a", stdout);
         }
         setvbuf(stdout, nullptr, _IOLBF, 0);
+        setvbuf(stderr, nullptr, _IONBF, 0);  // freopen can leave it buffered
 
         // iOS puts the app bundle next to Documents/ in its sandbox, and some
         // engines find their data by looking there.
