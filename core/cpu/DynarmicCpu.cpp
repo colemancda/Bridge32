@@ -5,9 +5,11 @@
 
 #include <dynarmic/interface/A32/a32.h>
 #include <dynarmic/interface/A32/config.h>
+#include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
 #include <atomic>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -131,6 +133,85 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
     uint64_t GetTicksRemaining() override { return UINT64_MAX; }
 };
 
+// Coprocessor instructions. The one iOS user code needs is CP15's thread ID
+// register TPIDRURO (c13, c0, 3), read-only, which holds the thread's TSD
+// address (Cpu::tsd); TPIDRURW (c13, c0, 2) is a word of the thread's own.
+// Old code also issues its memory barriers through CP15. dynarmic asserts when it compiles an instruction a coprocessor turns down,
+// even on a path that never runs, so anything else compiles to a call that
+// is fatal only if the instruction executes. (VFP and NEON, coprocessors 10
+// and 11, never get here.)
+class GuestCoprocessor final : public Dynarmic::A32::Coprocessor {
+public:
+    using CoprocReg = Dynarmic::A32::CoprocReg;
+
+    GuestCoprocessor(unsigned number, uint32_t *tpidruro) : number_(number), tpidruro_(tpidruro) {}
+
+    CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                                              unsigned opc2) override {
+        if (isThreadId(two, opc1, CRn, CRm)) {
+            if (opc2 == 3) return tpidruro_;
+            if (opc2 == 2) return &tpidrurw_;
+        }
+        return unsupported("mrc%s p%u, %u, rN, c%u, c%u, %u", two ? "2" : "", number_, opc1, unsigned(CRn),
+                           unsigned(CRm), opc2);
+    }
+    CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                                               unsigned opc2) override {
+        if (isThreadId(two, opc1, CRn, CRm) && opc2 == 2) return &tpidrurw_;
+        // ARMv6's barriers, still accepted by v7: DSB (c7, c10, 4), DMB (c7, c10, 5), ISB (c7, c5, 4).
+        if (number_ == 15 && !two && opc1 == 0 && CRn == CoprocReg::C7 &&
+            ((CRm == CoprocReg::C10 && (opc2 == 4 || opc2 == 5)) || (CRm == CoprocReg::C5 && opc2 == 4))) {
+            return Callback{[](void *, uint32_t, uint32_t) -> uint64_t {
+                                std::atomic_thread_fence(std::memory_order_seq_cst);
+                                return 0;
+                            },
+                            std::nullopt};
+        }
+        return unsupported("mcr%s p%u, %u, rN, c%u, c%u, %u", two ? "2" : "", number_, opc1, unsigned(CRn),
+                           unsigned(CRm), opc2);
+    }
+    std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, CoprocReg CRd, CoprocReg CRn,
+                                                     CoprocReg CRm, unsigned opc2) override {
+        return unsupported("cdp%s p%u, %u, c%u, c%u, c%u, %u", two ? "2" : "", number_, opc1, unsigned(CRd),
+                           unsigned(CRn), unsigned(CRm), opc2);
+    }
+    CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+        return unsupported("mcrr%s p%u, %u, rN, rM, c%u", two ? "2" : "", number_, opc, unsigned(CRm));
+    }
+    CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+        return unsupported("mrrc%s p%u, %u, rN, rM, c%u", two ? "2" : "", number_, opc, unsigned(CRm));
+    }
+    std::optional<Callback> CompileLoadWords(bool two, bool, CoprocReg CRd, std::optional<uint8_t>) override {
+        return unsupported("ldc%s p%u, c%u", two ? "2" : "", number_, unsigned(CRd));
+    }
+    std::optional<Callback> CompileStoreWords(bool two, bool, CoprocReg CRd, std::optional<uint8_t>) override {
+        return unsupported("stc%s p%u, c%u", two ? "2" : "", number_, unsigned(CRd));
+    }
+
+private:
+    bool isThreadId(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm) const {
+        return number_ == 15 && !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0;
+    }
+
+    // A call that ends the process naming the instruction. The description
+    // outlives the compiled code: it's never freed.
+    static Callback unsupported(const char *fmt, ...) B32_PRINTF(1, 2) {
+        char text[96];
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(text, sizeof text, fmt, args);
+        va_end(args);
+        auto fail = [](void *what, uint32_t, uint32_t) -> uint64_t {
+            fatal("unsupported coprocessor instruction %s", static_cast<std::string *>(what)->c_str());
+        };
+        return Callback{fail, new std::string(text)};
+    }
+
+    unsigned number_;
+    uint32_t *tpidruro_;
+    uint32_t tpidrurw_ = 0;
+};
+
 struct DynarmicCpu::JitHolder {
     Dynarmic::A32::Jit jit;
     explicit JitHolder(Dynarmic::A32::UserConfig config) : jit(config) {}
@@ -159,6 +240,9 @@ DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarm
     // ARMv6 apps sometimes rely on unaligned word accesses, which the A5 and
     // later cores allow, so don't trap misalignment.
     config.detect_misaligned_access_via_page_table = 0;
+    for (unsigned n = 0; n < config.coprocessors.size(); n++) {
+        if (n != 10 && n != 11) config.coprocessors[n] = std::make_shared<GuestCoprocessor>(n, &tsd_);
+    }
     buildJit();
     jit_->jit.SetCpsr(0x10);  // user mode, ARM state
 }
