@@ -48,7 +48,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFSetGetTypeID", "z:"}, {"CFDateGetTypeID", "z:"}, {"CFNullGetTypeID", "z:"}, {"CFURLGetTypeID", "z:"},
     {"CFBooleanGetValue", "B:o"}, {"CFNumberIsFloatType", "B:o"}, {"CFEqual", "B:oo"}, {"CFHash", "z:o"},
     {"CFURLCreateWithFileSystemPath", "o:ooiu"}, {"CFBundleGetMainBundle", "o:"},
-    {"CFBundleCopyResourceURL", "o:oooo"}, {"CFBundleGetValueForInfoDictionaryKey", "o:oo"},
+    {"CFBundleCopyResourceURL", "o:oooo"},
     {"CFLocaleCopyCurrent", "o:"}, {"CFLocaleGetIdentifier", "o:o"}, {"CFLocaleGetSystem", "o:"},
     // Strings, locales, time zones, calendars and formatters (Adobe AIR).
     {"CFStringNormalize", "v:oz"}, {"CFStringCreateWithBytes", "o:opzuu"}, {"CFStringCreateWithCharacters", "o:opz"},
@@ -101,7 +101,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFArrayAppendArray", "v:oozz"}, {"CFArrayRemoveValueAtIndex", "v:oz"},
     
     {"CFArrayRemoveAllValues", "v:o"}, 
-    {"CFBundleGetIdentifier", "o:o"}, {"CFBundleGetInfoDictionary", "o:o"},
+    {"CFBundleGetInfoDictionary", "o:o"},
     {"CFNotificationCenterGetLocalCenter", "o:"}, {"CFNotificationCenterGetDarwinNotifyCenter", "o:"},
     {"CFRunLoopContainsTimer", "B:ooo"},
     {"CFURLCreateStringByAddingPercentEscapes", "o:oooou"},
