@@ -12,12 +12,15 @@
 #include "Dispatch.h"
 
 #include "core/Log.h"
+#include "core/mem/Layout.h"
 #include "core/Runtime.h"
 
 #include <pthread.h>
 
 #include <atomic>
 #include <cstring>
+#include <mutex>
+#include <set>
 
 #import <Foundation/Foundation.h>
 #include <objc/message.h>
@@ -193,7 +196,8 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             return;
         }
         if (!mem.isMapped(receiver) || !mem.isMapped(receiver + 3))
-            fatal("-[%s] sent to unmapped 0x%08x (from 0x%08x)", selName(sel), receiver, cpu.reg(Cpu::LR));
+            fatal("-[%s] sent to unmapped 0x%08x (from 0x%08x; r4-r8 %08x %08x %08x %08x %08x)", selName(sel), receiver,
+                  cpu.reg(Cpu::LR), cpu.reg(4), cpu.reg(5), cpu.reg(6), cpu.reg(7), cpu.reg(8));
         start = classOf(receiver);
         if (!start && guestProtocols_.count(receiver)) {
             // Protocols are objects that live forever: their memory
@@ -359,6 +363,16 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
             std::memcpy(storage[i].data(), &temp, sizeof temp);
         } else {
             toHostValue(t, reinterpret_cast<const uint8_t *>(words.data()), storage[i].data());
+            // B32_TRACE_RAW_POINTERS: pointers into a guest stack the host
+            // gets as they are (void *, or a pointee laid out the same), once
+            // per selector, to find host writes of host-sized values there.
+            static const bool rawTrace = getenv("B32_TRACE_RAW_POINTERS") != nullptr;
+            if (rawTrace && (t.code == '^' || t.code == '*') && words[0] >= layout::kStackBase) {
+                static std::mutex seenLock;
+                static std::set<std::string> seen;
+                std::lock_guard guard(seenLock);
+                if (seen.insert(name).second) log("raw guest stack pointer to -%s, arg %zu (%s)", name, i, types.c_str());
+            }
         }
         values[i] = storage[i].data();
     }
@@ -480,7 +494,10 @@ struct Bounce {
 GuestAddr bounceIn(Bridge &bridge, GuestAddr sel, const Signature &sig, void **args, size_t i,
                    std::vector<Bounce> &bounces) {
     const Type &type = sig.args[i];
-    if (type.code != '^') return 0;
+    // -read:maxLength: (an NSInputStream subclass the host reads from) is the
+    // one caller-supplied byte buffer typed char *, as uint8_t * encodes.
+    bool streamRead = i == 2 && type.code == '*' && std::strcmp(bridge.selName(sel), "read:maxLength:") == 0;
+    if (type.code != '^' && !streamRead) return 0;
     void *p = *static_cast<void **>(args[i]);
     GuestMemory &mem = bridge.runtime().mem();
     auto *bytes = static_cast<uint8_t *>(p);
@@ -494,8 +511,9 @@ GuestAddr bounceIn(Bridge &bridge, GuestAddr sel, const Signature &sig, void **a
         return buffer;
     }
     // -getBytes:maxLength:usedLength:encoding:options:range:remainingRange:
-    // (and -getBytes:maxLength:...) fill a byte buffer of maxLength bytes.
-    if (i == 2 && sig.args.size() > 3 && std::strncmp(bridge.selName(sel), "getBytes:maxLength:", 19) == 0) {
+    // (and -getBytes:maxLength:...) and -read:maxLength: fill a byte buffer of
+    // maxLength bytes.
+    if (i == 2 && sig.args.size() > 3 && (streamRead || std::strncmp(bridge.selName(sel), "getBytes:maxLength:", 19) == 0)) {
         uint32_t size = uint32_t(*static_cast<NSUInteger *>(args[3]));
         GuestAddr buffer = heap.alloc(size ? size : 1);
         bounces.push_back({p, buffer, size, nullptr});
@@ -697,4 +715,70 @@ void Bridge::runLoadMethods(Cpu &cpu) {
     running_ = true;  // from here on, +initialize runs as classes are first used
     for (auto [cls, imp] : loadMethods_) cpu.call(imp, {cls->addr, guestSel("load")});
     loadMethods_.clear();
+}
+
+// --- NSInvocation: argument and result buffers in the guest's layout --------------------------
+// The guest hands -setArgument:atIndex: and the like a pointer to a value laid
+// out for 32 bits (a 4-byte id, a float CGFloat); the host's invocation wants
+// its own layout, so each value is converted by its type in the signature.
+
+namespace {
+bool isInvocation(id receiver) { return [receiver isKindOfClass:[NSInvocation class]]; }
+
+// The invocation's signature with CGFloats marked: from the target's guest
+// implementation of the selector when it has one, else from the selector's words.
+const Signature &invocationSignature(OverrideCall &o) {
+    NSInvocation *invocation = o.receiver;
+    NSMethodSignature *ms = invocation.methodSignature;
+    std::string types = ms.methodReturnType;
+    for (NSUInteger i = 0; i < ms.numberOfArguments; i++) types += [ms getArgumentTypeAtIndex:i];
+    SEL sel = invocation.selector;
+    const std::string *guestTypes = nullptr;
+    if (id target = invocation.target; target && sel) {
+        GuestAddr guestSel = o.bridge.guestSel(sel);
+        for (ClassInfo *k = o.bridge.classOf(o.bridge.toGuest(target)); k && k->isGuest; k = k->super)
+            if (auto it = k->methods.find(guestSel); it != k->methods.end()) {
+                guestTypes = &it->second.types;
+                break;
+            }
+    }
+    return hostCall(types, sel ? sel_getName(sel) : "", guestTypes).sig;
+}
+}  // namespace
+
+// - (void)setArgument:(void *)buffer atIndex:(NSInteger)index, and -getArgument:atIndex:
+B32_OVERRIDE_WHEN(isInvocation, "setArgument:atIndex:") {
+    GuestAddr buffer = o.args.ptr();
+    int32_t index = o.args.i32();
+    const Signature &sig = invocationSignature(o);
+    if (index < 0 || size_t(index) >= sig.args.size()) fatal("-[NSInvocation setArgument:atIndex:%d]: no such argument", index);
+    alignas(16) uint8_t host[256] = {};
+    o.bridge.toHostValue(sig.args[size_t(index)], o.c.mem.ptr<uint8_t>(buffer), host);
+    [(NSInvocation *)o.receiver setArgument:host atIndex:index];
+}
+B32_OVERRIDE_WHEN(isInvocation, "getArgument:atIndex:") {
+    GuestAddr buffer = o.args.ptr();
+    int32_t index = o.args.i32();
+    const Signature &sig = invocationSignature(o);
+    if (index < 0 || size_t(index) >= sig.args.size()) fatal("-[NSInvocation getArgument:atIndex:%d]: no such argument", index);
+    alignas(16) uint8_t host[256] = {};
+    [(NSInvocation *)o.receiver getArgument:host atIndex:index];
+    o.bridge.toGuestValue(sig.args[size_t(index)], host, o.c.mem.ptr<uint8_t>(buffer));
+}
+// - (void)getReturnValue:(void *)buffer and -setReturnValue:
+B32_OVERRIDE_WHEN(isInvocation, "getReturnValue:") {
+    GuestAddr buffer = o.args.ptr();
+    const Signature &sig = invocationSignature(o);
+    if (sig.ret.code == 'v') return;
+    alignas(16) uint8_t host[256] = {};
+    [(NSInvocation *)o.receiver getReturnValue:host];
+    o.bridge.toGuestValue(sig.ret, host, o.c.mem.ptr<uint8_t>(buffer));
+}
+B32_OVERRIDE_WHEN(isInvocation, "setReturnValue:") {
+    GuestAddr buffer = o.args.ptr();
+    const Signature &sig = invocationSignature(o);
+    if (sig.ret.code == 'v') return;
+    alignas(16) uint8_t host[256] = {};
+    o.bridge.toHostValue(sig.ret, o.c.mem.ptr<uint8_t>(buffer), host);
+    [(NSInvocation *)o.receiver setReturnValue:host];
 }
