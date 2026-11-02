@@ -37,6 +37,14 @@ public:
     virtual uint32_t extReg(int n) const = 0;
     virtual void setExtReg(int n, uint32_t value) = 0;
 
+    // The thread's pthread_getspecific slots, kTsdSlots words of guest memory
+    // indexed by key. Darwin hands their address to user code in the thread
+    // ID register TPIDRURO, and engines (Mono, Unity) read it there with
+    // mrc p15 instead of calling pthread_getspecific.
+    static constexpr uint32_t kTsdSlots = 768;
+    GuestAddr tsd() const { return tsd_; }
+    void setTsd(GuestAddr addr) { tsd_ = addr; }
+
     // Jumps to addr; bit 0 selects Thumb state.
     void jump(GuestAddr addr);
 
@@ -95,6 +103,8 @@ protected:
     // Makes the running guest code return to runUntilSvc soon; called from
     // another thread.
     virtual void requestHalt() = 0;
+
+    uint32_t tsd_ = 0;  // TPIDRURO; the JIT reads it in place
 
 private:
     GuestMemory &mem_;
