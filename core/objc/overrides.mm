@@ -609,3 +609,11 @@ B32_OVERRIDE_WHEN(isObjectArray, "replacePointerAtIndex:withPointer:") {
 B32_OVERRIDE_WHEN(isObjectArray, "pointerAtIndex:") {
     o.c.ret(o.bridge.toGuest((id)[static_cast<NSPointerArray *>(o.receiver) pointerAtIndex:o.args.u32()]));
 }
+
+// --- NSProcessInfo ------------------------------------------------------------------------------
+// - (unsigned long long)physicalMemory: the 512 MB the guest is told
+// everywhere else (hw.memsize, host_statistics), not the Mac's (AIDA64
+// showed it as 256 GB).
+B32_OVERRIDE_WHEN([](id receiver) { return [receiver isKindOfClass:[NSProcessInfo class]]; }, "physicalMemory") {
+    o.c.ret64(uint64_t(512) << 20);
+}
