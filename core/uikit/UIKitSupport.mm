@@ -103,6 +103,26 @@ NSMutableSet<UIWindow *> *pendingKeyWindows = nil;  // ...and asked to become ke
 IMP originalInitWithFrame = nullptr;
 IMP originalInitWithCoder = nullptr;
 IMP originalMakeKeyAndVisible = nullptr;
+IMP originalViewControllerInitWithNib = nullptr;
+IMP originalViewControllerInitWithCoder = nullptr;
+
+// Before iOS 13 a presented view controller covered the screen. On the Mac
+// one starts out a form sheet, presented in a window of its own (Shantae's
+// game view), so for older guests each starts out full screen; a style set
+// afterwards (an iPad form sheet, UIAlertController's own) still applies.
+id viewControllerInitWithNib(UIViewController *self, SEL _cmd, NSString *nib, NSBundle *bundle) {
+    self = reinterpret_cast<id (*)(id, SEL, NSString *, NSBundle *)>(originalViewControllerInitWithNib)(self, _cmd, nib, bundle);
+    if (self) self.modalPresentationStyle = UIModalPresentationFullScreen;
+    return self;
+}
+id viewControllerInitWithCoder(UIViewController *self, SEL _cmd, NSCoder *coder) {
+    self = reinterpret_cast<id (*)(id, SEL, NSCoder *)>(originalViewControllerInitWithCoder)(self, _cmd, coder);
+    // A form sheet decoded from a nib can't be told from the Mac's default,
+    // so it's full screen too.
+    if (self && self.modalPresentationStyle == UIModalPresentationFormSheet)
+        self.modalPresentationStyle = UIModalPresentationFullScreen;
+    return self;
+}
 
 // Windows from the main nib arrive through -initWithCoder:.
 id windowInitWithCoder(UIWindow *self, SEL _cmd, NSCoder *coder) {
@@ -145,6 +165,15 @@ void writeGuestRect(GuestMemory &mem, GuestAddr out, CGFloat x, CGFloat y, CGFlo
 }
 
 bool isScreen(id receiver) { return [receiver isKindOfClass:[UIScreen class]]; }
+bool isApplication(id receiver) { return [receiver isKindOfClass:[UIApplication class]]; }
+
+// Whether the guest's status bar is hidden, as UIStatusBarHidden in its
+// Info.plist starts it and -setStatusBarHidden: changes it. The Mac shows
+// none, but applicationFrame leaves room for one that's showing.
+bool &statusBarHidden() {
+    static bool hidden = [[NSBundle.mainBundle objectForInfoDictionaryKey:@"UIStatusBarHidden"] boolValue];
+    return hidden;
+}
 bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 
 }  // namespace
@@ -415,6 +444,13 @@ void b32::uikit::configureHost() {
     originalInitWithCoder = method_setImplementation(coder, reinterpret_cast<IMP>(windowInitWithCoder));
     Method key = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
     originalMakeKeyAndVisible = method_setImplementation(key, reinterpret_cast<IMP>(windowMakeKeyAndVisible));
+    if ([[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32GuestSDKVersion"] doubleValue] < 13) {
+        Method nib = class_getInstanceMethod([UIViewController class], @selector(initWithNibName:bundle:));
+        originalViewControllerInitWithNib = method_setImplementation(nib, reinterpret_cast<IMP>(viewControllerInitWithNib));
+        Method vcCoder = class_getInstanceMethod([UIViewController class], @selector(initWithCoder:));
+        originalViewControllerInitWithCoder =
+            method_setImplementation(vcCoder, reinterpret_cast<IMP>(viewControllerInitWithCoder));
+    }
 
     // Private classes old nibs name that UIKit has since dropped, each
     // standing in as a plain subclass of what it was.
@@ -458,8 +494,13 @@ B32_OVERRIDE_WHEN(isScreen, "bounds") {
     writeGuestRect(o.c.mem, o.retPtr, 0, 0, screenWidth(), screenHeight());
 }
 B32_OVERRIDE_WHEN(isScreen, "applicationFrame") {
-    writeGuestRect(o.c.mem, o.retPtr, 0, kStatusBarHeight, screenWidth(), screenHeight() - kStatusBarHeight);
+    CGFloat bar = statusBarHidden() ? 0 : kStatusBarHeight;
+    writeGuestRect(o.c.mem, o.retPtr, 0, bar, screenWidth(), screenHeight() - bar);
 }
+B32_OVERRIDE_WHEN(isApplication, "setStatusBarHidden:", "setStatusBarHidden:animated:", "setStatusBarHidden:withAnimation:") {
+    statusBarHidden() = o.args.u32() & 0xff;
+}
+B32_OVERRIDE_WHEN(isApplication, "isStatusBarHidden") { o.c.ret(uint32_t(statusBarHidden())); }
 B32_OVERRIDE_WHEN(isScreen, "scale") { o.c.retF32(1.0f); }
 // nativeBounds is in the portrait-up orientation whatever the interface's, so
 // games that swap it for landscape (Angry Birds Friends) get it the right way.
