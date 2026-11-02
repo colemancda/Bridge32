@@ -62,7 +62,7 @@ char buffersKey;
 namespace layout32 {
 constexpr uint32_t kClassIsa = 0, kClassSuper = 4, kClassData = 16, kClassSize = 20;
 constexpr uint32_t kRoFlags = 0, kRoInstanceStart = 4, kRoInstanceSize = 8, kRoName = 16, kRoMethods = 20,
-                   kRoProtocols = 24, kRoIvars = 28;
+                   kRoProtocols = 24, kRoIvars = 28, kRoProperties = 36;
 constexpr uint32_t kRoMeta = 1;
 constexpr uint32_t kCategoryName = 0, kCategoryClass = 4, kCategoryInstanceMethods = 8, kCategoryClassMethods = 12;
 }  // namespace layout32
@@ -499,7 +499,40 @@ void Bridge::collectProtocols(GuestAddr list, std::vector<std::string> &names) {
     }
 }
 
-void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
+namespace {
+// The guest's declared properties (property_list_t { entsize, count,
+// property_t { name, attributes }... }) on its shadow class, for host code
+// that reads them: Core Data's dynamic accessors take their types from the
+// @property, and without one they'd treat a scalar attribute as an object.
+// The attribute strings ("Ti,N,V_count") use 32-bit type encodings, which
+// mean the same here (a 32-bit long is still 'l').
+void addGuestProperties(Class shadow, GuestMemory &mem, GuestAddr list) {
+    uint32_t entsize = mem.read<uint32_t>(list) & ~3u, count = mem.read<uint32_t>(list + 4);
+    for (uint32_t i = 0; i < count; i++) {
+        GuestAddr property = list + 8 + i * entsize;
+        GuestAddr name = mem.read<uint32_t>(property), attributes = mem.read<uint32_t>(property + 4);
+        if (!name || !attributes) continue;
+        // "T@\"NSString\",C,N" -> {T, @"NSString"}, {C, ""}, {N, ""}. Type
+        // encodings don't contain commas, so splitting on them is safe.
+        // class_addProperty copies the attributes, so they can be temporaries.
+        std::vector<std::string> names, values;
+        std::string text = mem.cstr(attributes);
+        for (size_t start = 0; start <= text.size();) {
+            size_t comma = std::min(text.find(',', start), text.size());
+            if (comma > start) {
+                names.push_back(text.substr(start, 1));
+                values.push_back(text.substr(start + 1, comma - start - 1));
+            }
+            start = comma + 1;
+        }
+        std::vector<objc_property_attribute_t> attrs;
+        for (size_t k = 0; k < names.size(); k++) attrs.push_back({names[k].c_str(), values[k].c_str()});
+        class_addProperty(shadow, mem.cstr(name), attrs.data(), unsigned(attrs.size()));
+    }
+}
+}  // namespace
+
+void Bridge::createShadowClass(ClassInfo *cls, GuestAddr ro) {
     ClassInfo *super = cls->super;
     // A guest root class (the Swift runtime's SwiftObject) gets an NSObject
     // shadow, so its objects can reach the host; its own NSObject-protocol
@@ -527,6 +560,9 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr) {
     objc_registerClassPair(shadow);
     byHostClass_[shadow] = cls;
     byHostClass_[cls->meta->host] = cls->meta;
+    if (ro)
+        if (GuestAddr properties = rt_.mem().read<uint32_t>(ro + layout32::kRoProperties))
+            addGuestProperties(shadow, rt_.mem(), properties);
     for (auto &[sel, method] : cls->methods) installTrampoline(shadow, sel, method, cls);
     // The bridge runs +initialize itself (ensureInitialized), so the host's runtime doesn't get one.
     for (auto &[sel, method] : cls->meta->methods)
@@ -802,6 +838,12 @@ GuestAddr Bridge::toGuest(id object) {
         }
     }
     return allocObject(object, stubFor(cls), kObjectHeaderSize);
+}
+
+bool Bridge::isConstantString(GuestAddr object) const {
+    for (auto [begin, end] : cfstringSections_)
+        if (object >= begin && object < end) return true;
+    return false;
 }
 
 id Bridge::cfstringToHost(GuestAddr addr) {
