@@ -6,6 +6,7 @@
 #include "Format.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "core/objc/Blocks.h"
 #include "core/objc/Bridge.h"
 
 #import <Foundation/Foundation.h>
@@ -272,6 +273,32 @@ B32_THUNK(_CFDictionaryCreateMutable) {
                                                                                 : nullptr;
     CFMutableDictionaryRef dict = CFDictionaryCreateMutable(nullptr, capacity, hostKeys, hostValues);
     markRaw((id)dict, (keys != Callbacks::Objects ? kRawKeys : 0) | (values != Callbacks::Objects ? kRawValues : 0));
+    c.ret(bridge(c).toGuest((id)dict));
+}
+
+// CFDictionaryRef CFDictionaryCreate(CFAllocatorRef, const void **keys, const void **values, CFIndex count,
+//     const CFDictionaryKeyCallBacks *, const CFDictionaryValueCallBacks *)
+B32_THUNK(_CFDictionaryCreate) {
+    c.args.ptr();
+    GuestAddr keyList = c.args.ptr(), valueList = c.args.ptr();
+    int32_t count = c.args.i32();
+    GuestAddr keyCallbacks = c.args.ptr(), valueCallbacks = c.args.ptr();
+    Callbacks keys = callbacksKind(c, keyCallbacks, "_kCFTypeDictionaryKeyCallBacks", "_kCFCopyStringDictionaryKeyCallBacks");
+    Callbacks values = callbacksKind(c, valueCallbacks, "_kCFTypeDictionaryValueCallBacks");
+    const CFDictionaryKeyCallBacks *hostKeys = keys == Callbacks::Objects ? &kCFTypeDictionaryKeyCallBacks
+                                             : keys == Callbacks::Guest   ? hostKeyCallbacks(c, keyCallbacks)
+                                                                          : nullptr;
+    const CFDictionaryValueCallBacks *hostValues = values == Callbacks::Objects ? &kCFTypeDictionaryValueCallBacks
+                                                 : values == Callbacks::Guest   ? hostValueCallbacks(c, valueCallbacks)
+                                                                                : nullptr;
+    bool rawKeys = keys != Callbacks::Objects, rawValues = values != Callbacks::Objects;
+    std::vector<const void *> k(size_t(std::max(count, 0))), v(k.size());
+    for (int32_t i = 0; i < count; i++) {
+        k[size_t(i)] = hostValue(c, rawKeys, c.mem.read<uint32_t>(keyList + uint32_t(i) * 4));
+        v[size_t(i)] = hostValue(c, rawValues, c.mem.read<uint32_t>(valueList + uint32_t(i) * 4));
+    }
+    CFDictionaryRef dict = CFDictionaryCreate(nullptr, k.data(), v.data(), count, hostKeys, hostValues);
+    markRaw((id)dict, (rawKeys ? kRawKeys : 0) | (rawValues ? kRawValues : 0));
     c.ret(bridge(c).toGuest((id)dict));
 }
 
@@ -678,6 +705,32 @@ B32_THUNK(_CFDictionaryApplyFunction) {
                         context});
 }
 
+// --- allocators -----------------------------------------------------------------------------
+//
+// CF objects live on the host, which never allocates through guest code, so
+// a guest allocator (AIDA64 wraps the default one to count memory) is never
+// installed: creating one gives back the default allocator, and the context
+// of any allocator is empty.
+
+// void CFAllocatorGetContext(CFAllocatorRef, CFAllocatorContext *): the guest
+// context is { version, info, retain, release, copyDescription, allocate,
+// reallocate, deallocate, preferredSize }.
+B32_THUNK(_CFAllocatorGetContext) {
+    c.args.ptr();
+    GuestAddr context = c.args.ptr();
+    for (uint32_t i = 1; i < 9; i++) c.mem.write<uint32_t>(context + i * 4, 0);
+}
+
+// CFAllocatorRef CFAllocatorCreate(CFAllocatorRef, CFAllocatorContext *)
+B32_THUNK(_CFAllocatorCreate) {
+    CFAllocatorRef allocator = CFAllocatorGetDefault();
+    CFRetain(allocator);
+    c.ret(bridge(c).toGuest((id)allocator));
+}
+
+// void CFAllocatorSetDefault(CFAllocatorRef)
+B32_THUNK(_CFAllocatorSetDefault) {}
+
 // --- run loop observers ---------------------------------------------------------------------
 
 namespace {
@@ -705,6 +758,29 @@ B32_THUNK(_CFRunLoopObserverCreate) {
     if (GuestAddr context = c.args.ptr()) o->info = c.mem.read<uint32_t>(context + 4);
     CFRunLoopObserverContext context = {0, o, nullptr, nullptr, nullptr};
     CFRunLoopObserverRef observer = CFRunLoopObserverCreate(nullptr, activities, repeats, order, observerFired, &context);
+    o->observer = bridge(c).toGuest((id)observer);
+    c.ret(o->observer);
+}
+
+namespace {
+// The guest block (a heap copy, kept for the observer's life) in `callout`.
+void observerBlockFired(CFRunLoopObserverRef, CFRunLoopActivity activity, void *data) {
+    auto *o = static_cast<GuestObserver *>(data);
+    Cpu &cpu = Runtime::threadCpu();
+    cpu.call(cpu.mem().read<uint32_t>(o->callout + 12), {o->callout, o->observer, uint32_t(activity)});  // its invoke
+}
+}  // namespace
+
+// CFRunLoopObserverRef CFRunLoopObserverCreateWithHandler(CFAllocatorRef, CFOptionFlags activities,
+//     Boolean repeats, CFIndex order, void (^)(CFRunLoopObserverRef, CFRunLoopActivity))
+B32_THUNK(_CFRunLoopObserverCreateWithHandler) {
+    c.args.ptr();
+    CFOptionFlags activities = c.args.u32();
+    Boolean repeats = c.args.u32() != 0;
+    CFIndex order = c.args.i32();
+    auto *o = new GuestObserver{objc::blocks::copy(bridge(c), c.args.ptr()), 0, 0};
+    CFRunLoopObserverContext context = {0, o, nullptr, nullptr, nullptr};
+    CFRunLoopObserverRef observer = CFRunLoopObserverCreate(nullptr, activities, repeats, order, observerBlockFired, &context);
     o->observer = bridge(c).toGuest((id)observer);
     c.ret(o->observer);
 }
