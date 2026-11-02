@@ -4,6 +4,7 @@
 #include "core/Log.h"
 
 #include <algorithm>
+#include <cstring>
 
 namespace b32 {
 
@@ -84,6 +85,11 @@ void GuestHeap::freeLocked(GuestAddr addr) {
     if (it == live_.end()) fatal("guest free of unknown pointer 0x%08x", addr);
     uint32_t size = it->second;
     live_.erase(it);
+    // Cleared, so a block comes back zeroed, padding to the grain included, as
+    // fresh heap memory is: games read past what they asked for, counting on
+    // that (cocos2d-x's base64Decode leaves its result unterminated, and
+    // SuShi takes its strlen).
+    std::memset(mem_.ptr<uint8_t>(addr), 0, size);
     insertFree(addr, size);
 }
 
