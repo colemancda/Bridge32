@@ -18,6 +18,7 @@
 #import <UIKit/UIKit.h>
 #include <algorithm>
 #include <crt_externs.h>
+#include <dlfcn.h>
 #include <cstring>
 #include <objc/message.h>
 #include <objc/runtime.h>
@@ -53,8 +54,60 @@ bool boundsFollowOrientation() {
     return follow;
 }
 
+NSHashTable<UIWindow *> *guestWindows = nil;
+
+// The interface orientation the device is turned to, and its mask bit.
+UIInterfaceOrientation deviceOrientation() {
+    CGFloat rotation = deviceRotation();
+    return rotation > 0 ? UIInterfaceOrientationLandscapeLeft
+         : rotation < 0 ? UIInterfaceOrientationLandscapeRight
+                        : UIInterfaceOrientationPortrait;
+}
+
+// Whether a method is the guest's own: guest methods are bridge trampolines,
+// which live in no loaded image.
+bool guestImplements(id object, SEL sel) {
+    Dl_info info{};
+    IMP imp = class_getMethodImplementation(object_getClass(object), sel);
+    return imp && !dladdr((void *)imp, &info);
+}
+
+// Before iOS 8 the screen stayed portrait, and a root view controller that
+// supported the orientation the app started in was turned to it by UIKit:
+// its view got landscape bounds and the game drew upright (Shantae). Games
+// whose controllers didn't (or that had none) drew turned themselves. Here a
+// game of the first kind gets an upright window with landscape bounds, which
+// gives its view controllers' views the same; one of the second kind gets
+// the turned window. Decided once the guest has a root view controller,
+// asked as iOS 6 and 7 asked it, or iOS 5 and earlier for older guests.
+bool viewControllersRotate() {
+    static int decided = -1;
+    if (decided >= 0) return decided;
+    if (boundsFollowOrientation() || deviceRotation() == 0) return decided = 0;
+    for (UIWindow *window in guestWindows) {
+        UIViewController *root = window.rootViewController;
+        if (!root) continue;
+        UIInterfaceOrientation orientation = deviceOrientation();
+        bool rotates;
+        if ([[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32GuestSDKVersion"] doubleValue] >= 6) {
+            UIInterfaceOrientationMask allowed = root.supportedInterfaceOrientations &
+                [UIApplication.sharedApplication supportedInterfaceOrientationsForWindow:window];
+            rotates = allowed & (1u << orientation);
+        } else {
+            // iOS 5's own -shouldAutorotateToInterfaceOrientation: allowed only portrait.
+            SEL should = sel_registerName("shouldAutorotateToInterfaceOrientation:");
+            rotates = guestImplements(root, should) &&
+                      reinterpret_cast<BOOL (*)(id, SEL, NSInteger)>(objc_msgSend)(root, should, orientation);
+        }
+        log("the root view controller %s turn to landscape: %s", rotates ? "would" : "wouldn't",
+            rotates ? "the window stands upright" : "the window is turned");
+        return decided = rotates;
+    }
+    return false;
+}
+
 // How far the guest's window is turned on the Mac.
-CGFloat guestRotation() { return boundsFollowOrientation() ? 0 : deviceRotation(); }
+CGFloat guestRotation() { return boundsFollowOrientation() || viewControllersRotate() ? 0 : deviceRotation(); }
 
 // The screen the guest sees: portrait, or landscape for a landscape game
 // built for iOS 8 and later.
@@ -62,11 +115,11 @@ bool screenSwapped() { return boundsFollowOrientation() && deviceRotation() != 0
 CGFloat screenWidth() { return screenSwapped() ? device::current().screenHeight : device::current().screenWidth; }
 CGFloat screenHeight() { return screenSwapped() ? device::current().screenWidth : device::current().screenHeight; }
 
+// The guest's windows as the Mac shows them, turned or with landscape bounds.
 CGSize sceneSize() {
-    return guestRotation() != 0 ? CGSizeMake(screenHeight(), screenWidth()) : CGSizeMake(screenWidth(), screenHeight());
+    return guestRotation() != 0 || viewControllersRotate() ? CGSizeMake(screenHeight(), screenWidth())
+                                                           : CGSizeMake(screenWidth(), screenHeight());
 }
-
-NSHashTable<UIWindow *> *guestWindows = nil;
 UIView *backdrop = nil;
 
 // Fits every guest window into the Mac window: turned to the device
@@ -82,6 +135,7 @@ void layoutGuestWindows() {
     CGAffineTransform transform = CGAffineTransformScale(CGAffineTransformMakeRotation(guestRotation()), scale, scale);
     for (UIWindow *window in guestWindows) {
         window.transform = transform;
+        if (viewControllersRotate()) window.bounds = CGRectMake(0, 0, size.width, size.height);
         window.center = CGPointMake(CGRectGetMidX(area), CGRectGetMidY(area));
     }
     gl::setDisplayZoom(scale);
@@ -103,6 +157,7 @@ NSMutableSet<UIWindow *> *pendingKeyWindows = nil;  // ...and asked to become ke
 IMP originalInitWithFrame = nullptr;
 IMP originalInitWithCoder = nullptr;
 IMP originalMakeKeyAndVisible = nullptr;
+IMP originalSetRootViewController = nullptr;
 IMP originalViewControllerInitWithNib = nullptr;
 IMP originalViewControllerInitWithCoder = nullptr;
 
@@ -147,6 +202,12 @@ id windowInitWithFrame(UIWindow *self, SEL _cmd, CGRect frame) {
     self = reinterpret_cast<id (*)(id, SEL, CGRect)>(originalInitWithFrame)(self, _cmd, frame);
     if (self) [pendingWindows addObject:self];
     return self;
+}
+
+// A root view controller settles whether the window is turned (see viewControllersRotate).
+void windowSetRootViewController(UIWindow *self, SEL _cmd, UIViewController *controller) {
+    reinterpret_cast<void (*)(id, SEL, id)>(originalSetRootViewController)(self, _cmd, controller);
+    if ([guestWindows containsObject:self]) layoutGuestWindows();
 }
 
 void windowMakeKeyAndVisible(UIWindow *self, SEL _cmd) {
@@ -444,6 +505,8 @@ void b32::uikit::configureHost() {
     originalInitWithCoder = method_setImplementation(coder, reinterpret_cast<IMP>(windowInitWithCoder));
     Method key = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
     originalMakeKeyAndVisible = method_setImplementation(key, reinterpret_cast<IMP>(windowMakeKeyAndVisible));
+    Method root = class_getInstanceMethod([UIWindow class], @selector(setRootViewController:));
+    originalSetRootViewController = method_setImplementation(root, reinterpret_cast<IMP>(windowSetRootViewController));
     if ([[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32GuestSDKVersion"] doubleValue] < 13) {
         Method nib = class_getInstanceMethod([UIViewController class], @selector(initWithNibName:bundle:));
         originalViewControllerInitWithNib = method_setImplementation(nib, reinterpret_cast<IMP>(viewControllerInitWithNib));
@@ -501,6 +564,16 @@ B32_OVERRIDE_WHEN(isApplication, "setStatusBarHidden:", "setStatusBarHidden:anim
     statusBarHidden() = o.args.u32() & 0xff;
 }
 B32_OVERRIDE_WHEN(isApplication, "isStatusBarHidden") { o.c.ret(uint32_t(statusBarHidden())); }
+// The interface is in the orientation the game started in, and a view
+// controller UIKit would have turned (or any, from iOS 8) is in it too.
+B32_OVERRIDE_WHEN(isApplication, "statusBarOrientation") { o.c.ret(uint32_t(deviceOrientation())); }
+namespace {
+bool isController(id receiver) { return [receiver isKindOfClass:[UIViewController class]]; }
+}  // namespace
+B32_OVERRIDE_WHEN(isController, "interfaceOrientation") {
+    bool turned = boundsFollowOrientation() || viewControllersRotate();
+    o.c.ret(uint32_t(turned ? deviceOrientation() : UIInterfaceOrientationPortrait));
+}
 B32_OVERRIDE_WHEN(isScreen, "scale") { o.c.retF32(1.0f); }
 // nativeBounds is in the portrait-up orientation whatever the interface's, so
 // games that swap it for landscape (Angry Birds Friends) get it the right way.
