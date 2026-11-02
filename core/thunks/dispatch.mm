@@ -88,6 +88,10 @@ B32_THUNK(_dispatch_get_main_queue) { c.ret(guest(c, dispatch_get_main_queue()))
 B32_THUNK(_dispatch_get_current_queue) { c.ret(guest(c, dispatch_get_current_queue())); }
 #pragma clang diagnostic pop
 
+// dispatch_queue_attr_t dispatch_queue_attr_make_with_qos_class(dispatch_queue_attr_t,
+//     dispatch_qos_class_t, int relative_priority): the QoS is dropped, the attr kept.
+B32_THUNK(_dispatch_queue_attr_make_with_qos_class) { c.ret(c.args.ptr()); }
+
 // dispatch_queue_t dispatch_queue_create(const char *label, dispatch_queue_attr_t attr)
 B32_THUNK(_dispatch_queue_create) {
     GuestAddr label = c.args.ptr();
@@ -287,6 +291,7 @@ B32_THUNK(_dispatch_source_set_cancel_handler) {
     dispatch_source_set_cancel_handler(source, object<dispatch_block_t>(c));
 }
 B32_THUNK(_dispatch_source_cancel) { dispatch_source_cancel(object<dispatch_source_t>(c)); }
+B32_THUNK(_dispatch_source_testcancel) { c.ret(uint32_t(dispatch_source_testcancel(object<dispatch_source_t>(c)))); }
 B32_THUNK(_dispatch_source_get_data) { c.ret(uint32_t(dispatch_source_get_data(object<dispatch_source_t>(c)))); }
 B32_THUNK(_dispatch_source_merge_data) {
     auto source = object<dispatch_source_t>(c);
