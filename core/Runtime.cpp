@@ -60,7 +60,7 @@ Cpu &Runtime::threadCpu() {
     // created with pthread_create take them from the bottom up.
     uint32_t slot = layout::kMaxThreads - 1 - uint32_t(rt.attachedCpus_.size());
     if (slot < layout::kMaxThreads / 2) fatal("too many host threads calling into the guest");
-    auto cpu = rt.makeCpu_(*rt.mem_, [&rt](Cpu &c, uint32_t imm) { rt.thunks_->dispatch(rt, c, imm); });
+    auto cpu = rt.newCpu();
     GuestAddr stackBottom = layout::kStackBase + slot * layout::kStackSize;
     rt.mem_->map(stackBottom, layout::kStackSize);
     cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
@@ -73,6 +73,8 @@ Cpu &Runtime::threadCpu() {
 
 void Runtime::detachThreadCpu(Cpu *cpu, GuestAddr stackTop) {
     cpu->unbindThread();
+    // The next thread to take the CPU starts with empty pthread slots.
+    std::memset(mem_->ptr<uint8_t>(cpu->tsd()), 0, Cpu::kTsdSlots * 4);
     std::lock_guard guard(attachLock_);
     idleCpus_.emplace_back(cpu, stackTop);
 }
@@ -90,12 +92,18 @@ Runtime::Runtime(CpuFactory makeCpu)
       nextLibraryBase_(layout::kLibraryBase) {
     instance = this;
     bridge_ = std::make_unique<objc::Bridge>(*this);
-    cpu_ = makeCpu_(*mem_, [this](Cpu &cpu, uint32_t imm) { thunks_->dispatch(*this, cpu, imm); });
+    cpu_ = newCpu();
+}
+
+std::unique_ptr<Cpu> Runtime::newCpu() {
+    auto cpu = makeCpu_(*mem_, [this](Cpu &c, uint32_t imm) { thunks_->dispatch(*this, c, imm); });
+    cpu->setTsd(heap_->calloc(Cpu::kTsdSlots, 4));
+    return cpu;
 }
 
 uint32_t Runtime::runThread(uint32_t slot, GuestAddr fn, GuestAddr arg) {
     if (slot == 0 || slot >= layout::kMaxThreads) fatal("bad guest thread slot %u", slot);
-    std::unique_ptr<Cpu> cpu = makeCpu_(*mem_, [this](Cpu &c, uint32_t imm) { thunks_->dispatch(*this, c, imm); });
+    std::unique_ptr<Cpu> cpu = newCpu();
     GuestAddr stackBottom = layout::kStackBase + slot * layout::kStackSize;
     if (!mem_->isMapped(stackBottom)) mem_->map(stackBottom, layout::kStackSize);
     cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
@@ -112,6 +120,7 @@ uint32_t Runtime::runThread(uint32_t slot, GuestAddr fn, GuestAddr arg) {
     }
     objc_autoreleasePoolPop(pool);
     cpu->unbindThread();
+    heap_->free(cpu->tsd());
     currentCpuForThread = nullptr;
     return result;
 }
