@@ -138,15 +138,21 @@ B32_THUNK(_alcGetProcAddress) {
 B32_THUNK(_alGetProcAddress) { c.ret(procAddress(c, c.args.ptr())); }
 
 // void alBufferDataStatic(ALint buffer, ALenum format, ALvoid *data, ALsizei size, ALsizei freq):
-// Apple's zero-copy variant; a copy does the same here.
+// Apple's zero-copy variant, which the host's OpenAL has too. Guest memory
+// never moves, so the buffer plays from the guest's own bytes: engines stream
+// music by rewriting them in place (Sonic CD), which a copy would miss.
 B32_THUNK(_alBufferDataStatic) {
-    static auto bufferData = reinterpret_cast<void (*)(uint32_t, int32_t, const void *, int32_t, int32_t)>(
-        dlsym(openAL(), "alBufferData"));
-    uint32_t buffer = c.args.u32();
+    using BufferData = void (*)(int32_t, int32_t, const void *, int32_t, int32_t);
+    static auto bufferDataStatic = [] {
+        auto getProcAddress = reinterpret_cast<void *(*)(const char *)>(dlsym(openAL(), "alGetProcAddress"));
+        return reinterpret_cast<BufferData>(getProcAddress("alBufferDataStatic"));
+    }();
+    static auto bufferData = reinterpret_cast<BufferData>(dlsym(openAL(), "alBufferData"));
+    int32_t buffer = c.args.i32();
     int32_t format = c.args.i32();
     GuestAddr data = c.args.ptr();
     int32_t size = c.args.i32();
-    bufferData(buffer, format, c.mem.ptr<void>(data), size, c.args.i32());
+    (bufferDataStatic ?: bufferData)(buffer, format, c.mem.ptr<void>(data), size, c.args.i32());
 }
 
 // The host mixes at its own rate.
