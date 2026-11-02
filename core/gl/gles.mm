@@ -95,7 +95,7 @@ constexpr CFunction kFunctions[] = {
     
     {"glCheckFramebufferStatusOES", "u:u"},
     {"glResolveMultisampleFramebufferAPPLE", "v:"}, {"glDiscardFramebufferEXT", "v:uip"},
-    {"glInvalidateFramebuffer", "v:uip"}, {"glShaderBinary", "v:ipupi"}, {"glLabelObjectEXT", "v:uuip"},
+    {"glInvalidateFramebuffer", "v:uip"}, {"glDrawBuffers", "v:ip"}, {"glShaderBinary", "v:ipupi"}, {"glLabelObjectEXT", "v:uuip"},
     {"glGetObjectLabelEXT", "v:uuipp"}, {"glInsertEventMarkerEXT", "v:ip"}, {"glPushGroupMarkerEXT", "v:ip"},
     {"glPopGroupMarkerEXT", "v:"}, 
     {"glGetFramebufferAttachmentParameterivOES", "v:uuup"}, 
