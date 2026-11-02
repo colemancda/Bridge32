@@ -105,5 +105,5 @@ fi
 [ -n "$controller" ] && /usr/libexec/PlistBuddy -c "Add :B32Controller string $controller" "$out/Contents/Info.plist"
 [ -n "$fps" ] && /usr/libexec/PlistBuddy -c "Add :B32ShowFPS bool true" "$out/Contents/Info.plist"
 
-codesign --force --sign - --entitlements "$root/app/Bridge32.entitlements" "$out"
+"$here/sign-app.sh" "$out"
 echo "$out"
