@@ -167,6 +167,10 @@ public:
 
     // Called by the sentinel when a host object with a guest side deallocates.
     void forget(uint32_t handle);
+    // Runs .cxx_destruct (C++ ivars, and ARC's releases of object ivars),
+    // subclass first, on the guest half of a host object being destroyed,
+    // as objc_destructInstance would; then forgets it.
+    void destroyGuestHalf(uint32_t handle);
     // The guest is freeing an object it allocated itself (objc_destructInstance):
     // drops the host half made for it, if any.
     void guestObjectDestroyed(GuestAddr object);
