@@ -356,6 +356,9 @@ constexpr CFunction kCoreGraphics[] = {
     {"CFCharacterSetCreateMutable", "o:o"}, {"CFCharacterSetAddCharactersInRange", "v:ozz"},
     {"CFCharacterSetInvert", "v:o"}, {"CFRunLoopCopyAllModes", "o:o"}, {"CFSetAddValue", "v:oo"},
     {"CFSetContainsValue", "B:oo"}, {"CGContextReplacePathWithStrokedPath", "v:o"},
+    {"CGImageCreateWithMask", "o:oo"}, {"CFGetRetainCount", "i:o"},
+    {"CGPDFDocumentCreateWithProvider", "o:o"}, {"CGPDFDocumentGetPage", "o:oz"},
+    {"CGPDFDocumentRelease", "v:o"}, {"CGPDFDocumentRetain", "o:o"}, {"CGContextDrawPDFPage", "v:oo"},
 };
 }  // namespace
 
@@ -398,6 +401,12 @@ B32_THUNK(_CGColorCreate) {
     GuestAddr p = c.args.ptr();
     size_t count = CGColorSpaceGetNumberOfComponents(space) + 1;
     c.ret(c.rt.bridge().toGuest((id)CGColorCreate(space, components(c, p, count).data())));
+}
+
+// CGColorRef CGColorCreateCopyWithAlpha(CGColorRef, CGFloat alpha)
+B32_THUNK(_CGColorCreateCopyWithAlpha) {
+    auto color = ref<CGColorRef>(c);
+    c.ret(c.rt.bridge().toGuest((id)CGColorCreateCopyWithAlpha(color, cgf(c))));
 }
 
 // const CGFloat *CGColorGetComponents(CGColorRef): a guest float copy kept with the color.
@@ -524,6 +533,12 @@ B32_THUNK(_CGPathAddRect) {
     CGAffineTransform t;
     bool has = optionalTransform(c, c.args.ptr(), t);
     CGPathAddRect(path, has ? &t : nullptr, rect(c));
+}
+B32_THUNK(_CGPathAddEllipseInRect) {
+    auto path = ref<CGMutablePathRef>(c);
+    CGAffineTransform t;
+    bool has = optionalTransform(c, c.args.ptr(), t);
+    CGPathAddEllipseInRect(path, has ? &t : nullptr, rect(c));
 }
 // void CGPathAddLines(CGMutablePathRef, const CGAffineTransform *, const CGPoint points[], size_t count)
 B32_THUNK(_CGPathAddLines) {
@@ -864,6 +879,19 @@ B32_THUNK(_CGImageCreate) {
                                                   decodeIn ? decode.data() : nullptr, interpolate, intent)));
 }
 
+// CGImageRef CGImageMaskCreate(size_t width, size_t height, size_t bitsPerComponent, size_t bitsPerPixel,
+//     size_t bytesPerRow, CGDataProviderRef, const CGFloat *decode, bool shouldInterpolate)
+B32_THUNK(_CGImageMaskCreate) {
+    size_t width = c.args.u32(), height = c.args.u32(), bpc = c.args.u32(), bpp = c.args.u32(), bpr = c.args.u32();
+    auto provider = ref<CGDataProviderRef>(c);
+    GuestAddr decodeIn = c.args.ptr();
+    bool interpolate = c.args.u32() & 0xff;
+    CGFloat decode[2] = {};
+    if (decodeIn) decode[0] = c.mem.read<float>(decodeIn), decode[1] = c.mem.read<float>(decodeIn + 4);
+    c.ret(c.rt.bridge().toGuest((id)CGImageMaskCreate(width, height, bpc, bpp, bpr, provider,
+                                                      decodeIn ? decode : nullptr, interpolate)));
+}
+
 // CGAffineTransform CATransform3DGetAffineTransform(CATransform3D): sixteen floats in, six out through r0.
 B32_THUNK(_CATransform3DGetAffineTransform) {
     GuestAddr out = c.args.ptr();
@@ -930,6 +958,21 @@ B32_THUNK(_CGContextGetClipBoundingBox) {
 B32_THUNK(_CGContextGetPathBoundingBox) {
     GuestAddr out = c.args.ptr();
     writeRectTo(c, out, CGContextGetPathBoundingBox(ref<CGContextRef>(c)));
+}
+// CGRect CGPathGetBoundingBox(CGPathRef), CGPathGetPathBoundingBox(CGPathRef) and
+// CGPDFPageGetBoxRect(CGPDFPageRef, CGPDFBox): through r0.
+B32_THUNK(_CGPathGetBoundingBox) {
+    GuestAddr out = c.args.ptr();
+    writeRectTo(c, out, CGPathGetBoundingBox(ref<CGPathRef>(c)));
+}
+B32_THUNK(_CGPathGetPathBoundingBox) {
+    GuestAddr out = c.args.ptr();
+    writeRectTo(c, out, CGPathGetPathBoundingBox(ref<CGPathRef>(c)));
+}
+B32_THUNK(_CGPDFPageGetBoxRect) {
+    GuestAddr out = c.args.ptr();
+    auto page = ref<CGPDFPageRef>(c);
+    writeRectTo(c, out, CGPDFPageGetBoxRect(page, CGPDFBox(c.args.i32())));
 }
 B32_THUNK(_CGContextSetMiterLimit) {
     auto ctx = ref<CGContextRef>(c);
