@@ -876,6 +876,11 @@ bool isProtocolObject(id object) {
 
 GuestAddr Bridge::toGuest(id object) {
     if (!object) return 0;
+    // A void * the guest handed over as is (a +beginAnimations:context: context
+    // that its did-stop method declares as an object) is already its own.
+    auto *p = reinterpret_cast<const uint8_t *>(object);
+    if (const uint8_t *base = rt_.mem().ptr<uint8_t>(0); p >= base && p < base + GuestMemory::kSize)
+        return rt_.mem().guestAddrOf(p);
     std::unique_lock guard(lock_);
     if (object_isClass(object)) {
         Class c = (Class)object;
