@@ -530,6 +530,17 @@ B32_THUNK(_pthread_attr_getdetachstate) {
     c.mem.write<int32_t>(c.args.ptr(), 1);  // PTHREAD_CREATE_JOINABLE
     c.ret(0);
 }
+B32_THUNK(_pthread_attr_setinheritsched) { c.ret(0); }
+B32_THUNK(_pthread_attr_getinheritsched) {
+    c.args.ptr();
+    c.mem.write<int32_t>(c.args.ptr(), 1);  // PTHREAD_INHERIT_SCHED
+    c.ret(0);
+}
+B32_THUNK(_pthread_attr_getschedpolicy) {
+    c.args.ptr();
+    c.mem.write<int32_t>(c.args.ptr(), 1);  // SCHED_OTHER
+    c.ret(0);
+}
 // int pthread_getschedparam(pthread_t, int *policy, struct sched_param *)
 B32_THUNK(_pthread_getschedparam) {
     c.args.ptr();
