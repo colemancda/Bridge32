@@ -72,7 +72,9 @@ public:
 
     // dlsym: a symbol as the loader would bind it (the app's own, a guest
     // library's, a data symbol, ObjC data, a host constant or a thunk), or 0.
-    GuestAddr lookUp(const std::string &symbol);
+    // Without `inApp` the app's own exports are skipped, as for a dlsym on a
+    // system library: an app that defines malloc looks the real one up there.
+    GuestAddr lookUp(const std::string &symbol, bool inApp = true);
 
     // dlopen of a guest library (a path in the app, as engines load their
     // renderers and game code): loads it and any libraries it needs, runs
