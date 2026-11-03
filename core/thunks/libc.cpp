@@ -461,7 +461,8 @@ constexpr GuestAddr kRtldDefault = 0xFFFFFFFE;
 
 // Guest libraries get real handles (their index in the runtime's library
 // list, so they're small numbers); anything else, a system library, gets
-// kDlHandle, and dlsym on it searches every symbol the loader would bind.
+// kDlHandle, and dlsym on it searches every symbol the loader would bind
+// except the app's own.
 namespace {
 thread_local GuestAddr dlErrorMessage = 0;
 constexpr uint32_t kMaxLibraryHandle = 0x10000;
@@ -488,7 +489,8 @@ B32_THUNK(_dlopen) {
 B32_THUNK(_dlsym) {
     uint32_t handle = c.args.u32();
     std::string name = std::string("_") + c.mem.cstr(c.args.ptr());
-    GuestAddr addr = handle && handle < kMaxLibraryHandle ? c.rt.librarySymbol(handle, name) : c.rt.lookUp(name);
+    GuestAddr addr = handle && handle < kMaxLibraryHandle ? c.rt.librarySymbol(handle, name)
+                                                          : c.rt.lookUp(name, handle != kDlHandle);
     log("dlsym(%s) -> 0x%08x", name.c_str(), addr);
     if (!addr) dlErrorMessage = c.rt.internString("dlsym: symbol not found: " + name);
     c.ret(addr);
