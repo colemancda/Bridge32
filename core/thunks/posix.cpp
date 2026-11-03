@@ -307,6 +307,22 @@ B32_THUNK(_strftime_l) {
     c.ret(uint32_t(std::strftime(out, max, format, &t)));
 }
 
+// char *strptime(const char *buf, const char *format, struct tm *tm): fills in only
+// the fields the format names, so it starts from the guest's tm.
+B32_THUNK(_strptime) {
+    GuestAddr buf = c.args.ptr();
+    const char *format = c.mem.cstr(c.args.ptr());
+    GuestAddr p = c.args.ptr();
+    struct tm t = hostTm(c, p);
+    const char *in = c.mem.cstr(buf);
+    const char *end = ::strptime(in, format, &t);
+    if (!end) return c.ret(0);
+    int32_t ints[] = {t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday, t.tm_isdst};
+    c.mem.copyIn(p, ints, sizeof ints);
+    c.mem.write<int32_t>(p + 36, int32_t(t.tm_gmtoff));
+    c.ret(buf + uint32_t(end - in));
+}
+
 // size_t wcsftime(wchar_t *s, size_t max, const wchar_t *format, const struct tm *tm)
 B32_THUNK(_wcsftime) {
     wchar_t *out = c.mem.ptr<wchar_t>(c.args.ptr());
