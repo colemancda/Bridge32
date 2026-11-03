@@ -835,6 +835,47 @@ B32_THUNK(_pwrite) {
     off_t offset = off_t(c.args.u64());
     c.ret(uint32_t(::pwrite(fd, c.mem.ptr<void>(buf), size, offset)));
 }
+
+// POSIX AIO, as Sonic & SEGA All-Stars Racing streams its data: the read is
+// done at once, and its result kept for aio_error and aio_return. Guest
+// struct aiocb: { int aio_fildes; off_t aio_offset (4-aligned);
+// volatile void *aio_buf; size_t aio_nbytes; ... }.
+namespace {
+struct AioResult {
+    int32_t result;
+    int error;
+};
+std::mutex aioLock;
+std::unordered_map<GuestAddr, AioResult> aioResults;  // by guest aiocb
+}  // namespace
+
+B32_THUNK(_aio_read) {
+    GuestAddr cb = c.args.ptr();
+    int fd = c.mem.read<int32_t>(cb);
+    off_t offset = off_t(c.mem.read<uint64_t>(cb + 4));
+    GuestAddr buf = c.mem.read<uint32_t>(cb + 12);
+    uint32_t size = c.mem.read<uint32_t>(cb + 16);
+    ssize_t n = ::pread(fd, c.mem.ptr<void>(buf), size, offset);
+    AioResult result{int32_t(n), n < 0 ? errno : 0};
+    std::lock_guard guard(aioLock);
+    aioResults[cb] = result;
+    c.ret(0);
+}
+B32_THUNK(_aio_error) {
+    GuestAddr cb = c.args.ptr();
+    std::lock_guard guard(aioLock);
+    auto it = aioResults.find(cb);
+    c.ret(uint32_t(it == aioResults.end() ? EINVAL : it->second.error));
+}
+B32_THUNK(_aio_return) {
+    GuestAddr cb = c.args.ptr();
+    std::lock_guard guard(aioLock);
+    auto it = aioResults.find(cb);
+    AioResult result = it == aioResults.end() ? AioResult{-1, EINVAL} : it->second;
+    if (it != aioResults.end()) aioResults.erase(it);
+    if (result.result < 0) setGuestErrno(c, result.error);
+    c.ret(uint32_t(result.result));
+}
 B32_THUNK(_ftruncate) {
     int fd = c.args.i32();
     c.ret(uint32_t(::ftruncate(fd, off_t(c.args.u64()))));
