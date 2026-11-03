@@ -117,6 +117,13 @@ bool viewControllersRotate() {
     if (boundsFollowOrientation() || deviceRotation() == 0) return decided = 0;
     for (UIWindow *window in guestWindows) {
         UIViewController *root = window.rootViewController;
+        // Before iOS 6 UIKit turned the controller of the window's first
+        // subview too, for apps that added its view themselves (Sonic & SEGA
+        // All-Stars Racing).
+        if (!root) {
+            id responder = window.subviews.firstObject.nextResponder;
+            if ([responder isKindOfClass:[UIViewController class]]) root = responder;
+        }
         if (!root) continue;
         UIInterfaceOrientation orientation = deviceOrientation();
         bool rotates;
@@ -243,6 +250,14 @@ void windowSetRootViewController(UIWindow *self, SEL _cmd, UIViewController *con
 void windowMakeKeyAndVisible(UIWindow *self, SEL _cmd) {
     if (!self.windowScene && [pendingWindows containsObject:self]) {
         [pendingKeyWindows addObject:self];
+        // A view controller's view from a nib was sized to the Mac's screen
+        // as it loaded; it fills the guest's window instead.
+        for (UIView *view in self.subviews)
+            if (CGSizeEqualToSize(view.frame.size, UIScreen.mainScreen.bounds.size)) view.frame = self.bounds;
+        // iOS lays the window out here, and some games wait inside
+        // -application:didFinishLaunching: for their GL view's -layoutSubviews
+        // to make its renderbuffer (Sonic & SEGA All-Stars Racing).
+        [self layoutIfNeeded];
         return;
     }
     reinterpret_cast<void (*)(id, SEL)>(originalMakeKeyAndVisible)(self, _cmd);
@@ -430,7 +445,13 @@ void forwardToAppDelegate(SEL selector) {
     bool hadWindows = pendingKeyWindows.count > 0;
     // Lay the windows out now, loading their view controllers' views, as
     // iOS does at the end of launch.
-    for (UIWindow *window in pendingWindows) [window layoutIfNeeded];
+    // Windows laid out early, as they became key, are again now that they're
+    // on screen, so a GL view remakes its renderbuffer for the scene's layer.
+    for (UIWindow *window in pendingWindows) {
+        if ([pendingKeyWindows containsObject:window])
+            for (UIView *view in window.subviews) [view setNeedsLayout];
+        [window layoutIfNeeded];
+    }
     [pendingWindows removeAllObjects];
     [pendingKeyWindows removeAllObjects];
     if (!hadWindows) loadMainStoryboard();
@@ -478,6 +499,12 @@ NSString *namedDelegateClass;  // the class UIApplicationMain named, if any
     if (namedDelegateClass) application.delegate = [[NSClassFromString(namedDelegateClass) alloc] init];
     // The nib's objects live for the whole run, as with UIKit's own main nib.
     NSArray *objects = [[[NSBundle mainBundle] loadNibNamed:nib owner:application options:nil] retain];
+    // A window set to fill the screen at launch was sized to the Mac's; it
+    // gets the guest's instead, its views resizing with it (Sonic & SEGA
+    // All-Stars Racing's GL view).
+    for (id object in objects)
+        if ([object isKindOfClass:[UIWindow class]])
+            [object setFrame:CGRectMake(0, 0, screenWidth(), screenHeight())];
     log("loaded main nib %s: %lu top-level objects, delegate %s", nib.UTF8String, (unsigned long)objects.count,
         object_getClassName(application.delegate));
     if (application.delegate == self) log("the main nib didn't set the application's delegate");
