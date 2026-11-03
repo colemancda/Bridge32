@@ -27,6 +27,8 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
     GuestMemory &mem;
     Dynarmic::A32::Jit *jit = nullptr;
     std::optional<uint32_t> pendingSvc;
+    Dynarmic::ExclusiveMonitor *monitor = nullptr;
+    size_t processorId = 0;
 
     // A data access to unmapped memory the guest has a signal handler for:
     // the access reads zeros (writes go nowhere), and the JIT stops right
@@ -98,6 +100,36 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
     bool MemoryWriteExclusive32(VAddr a, uint32_t v, uint32_t e) override { return storeExclusive(a, v, e); }
     bool MemoryWriteExclusive64(VAddr a, uint64_t v, uint64_t e) override { return storeExclusive(a, v, e); }
 
+    // STREX whose status register is also the one it stores (strex r1, r1,
+    // [r4]): ARM calls it UNPREDICTABLE and dynarmic refuses it, but the
+    // cores iOS ran on store the value and then write the status, and
+    // spinlocks in Sonic & All-Stars Racing Transformed rely on that. Done
+    // here as dynarmic does a STREX; returns whether the instruction was one.
+    bool storeExclusiveFromStatus(VAddr pc) {
+        auto &r = jit->Regs();
+        uint32_t n, t, d, offset = 0;
+        if (jit->Cpsr() & Cpu::kThumbBit) {
+            uint16_t first = load<uint16_t>(pc), second = load<uint16_t>(pc + 2);
+            if ((first & 0xfff0) != 0xe840) return false;
+            n = first & 15, t = second >> 12, d = (second >> 8) & 15, offset = (second & 0xff) << 2;
+        } else {
+            uint32_t insn = load<uint32_t>(pc);
+            if ((insn & 0xfff00ff0) != 0xe1800f90) return false;  // unconditional only
+            n = (insn >> 16) & 15, d = (insn >> 12) & 15, t = insn & 15;
+        }
+        if (d != t || d == n || n == 15 || t == 15) return false;
+        uint32_t addr = r[n] + offset, value = r[t];
+        bool stored = true;
+        if (monitor)
+            stored = monitor->DoExclusiveOperation<uint32_t>(
+                processorId, addr, [&](uint32_t expected) { return storeExclusive(addr, value, expected); });
+        else
+            store(addr, value);
+        r[d] = stored ? 0 : 1;
+        r[15] = pc + 4;
+        return true;
+    }
+
     void InterpreterFallback(VAddr pc, size_t count) override {
         fatal("dynarmic has no translation for %zu instruction(s) at 0x%08x", count, pc);
     }
@@ -124,6 +156,9 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
             return;
         case Exception::Breakpoint:
             fatal("guest breakpoint at 0x%08x", pc);
+        case Exception::UnpredictableInstruction:
+            if (storeExclusiveFromStatus(pc)) return;
+            [[fallthrough]];
         default:
             fatal("guest exception %d at 0x%08x (lr=0x%08x)", int(exception), pc, jit->Regs()[14]);
         }
@@ -234,6 +269,7 @@ DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarm
     // debugger sees host crashes directly.
     if (!getenv("B32_NO_FASTMEM")) config.fastmem_pointer = reinterpret_cast<uintptr_t>(mem.base());
     config.global_monitor = monitor;
+    callbacks_->monitor = monitor, callbacks_->processorId = processorId;
     config.processor_id = processorId;
     config.fastmem_exclusive_access = monitor != nullptr;
     config.enable_cycle_counting = false;
