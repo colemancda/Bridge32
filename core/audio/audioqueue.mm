@@ -511,6 +511,22 @@ B32_THUNK(_ExtAudioFileRead) {
     c.ret(uint32_t(status));
 }
 
+// OSStatus ExtAudioFileSeek(ExtAudioFileRef, SInt64 inFrameOffset)
+B32_THUNK(_ExtAudioFileSeek) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    c.ret(uint32_t(ExtAudioFileSeek(file, SInt64(c.args.u64()))));
+}
+
+// OSStatus ExtAudioFileTell(ExtAudioFileRef, SInt64 *outFrameOffset)
+B32_THUNK(_ExtAudioFileTell) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    GuestAddr out = c.args.ptr();
+    SInt64 offset = 0;
+    OSStatus status = ExtAudioFileTell(file, &offset);
+    if (out) c.mem.write<int64_t>(out, offset);
+    c.ret(uint32_t(status));
+}
+
 // --- AudioConverter ---------------------------------------------------------------------------
 // Converters are guest handles. FillComplexBuffer's input callback is the
 // guest's: it fills a guest AudioBufferList { count, { channels, size, data }... }
