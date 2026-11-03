@@ -33,6 +33,26 @@ void markStruct(Type &t) {
 
 uint32_t roundUp(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
 
+// Bitfields (b<width>) carry no type, so each run of them in a struct
+// becomes the unsigned ints holding it, as clang packs `unsigned x : n`
+// fields; guest and host then lay the struct out alike.
+void packBitfields(std::vector<Type> &fields) {
+    std::vector<Type> packed;
+    for (size_t i = 0; i < fields.size();) {
+        if (fields[i].code != 'b') {
+            packed.push_back(std::move(fields[i++]));
+            continue;
+        }
+        uint32_t bits = 0;
+        for (; i < fields.size() && fields[i].code == 'b'; i++) bits += fields[i].count;
+        for (uint32_t word = 0; word < std::max<uint32_t>(roundUp(bits, 32) / 32, 1); word++) {
+            packed.emplace_back();
+            packed.back().code = 'I';
+        }
+    }
+    fields = std::move(packed);
+}
+
 // Cache key for a struct or array's host layout.
 std::string layoutKey(const Type &t) {
     std::string key(1, t.code);
@@ -60,6 +80,7 @@ Type parseType(const char *&p) {
             while (*p && *p != '}') t.fields.push_back(parseType(p));
         }
         if (*p == '}') p++;
+        packBitfields(t.fields);
         markStruct(t);
         break;
     }
@@ -117,8 +138,8 @@ Type parseType(const char *&p) {
             if (*p) p++;
         }
         break;
-    case 'b':  // bitfield width
-        while (*p >= '0' && *p <= '9') p++;
+    case 'b':  // bitfield width, kept in count
+        while (*p >= '0' && *p <= '9') t.count = t.count * 10 + uint32_t(*p++ - '0');
         break;
     default: break;
     }
