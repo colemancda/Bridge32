@@ -169,6 +169,9 @@ B32_THUNK(_getgid) { c.ret(getgid()); }
 B32_THUNK(_getuid) { c.ret(getuid()); }
 B32_THUNK(_getpid) { c.ret(uint32_t(getpid())); }
 B32_THUNK(_getppid) { c.ret(uint32_t(getppid())); }
+// Games call ptrace(PT_DENY_ATTACH) to keep debuggers off (Sonic & All-Stars
+// Racing Transformed, through dlsym); it succeeds and does nothing.
+B32_THUNK(_ptrace) { c.ret(0); }
 B32_THUNK(_getdtablesize) { c.ret(uint32_t(getdtablesize())); }
 
 B32_THUNK(_time) {
