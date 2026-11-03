@@ -81,6 +81,17 @@ using namespace b32;
     });
 }
 
+// The movie is always ready to play through (Sonic & SEGA All-Stars Racing
+// polls loadState), and has no length.
+- (MPMovieLoadState)loadState { return MPMovieLoadStatePlayable | MPMovieLoadStatePlaythroughOK; }
+- (MPMoviePlaybackState)playbackState {
+    return _playing ? MPMoviePlaybackStatePlaying : MPMoviePlaybackStateStopped;
+}
+- (double)duration { return 0; }
+- (double)playableDuration { return 0; }
+- (double)currentPlaybackTime { return 0; }
+- (void)setCurrentPlaybackTime:(double)time {}
+
 - (void)pause {}
 - (void)stop { [self finish]; }
 
