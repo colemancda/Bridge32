@@ -80,6 +80,7 @@ B32_THUNK(_ABAddressBookGetAuthorizationStatus) { c.ret(2); }  // kABAuthorizati
 // there's no VoiceOver for guest views to talk to.
 B32_THUNK(_UIAccessibilityPostNotification) {}
 B32_THUNK(_UIAccessibilityIsVoiceOverRunning) { c.ret(0); }
+B32_THUNK(_UIAccessibilityIsGuidedAccessEnabled) { c.ret(0); }
 
 // -[UIDevice uniqueIdentifier] (the UDID, removed in iOS 7): 40 hex digits,
 // stable for this Mac, derived from the vendor identifier.
