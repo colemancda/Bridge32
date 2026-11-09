@@ -1,109 +1,24 @@
 // GCC's copy-on-write std::string for i386 Mac guests, which link the system's
-// libstdc++ and no longer have one to run. A string is one pointer to its
-// characters, preceded in memory by { length, capacity, refcount }; inline
-// guest code reads and shares these, so the layout is GCC's exactly. A
-// refcount of 0 means one owner, and -1 that a reference to a character
-// escaped, so the string must be copied rather than shared.
+// libstdc++ and no longer have one to run. See libstdcxx_cow.h for the layout.
 
-#include "Thunks.h"
-#include "core/Log.h"
-#include "core/Runtime.h"
-
-#include <algorithm>
-#include <atomic>
-#include <cstring>
-#include <string>
-#include <string_view>
+#include "libstdcxx_cow.h"
 
 using namespace b32;
 
 namespace {
-constexpr uint32_t kRepHeader = 12, kNpos = 0xFFFFFFFF;
-
-struct Strings {
-    Call &c;
-    GuestAddr emptyData = 0;
-
-    explicit Strings(Call &call) : c(call) { emptyData = c.rt.dataSymbol("__ZNSs4_Rep20_S_empty_rep_storageE") + kRepHeader; }
-
-    GuestAddr data(GuestAddr self) const { return c.mem.read<uint32_t>(self); }
-    uint32_t length(GuestAddr d) const { return c.mem.read<uint32_t>(d - 12); }
-    uint32_t capacity(GuestAddr d) const { return c.mem.read<uint32_t>(d - 8); }
-    int32_t refcount(GuestAddr d) const { return c.mem.read<int32_t>(d - 4); }
-    std::atomic<int32_t> &count(GuestAddr d) const { return *reinterpret_cast<std::atomic<int32_t> *>(c.mem.ptr<int32_t>(d - 4)); }
-    std::string_view view(GuestAddr self) const {
-        GuestAddr d = data(self);
-        return {c.mem.ptr<char>(d), length(d)};
-    }
-
-    GuestAddr allocate(uint32_t capacity) {
-        GuestAddr rep = c.heap.alloc(kRepHeader + capacity + 1);
-        c.mem.write<uint32_t>(rep + 4, capacity);
-        c.mem.write<int32_t>(rep + 8, 0);
-        return rep + kRepHeader;
-    }
-    void setLength(GuestAddr d, uint32_t n) {
-        c.mem.write<uint32_t>(d - 12, n);
-        c.mem.write<uint8_t>(d + n, 0);
-    }
-    GuestAddr make(std::string_view text, uint32_t capacity = 0) {
-        if (text.empty() && !capacity) return emptyData;
-        GuestAddr d = allocate(std::max(uint32_t(text.size()), capacity));
-        c.mem.copyIn(d, text.data(), text.size());
-        setLength(d, uint32_t(text.size()));
-        return d;
-    }
-    void release(GuestAddr d) {
-        if (d == emptyData) return;
-        if (count(d).fetch_sub(1) <= 0) c.heap.free(d - kRepHeader);
-    }
-    // What a copy of the string at `d` should point at.
-    GuestAddr share(GuestAddr d) {
-        if (d == emptyData) return d;
-        if (refcount(d) < 0) return make({c.mem.ptr<char>(d), length(d)});
-        count(d).fetch_add(1);
-        return d;
-    }
-    void set(GuestAddr self, GuestAddr d) {
-        GuestAddr old = data(self);
-        c.mem.write<uint32_t>(self, d);
-        release(old);
-    }
-    // Replaces [pos, pos + n) with text, in place when the string is unshared
-    // and has the room. `text` must not point into the string.
-    void splice(GuestAddr self, uint32_t pos, uint32_t n, std::string_view text) {
-        GuestAddr d = data(self);
-        uint32_t len = length(d);
-        if (pos > len) fatal("std::string position %u past length %u (from 0x%08x)", pos, len, c.cpu.returnAddress());
-        n = std::min(n, len - pos);
-        uint32_t newLength = len - n + uint32_t(text.size());
-        if (d != emptyData && refcount(d) <= 0 && capacity(d) >= newLength) {
-            char *p = c.mem.ptr<char>(d);
-            std::memmove(p + pos + text.size(), p + pos + n, len - pos - n);
-            std::memcpy(p + pos, text.data(), text.size());
-            setLength(d, newLength);
-            c.mem.write<int32_t>(d - 4, 0);
-            return;
-        }
-        GuestAddr fresh = allocate(std::max(newLength, d == emptyData ? newLength : capacity(d) * 2));
-        const char *p = c.mem.ptr<char>(d);
-        char *q = c.mem.ptr<char>(fresh);
-        std::memcpy(q, p, pos);
-        std::memcpy(q + pos, text.data(), text.size());
-        std::memcpy(q + pos + text.size(), p + pos + n, len - pos - n);
-        setLength(fresh, newLength);
-        set(self, fresh);
-    }
-    void assign(GuestAddr self, std::string_view text) { splice(self, 0, kNpos, text); }
+struct Strings : CowStrings<char> {
+    explicit Strings(Call &call) : CowStrings(call, "__ZNSs4_Rep20_S_empty_rep_storageE") {}
 };
 
 std::string cstring(Call &c, GuestAddr p) { return c.mem.cstr(p); }
 std::string bytes(Call &c, GuestAddr p, uint32_t n) { return std::string(c.mem.ptr<char>(p), n); }
-uint32_t found(size_t at) { return at == std::string_view::npos ? kNpos : uint32_t(at); }
 }  // namespace
 
 B32_THUNK(__ZNSaIcEC1Ev) {}
 B32_THUNK(__ZNSaIcED1Ev) {}
+B32_THUNK(__ZNSaIcED2Ev) {}
+B32_THUNK(__ZNSaIcEC1ERKS_) {}
+B32_THUNK(__ZNSaIcEC2ERKS_) {}
 
 B32_THUNK(__ZNSsC1Ev) {
     Strings s(c);
@@ -135,16 +50,7 @@ B32_THUNK(__ZNSs4_Rep9_S_createEmmRKSaIcE) {
 }
 B32_THUNK(__ZNSs4_Rep10_M_destroyERKSaIcE) { c.heap.free(c.args.ptr()); }
 
-B32_THUNK(__ZNSs12_M_leak_hardEv) {
-    Strings s(c);
-    GuestAddr self = c.args.ptr(), d = s.data(self);
-    if (d == s.emptyData) return;
-    if (s.refcount(d) > 0) {
-        s.set(self, s.make({c.mem.ptr<char>(d), s.length(d)}, s.capacity(d)));
-        d = s.data(self);
-    }
-    c.mem.write<int32_t>(d - 4, -1);
-}
+B32_THUNK(__ZNSs12_M_leak_hardEv) { Strings(c).leak(c.args.ptr()); }
 
 B32_THUNK(__ZNKSs4sizeEv) { c.ret(Strings(c).view(c.args.ptr()).size()); }
 B32_THUNK(__ZNKSs6lengthEv) { c.ret(Strings(c).view(c.args.ptr()).size()); }
@@ -202,6 +108,17 @@ B32_THUNK(__ZNKSs12find_last_ofEPKcmm) {
     uint32_t pos = c.args.u32();
     std::string set = bytes(c, text, c.args.u32());
     c.ret(found(s.view(self).find_last_of(set, pos == kNpos ? std::string_view::npos : pos)));
+}
+B32_THUNK(__ZNKSs12find_last_ofEcm) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr();
+    char ch = char(c.args.u32());
+    c.ret(found(s.view(self).find_last_of(ch, hostPos(c.args.u32()))));
+}
+B32_THUNK(__ZNKSs13find_first_ofEPKcm) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), set = c.args.ptr();
+    c.ret(found(s.view(self).find_first_of(cstring(c, set), c.args.u32())));
 }
 B32_THUNK(__ZNKSs7compareEPKc) {
     Strings s(c);
@@ -301,12 +218,82 @@ B32_THUNK(__ZNSs7replaceEmmPKcm) {
     finish(c, self);
 }
 B32_THUNK(__ZNSs7reserveEm) {
+    GuestAddr self = c.args.ptr();
+    Strings(c).reserve(self, c.args.u32());
+}
+B32_THUNK(__ZNSs5clearEv) { Strings(c).assign(c.args.ptr(), {}); }
+B32_THUNK(__ZNSs6resizeEm) {
+    GuestAddr self = c.args.ptr();
+    Strings(c).resize(self, c.args.u32(), 0);
+}
+B32_THUNK(__ZNSs6appendEPKc) {
     Strings s(c);
     GuestAddr self = c.args.ptr();
-    uint32_t wanted = c.args.u32();
-    GuestAddr d = s.data(self);
-    if (d == s.emptyData ? wanted : (wanted > s.capacity(d) || s.refcount(d) > 0))
-        s.set(self, s.make({c.mem.ptr<char>(d), s.length(d)}, std::max(wanted, s.length(d))));
+    s.append(self, cstring(c, c.args.ptr()));
+    finish(c, self);
+}
+B32_THUNK(__ZNSs6appendEmc) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr();
+    uint32_t n = c.args.u32();
+    s.append(self, std::string(n, char(c.args.u32())));
+    finish(c, self);
+}
+B32_THUNK(__ZNSs9push_backEc) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr();
+    char ch = char(c.args.u32());
+    s.append(self, std::string_view(&ch, 1));
+}
+B32_THUNK(__ZNSsaSEc) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr();
+    char ch = char(c.args.u32());
+    s.assign(self, std::string_view(&ch, 1));
+    finish(c, self);
+}
+
+// The mutable accessors. Iterators are one pointer and come back in EAX.
+B32_THUNK(__ZNSsixEm) {
+    GuestAddr self = c.args.ptr();
+    uint32_t pos = c.args.u32();
+    c.ret(Strings(c).leak(self) + pos);
+}
+B32_THUNK(__ZNSs5beginEv) { c.ret(Strings(c).leak(c.args.ptr())); }
+B32_THUNK(__ZNSs3endEv) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr();
+    GuestAddr d = s.leak(self);
+    c.ret(d + s.length(d));
+}
+B32_THUNK(__ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEE) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), it = c.args.ptr();
+    uint32_t pos = it - s.data(self);
+    s.splice(self, pos, 1, {});
+    c.ret(s.leak(self) + pos);
+}
+B32_THUNK(__ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), first = c.args.ptr(), last = c.args.ptr();
+    uint32_t pos = first - s.data(self);
+    s.splice(self, pos, last - first, {});
+    c.ret(s.leak(self) + pos);
+}
+B32_THUNK(__ZNSs6insertEN9__gnu_cxx17__normal_iteratorIPcSsEEc) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), it = c.args.ptr();
+    char ch = char(c.args.u32());
+    uint32_t pos = it - s.data(self);
+    s.splice(self, pos, 0, std::string_view(&ch, 1));
+    c.ret(s.leak(self) + pos);
+}
+// replace(first, last, sourceFirst, sourceLast), mutable iterators throughout.
+B32_THUNK(__ZNSs7replaceEN9__gnu_cxx17__normal_iteratorIPcSsEES2_S2_S2_) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), first = c.args.ptr(), last = c.args.ptr(), from = c.args.ptr(), to = c.args.ptr();
+    s.splice(self, first - s.data(self), last - first, bytes(c, from, to - from));
+    finish(c, self);
 }
 
 B32_DATA(__ZSt7nothrow, 1) {}
