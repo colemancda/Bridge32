@@ -564,6 +564,16 @@ void standardStream(Runtime &rt, GuestAddr variable, FILE *host) {
 }
 }  // namespace
 
+#if defined(B32_GUEST_MAC)
+// Mac OS X 10.4 and earlier headers make stdin, stdout and stderr the three
+// FILEs of an array, __sF, which the guest takes the addresses of.
+B32_DATA(___sF, 3 * kGuestFileSize) {
+    std::lock_guard guard(filesLock);
+    files[addr] = stdin;
+    files[addr + kGuestFileSize] = stdout;
+    files[addr + 2 * kGuestFileSize] = stderr;
+}
+#endif
 B32_DATA(___stdinp, 4) { standardStream(rt, addr, stdin); }
 B32_DATA(___stdoutp, 4) { standardStream(rt, addr, stdout); }
 B32_DATA(___stderrp, 4) { standardStream(rt, addr, stderr); }
