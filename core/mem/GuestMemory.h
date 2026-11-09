@@ -9,6 +9,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace b32 {
 
@@ -55,6 +56,65 @@ public:
         value = swapped(value);
         std::memcpy(base_ + addr, &value, sizeof(T));
     }
+    // Arrays of scalars, converted element by element: what a host call that
+    // wants a native array (UTF-16 text, glyphs, floats) gets, and what it
+    // returns goes back through writeArray.
+    template <typename T> std::vector<T> readArray(GuestAddr addr, size_t count) const {
+        std::vector<T> values(count);
+        for (size_t i = 0; i < count; i++) values[i] = read<T>(addr + GuestAddr(i * sizeof(T)));
+        return values;
+    }
+    template <typename T> void writeArray(GuestAddr addr, const T *values, size_t count) {
+        for (size_t i = 0; i < count; i++) write<T>(addr + GuestAddr(i * sizeof(T)), values[i]);
+    }
+    // A NUL-terminated string of the guest's wchar_t (4 bytes on the Mac), as
+    // the host's, and the reverse, terminator included.
+    std::wstring readWide(GuestAddr addr) const {
+        std::wstring text;
+        for (;; addr += 4) {
+            wchar_t ch = wchar_t(read<uint32_t>(addr));
+            if (!ch) return text;
+            text.push_back(ch);
+        }
+    }
+    void writeWide(GuestAddr addr, const std::wstring &text) {
+        for (wchar_t ch : text) {
+            write<uint32_t>(addr, uint32_t(ch));
+            addr += 4;
+        }
+        write<uint32_t>(addr, 0);
+    }
+
+    // Atomic operations on a 4 or 8-byte guest word, in the guest's byte
+    // order: the host's atomic instructions on the raw storage, with the value
+    // converted around them. atomicUpdate returns the previous value; `f` maps
+    // the old value to the new one and may run more than once.
+    template <typename T, typename F> T atomicUpdate(GuestAddr addr, F f) {
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+        T *word = reinterpret_cast<T *>(base_ + addr);
+        T raw = __atomic_load_n(word, __ATOMIC_RELAXED);
+        for (;;) {
+            T old = swapped(raw);
+            T next = swapped(T(f(old)));
+            if (__atomic_compare_exchange_n(word, &raw, next, true, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) return old;
+        }
+    }
+    // Stores `desired` if the word holds `expected`; whether it did.
+    template <typename T> bool atomicCompareExchange(GuestAddr addr, T expected, T desired) {
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+        T *word = reinterpret_cast<T *>(base_ + addr);
+        T raw = swapped(expected);
+        return __atomic_compare_exchange_n(word, &raw, swapped(desired), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    }
+    template <typename T> T atomicLoad(GuestAddr addr) const {
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+        return swapped(__atomic_load_n(reinterpret_cast<const T *>(base_ + addr), __ATOMIC_SEQ_CST));
+    }
+    template <typename T> void atomicStore(GuestAddr addr, T value) {
+        static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+        __atomic_store_n(reinterpret_cast<T *>(base_ + addr), swapped(value), __ATOMIC_SEQ_CST);
+    }
+
     void copyIn(GuestAddr dst, const void *src, size_t size) {
         std::memcpy(base_ + dst, src, size);
     }
