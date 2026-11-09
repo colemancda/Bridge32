@@ -6,7 +6,12 @@
 
 #include <unicorn/unicorn.h>
 
+#include <signal.h>
+
+#include <atomic>
 #include <cstring>
+#include <mutex>
+#include <set>
 
 namespace b32 {
 
@@ -31,6 +36,16 @@ int ucReg(int n) {
     case PowerCpu::MSR: return UC_PPC_REG_MSR;
     default: return UC_PPC_REG_0 + n;
     }
+}
+
+// B32_DUMP_ON_SIGUSR1=1: `kill -USR1 <pid>` stops every guest thread long enough to log where it is (the PC,
+// the stack pointer and the frames above), to find what a guest that has gone quiet is doing.
+std::mutex enginesLock;
+std::set<UnicornPowerCpu *> engines;
+std::atomic<bool> dumpRequested{false};
+void onDumpSignal(int) {
+    dumpRequested = true;
+    for (UnicornPowerCpu *cpu : engines) cpu->haltForDump();
 }
 
 bool onUnmapped(uc_engine *, uc_mem_type, uint64_t address, int, int64_t, void *user) {
@@ -59,9 +74,23 @@ UnicornPowerCpu::UnicornPowerCpu(GuestMemory &mem, SvcHandler handler)
     check(uc_hook_add(uc_, &hook, UC_HOOK_MEM_UNMAPPED, reinterpret_cast<void *>(onUnmapped), this, 1, 0),
           "unmapped hook");
     check(uc_hook_add(uc_, &hook, UC_HOOK_INTR, reinterpret_cast<void *>(onInterrupt), this, 1, 0), "interrupt hook");
+    if (getenv("B32_DUMP_ON_SIGUSR1")) {
+        static std::once_flag installed;
+        std::call_once(installed, [] { signal(SIGUSR1, onDumpSignal); });
+        std::lock_guard guard(enginesLock);
+        engines.insert(this);
+    }
 }
 
-UnicornPowerCpu::~UnicornPowerCpu() { uc_close(uc_); }
+UnicornPowerCpu::~UnicornPowerCpu() {
+    {
+        std::lock_guard guard(enginesLock);
+        engines.erase(this);
+    }
+    uc_close(uc_);
+}
+
+void UnicornPowerCpu::haltForDump() { uc_emu_stop(uc_); }
 
 bool UnicornPowerCpu::mapAroundForHook(uint64_t address) {
     return address < GuestMemory::kSize && mapAround(GuestAddr(address));
@@ -142,7 +171,19 @@ uint32_t UnicornPowerCpu::runUntilSvc() {
         uint32_t pc = reg(PC);
         switch (err) {
         case UC_ERR_OK: {
-            if (interrupt_ < 0) continue;  // a halt request (suspend): the guest stopped wherever it was
+            if (interrupt_ < 0) {  // a halt request (suspend, or a dump): the guest stopped wherever it was
+                if (dumpRequested.exchange(false)) {
+                    std::string frames;
+                    for (uint32_t ret : frameChain(12)) {
+                        char text[16];
+                        std::snprintf(text, sizeof text, " %08x", ret);
+                        frames += text;
+                    }
+                    log("guest at pc=0x%08x lr=0x%08x r1=0x%08x r3=0x%08x r4=0x%08x ctr=0x%08x; frames%s", pc, reg(LR), reg(SP),
+                        reg(R3), reg(R4), reg(CTR), frames.c_str());
+                }
+                continue;
+            }
             // The PC is past the instruction that raised the exception.
             GuestAddr trap = pc - 4;
             if (interrupt_ != kSyscallException)
