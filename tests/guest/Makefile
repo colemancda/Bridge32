@@ -1,9 +1,32 @@
-# Builds the armv7 guest test binaries with the current Xcode's clang and the
-# patched iOS 9.3 SDK (see make-sdk.sh in HalfLife-iOS9 for the tbd fixes).
+# Builds the guest test binaries with the current Xcode's clang.
+#   make            armv7, against the patched iOS 9.3 SDK (see make-sdk.sh in
+#                   HalfLife-iOS9 for the tbd fixes)
+#   make ARCH=i386  i386, compiled by clang (which still targets i386) and
+#                   linked by tools/i386-link.py, since Apple's ld no longer
+#                   links i386; no SDK needed, Bridge32 binds imports by name
 
+ARCH    ?= arm
 SDK     ?= /Volumes/Crucial-2TB/Developer/HalfLife-iOS9/sdk/iPhoneOS9.3.sdk
-OUT     ?= ../../build/guest
 CC      := xcrun clang
+
+ifeq ($(ARCH),i386)
+OUT     ?= ../../build/guest-i386
+CFLAGS  := -arch i386 -target i386-apple-macos10.13 -mdynamic-no-pic -fno-asynchronous-unwind-tables \
+           -fno-unwind-tables -O1 -Wall -Wno-unused-command-line-argument
+LINK    := python3 ../../tools/i386-link.py
+TESTS   := hello rbtree threads bench
+
+.PHONY: all clean
+all: $(addprefix $(OUT)/,$(TESTS))
+
+.SECONDEXPANSION:
+$(OUT)/%: $$*/$$*.c ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+else
+OUT     ?= ../../build/guest
 # -marm: Xcode 27's linker writes an even LC_MAIN entry offset for Thumb code.
 CFLAGS  := -arch armv7 -isysroot $(SDK) -miphoneos-version-min=9.0 -marm -O1 -Wall
 
@@ -46,6 +69,8 @@ $(OUT)/GLES1Test.app: gles1/main.m gles1/Info.plist
 	$(CC) $(CFLAGS) -fno-objc-arc -o $@/GLES1Test gles1/main.m -framework UIKit -framework Foundation \
 		-framework OpenGLES -framework QuartzCore
 	cp gles1/Info.plist $@/Info.plist
+
+endif
 
 clean:
 	rm -rf $(OUT)
