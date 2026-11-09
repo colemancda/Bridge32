@@ -395,7 +395,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                 // absolute ones don't, and a prebound lazy pointer is bound below.
                 if (uint32_t(rel.r_address) & R_SCATTERED) {
                     scattered_relocation_info srel;
-                    srel = fetch<decltype(srel)>(&rel);
+                    std::memcpy(&srel, &rel, sizeof srel);  // the same entry, already converted
                     if (srel.r_length == 2 && srel.r_type == GENERIC_RELOC_VANILLA) rebase(base + srel.r_address);
                 } else if (rel.r_length == 2 && rel.r_type == GENERIC_RELOC_VANILLA && rel.r_symbolnum != R_ABS) {
                     rebase(base + uint32_t(rel.r_address));
