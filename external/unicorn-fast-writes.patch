@@ -1,0 +1,94 @@
+Unicorn keeps every store on its slow path, which checks for overwritten
+code, if the page is executable or if any memory hook is installed. Bridge32
+maps all guest memory executable (guests can run code from their heap) and
+has an unmapped-memory hook, so every guest write took it. Only pages that
+hold translated code need the check, and an unmapped-memory hook can't run
+for a mapped page. tb_gen_code puts a page back on the slow path when code
+is translated there. Applied by CMakeLists.txt at configure time.
+
+diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
+index 3d0bebd..5f2611e 100644
+--- a/qemu/accel/tcg/cputlb.c
++++ b/qemu/accel/tcg/cputlb.c
+@@ -1203,14 +1203,19 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
+         page_collection_unlock(pages);
+     }
+ 
+-    /* For exec pages, this is cleared in tb_gen_code. */
++    /*
++     * For pages that hold code, this is cleared in tb_gen_code.
++     * B32_FAST_WRITES: Unicorn tested whether the page is executable, but
++     * Bridge32 maps all guest memory executable (guests can run their heap),
++     * so every write took this path. Only pages with translated code need to.
++     */
+     // If we:
+     // - have memory hooks installed
+     // - or doing snapshot
+     // , then never clean the tlb
+     if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
+-            !(tlbe->addr_code != -1) &&
+-            !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
++            !tb_page_has_code(cpu->uc, ram_addr) &&
++            !uc_mem_write_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
+         tlb_set_dirty(cpu, mem_vaddr);
+     }
+ }
+diff --git a/qemu/accel/tcg/translate-all.c b/qemu/accel/tcg/translate-all.c
+index 71b6b2b..11567f3 100644
+--- a/qemu/accel/tcg/translate-all.c
++++ b/qemu/accel/tcg/translate-all.c
+@@ -1297,6 +1297,12 @@ void tb_cleanup(struct uc_struct *uc)
+     }
+ }
+ 
++bool tb_page_has_code(struct uc_struct *uc, tb_page_addr_t addr)
++{
++    PageDesc *p = page_find(uc, addr >> TARGET_PAGE_BITS);
++    return p && p->first_tb;
++}
++
+ /* Set to NULL all the 'first_tb' fields in all PageDescs. */
+ static void page_flush_tb_1(struct uc_struct *uc, int level, void **lp)
+ {
+@@ -1839,7 +1845,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
+     }
+ 
+     /* Undoes tlb_set_dirty in notdirty_write. */
+-    if (!uc_mem_hook_installed(cpu->uc, tb->pc)) {
++    if (!uc_mem_write_hook_installed(cpu->uc, tb->pc)) {
+         tlb_reset_dirty_by_vaddr(cpu, pc & TARGET_PAGE_MASK,
+                                 (pc & ~TARGET_PAGE_MASK) + tb->size);
+     }
+diff --git a/qemu/accel/tcg/translate-all.h b/qemu/accel/tcg/translate-all.h
+index 30ce55d..3449180 100644
+--- a/qemu/accel/tcg/translate-all.h
++++ b/qemu/accel/tcg/translate-all.h
+@@ -26,6 +26,7 @@
+ struct page_collection *page_collection_lock(struct uc_struct *uc, tb_page_addr_t start,
+                                              tb_page_addr_t end);
+ void page_collection_unlock(struct page_collection *set);
++bool tb_page_has_code(struct uc_struct *uc, tb_page_addr_t addr);
+ void tb_invalidate_phys_page_fast(struct uc_struct *uc, struct page_collection *pages,
+                                   tb_page_addr_t start, int len,
+                                   uintptr_t retaddr);
+diff --git a/qemu/include/exec/exec-all.h b/qemu/include/exec/exec-all.h
+index d6b1fa6..433f992 100644
+--- a/qemu/include/exec/exec-all.h
++++ b/qemu/include/exec/exec-all.h
+@@ -478,6 +478,16 @@ address_space_translate_for_iotlb(CPUState *cpu, int asidx, hwaddr addr,
+ hwaddr memory_region_section_get_iotlb(CPUState *cpu,
+                                        MemoryRegionSection *section);
+ 
++/*
++ * B32_FAST_WRITES: whether a write to mapped memory has to reach a hook. An
++ * unmapped-memory hook can't fire for it, so doesn't need the slow path.
++ */
++static inline bool uc_mem_write_hook_installed(struct uc_struct *uc, hwaddr paddr)
++{
++    return HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE, paddr) ||
++           HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_WRITE_PROT, paddr);
++}
++
+ static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)
+ {
+     if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_MEM_FETCH_UNMAPPED, paddr))
