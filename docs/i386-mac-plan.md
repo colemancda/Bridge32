@@ -746,7 +746,11 @@ the host can't do atomically, which otherwise retried forever.
 Other limits:
 
 - Display capture and mode changes succeed and do nothing, deliberately.
-- HID reports no devices, so game controllers don't work yet.
+- HID reports no devices, so games that read controllers themselves through
+  IOKit see none. Games that only know the keyboard and mouse get a controller
+  through `core/appkit/controller.mm`, which turns GameController input into
+  events posted to the app. It's checked with a virtual pad event by event; a
+  physical pad hasn't been driven by a script. Steering is on/off, as the keys are.
 - `glMapBuffer` returns NULL, and the `GLsync` functions aren't in the table.
 
 Debugging options added: `B32_TRACE_SHADERS=1` logs shader sources and compile
