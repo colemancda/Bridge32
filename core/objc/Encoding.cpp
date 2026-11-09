@@ -19,6 +19,7 @@ bool isGeometryStruct(const std::string &name) {
     static const std::unordered_set<std::string> names = {
         "CGPoint", "CGSize", "CGRect", "CGVector", "CGAffineTransform", "UIEdgeInsets",
         "UIOffset", "NSDirectionalEdgeInsets", "CATransform3D",
+        "_NSPoint", "_NSSize", "_NSRect",  // 32-bit AppKit's names for the first three
     };
     return names.count(name) != 0;
 }
