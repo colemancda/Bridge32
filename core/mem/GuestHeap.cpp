@@ -30,7 +30,7 @@ GuestAddr GuestHeap::alloc(uint32_t size, uint32_t align) {
     GuestAddr addr = allocLocked(usable + kRedzone, align);
     std::memset(mem_.ptr<uint8_t>(addr + usable), 0xfd, kRedzone);
     Cpu *cpu = Runtime::currentCpu();
-    redzones_[addr] = {usable, cpu ? cpu->reg(Cpu::LR) : 0};
+    redzones_[addr] = {usable, cpu ? cpu->returnAddress() : 0};
     return addr;
 }
 
@@ -103,7 +103,7 @@ GuestAddr GuestHeap::realloc(GuestAddr addr, uint32_t size) {
         fresh = allocLocked(usable + kRedzone, kGrain);
         std::memset(mem_.ptr<uint8_t>(fresh + usable), 0xfd, kRedzone);
         Cpu *cpu = Runtime::currentCpu();
-        redzones_[fresh] = {usable, cpu ? cpu->reg(Cpu::LR) : 0};
+        redzones_[fresh] = {usable, cpu ? cpu->returnAddress() : 0};
     } else {
         fresh = allocLocked(size, kGrain);
     }
