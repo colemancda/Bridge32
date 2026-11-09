@@ -229,6 +229,11 @@ B32_THUNK(_strrchr) {
     const char *host = c.mem.cstr(s);
     c.ret(guestPtr(c, s, host, std::strrchr(host, c.args.i32())));
 }
+B32_THUNK(_rindex) {
+    GuestAddr s = c.args.ptr();
+    const char *host = c.mem.cstr(s);
+    c.ret(guestPtr(c, s, host, std::strrchr(host, c.args.i32())));
+}
 
 B32_THUNK(_strstr) {
     GuestAddr s = c.args.ptr();
@@ -642,6 +647,32 @@ B32_THUNK(_fputc) {
 B32_THUNK(_fputs) {
     const char *s = c.mem.cstr(c.args.ptr());
     c.ret(uint32_t(std::fputs(s, hostFile(c, c.args.ptr()))));
+}
+
+// int fputws(const wchar_t *, FILE *): the stream stays byte-oriented, in UTF-8.
+B32_THUNK(_fputws) {
+    GuestAddr p = c.args.ptr();
+    std::string text;
+    for (;; p += 4) {
+        uint32_t ch = c.mem.read<uint32_t>(p);
+        if (!ch) break;
+        if (ch < 0x80) {
+            text.push_back(char(ch));
+        } else if (ch < 0x800) {
+            text.push_back(char(0xC0 | ch >> 6));
+            text.push_back(char(0x80 | (ch & 63)));
+        } else if (ch < 0x10000) {
+            text.push_back(char(0xE0 | ch >> 12));
+            text.push_back(char(0x80 | (ch >> 6 & 63)));
+            text.push_back(char(0x80 | (ch & 63)));
+        } else {
+            text.push_back(char(0xF0 | ch >> 18));
+            text.push_back(char(0x80 | (ch >> 12 & 63)));
+            text.push_back(char(0x80 | (ch >> 6 & 63)));
+            text.push_back(char(0x80 | (ch & 63)));
+        }
+    }
+    c.ret(uint32_t(std::fputs(text.c_str(), hostFile(c, c.args.ptr()))));
 }
 
 // char *fgets(char *str, int size, FILE *stream)
