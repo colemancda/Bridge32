@@ -582,7 +582,10 @@ B32_THUNK(_CFStringCreateWithFormat) {
 B32_THUNK(_CFStringGetCharacters) {
     auto string = (CFStringRef)bridge(c).toHost(c.args.ptr());
     CFIndex location = c.args.i32(), length = c.args.i32();
-    CFStringGetCharacters(string, CFRangeMake(location, length), c.mem.ptr<UniChar>(c.args.ptr()));
+    GuestAddr out = c.args.ptr();
+    std::vector<UniChar> characters(size_t(std::max<CFIndex>(length, 0)));
+    CFStringGetCharacters(string, CFRangeMake(location, length), characters.data());
+    c.mem.writeArray<UniChar>(out, characters.data(), characters.size());
 }
 
 // Boolean CFStringFindWithOptions(CFStringRef, CFStringRef toFind, CFRange rangeToSearch,
