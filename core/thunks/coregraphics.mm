@@ -268,7 +268,7 @@ void writeTransform(Call &c, GuestAddr out, CGAffineTransform t) {
 
 B32_DATA(_CGAffineTransformIdentity, 24) {
     const float identity[6] = {1, 0, 0, 1, 0, 0};
-    rt.mem().copyIn(addr, identity, sizeof identity);
+    rt.mem().writeArray<float>(addr, identity, 6);
 }
 
 B32_THUNK(_CGAffineTransformMakeRotation) {
@@ -521,8 +521,7 @@ namespace {
 // An optional const CGAffineTransform * argument.
 bool optionalTransform(Call &c, GuestAddr p, CGAffineTransform &t) {
     if (!p) return false;
-    float v[6];
-    std::memcpy(v, c.mem.ptr<void>(p), sizeof v);
+    std::vector<float> v = c.mem.readArray<float>(p, 6);
     t = CGAffineTransformMake(v[0], v[1], v[2], v[3], v[4], v[5]);
     return true;
 }
@@ -600,7 +599,7 @@ B32_THUNK(_CGRectApplyAffineTransform) {
     CGRect r = rect(c);
     CGRect result = CGRectApplyAffineTransform(r, transform(c));
     const float v[4] = {float(result.origin.x), float(result.origin.y), float(result.size.width), float(result.size.height)};
-    c.mem.copyIn(out, v, sizeof v);
+    c.mem.writeArray<float>(out, v, 4);
 }
 
 // void CGRectDivide(CGRect, CGRect *slice, CGRect *remainder, CGFloat amount, CGRectEdge)
@@ -612,8 +611,8 @@ B32_THUNK(_CGRectDivide) {
     CGRectDivide(r, &s, &rest, amount, CGRectEdge(c.args.u32()));
     const float sv[4] = {float(s.origin.x), float(s.origin.y), float(s.size.width), float(s.size.height)};
     const float rv[4] = {float(rest.origin.x), float(rest.origin.y), float(rest.size.width), float(rest.size.height)};
-    if (slice) c.mem.copyIn(slice, sv, sizeof sv);
-    if (remainder) c.mem.copyIn(remainder, rv, sizeof rv);
+    if (slice) c.mem.writeArray<float>(slice, sv, 4);
+    if (remainder) c.mem.writeArray<float>(remainder, rv, 4);
 }
 
 B32_THUNK(_CGAffineTransformIsIdentity) { c.ret(CGAffineTransformIsIdentity(transform(c))); }
@@ -950,7 +949,7 @@ B32_THUNK(_CFStreamCreatePairWithSocketToHost) {
 namespace {
 void writeRectTo(Call &c, GuestAddr out, CGRect r) {
     const float f[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
-    c.mem.copyIn(out, f, sizeof f);
+    c.mem.writeArray<float>(out, f, 4);
 }
 }  // namespace
 
