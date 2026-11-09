@@ -144,6 +144,7 @@ B32_DATA(__ZTIi, 8) { fundamentalTypeInfo(rt, addr, "i"); }
 B32_DATA(__ZTIj, 8) { fundamentalTypeInfo(rt, addr, "j"); }
 B32_DATA(__ZTIf, 8) { fundamentalTypeInfo(rt, addr, "f"); }
 B32_DATA(__ZTIPKc, 8) { fundamentalTypeInfo(rt, addr, "PKc"); }
+B32_DATA(__ZTIPc, 8) { fundamentalTypeInfo(rt, addr, "Pc"); }
 
 // Only reached once something throws, which ___cxa_throw already rejects.
 B32_THUNK(___cxa_allocate_exception) { fatal("guest is about to throw a C++ exception; throwing is not supported yet"); }
