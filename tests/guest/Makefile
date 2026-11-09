@@ -4,6 +4,8 @@
 #   make ARCH=i386  i386, compiled by clang (which still targets i386) and
 #                   linked by tools/i386-link.py, since Apple's ld no longer
 #                   links i386; no SDK needed, Bridge32 binds imports by name
+#   make ARCH=ppc   PowerPC, written in assembly (the Darwin ABI) and linked by
+#                   tools/ppc-link.py; needs an LLVM with a PowerPC target
 
 ARCH    ?= arm
 SDK     ?= /Volumes/Crucial-2TB/Developer/HalfLife-iOS9/sdk/iPhoneOS9.3.sdk
@@ -60,6 +62,20 @@ $(OUT)/%: $$*/$$*.c ../../tools/i386-link.py
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -c -o $@.o $<
 	$(LINK) -o $@ $@.o
+
+else ifeq ($(ARCH),ppc)
+OUT     ?= ../../build/guest-ppc
+LINK    := python3 ../../tools/ppc-link.py
+TESTS   := hello
+
+.PHONY: all clean
+all: $(addprefix $(OUT)/,$(TESTS))
+
+# Assembly in the Darwin ABI, assembled by any LLVM with a PowerPC target (see
+# tools/ppc-asm.py) and linked into a Mach-O by tools/ppc-link.py.
+$(OUT)/%: ppc/%.s ../../tools/ppc-link.py
+	@mkdir -p $(OUT)
+	$(LINK) -o $@ $<
 
 else
 OUT     ?= ../../build/guest
