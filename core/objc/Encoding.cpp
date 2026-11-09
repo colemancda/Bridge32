@@ -1,6 +1,7 @@
 #include "Encoding.h"
 
 #include "core/Log.h"
+#include "core/arch/Arch.h"
 
 #include <algorithm>
 #include <cstring>
@@ -188,6 +189,18 @@ uint32_t Type::guestAlign() const {
     if (code == '[') return fields[0].guestAlign();
     // 8-byte types are only 4-byte aligned in the iOS 32-bit ABI.
     return std::min<uint32_t>(std::max<uint32_t>(guestSize(), 1), 4);
+}
+
+const Type *Type::singleFloatingField() const {
+    if (code == 'f' || code == 'd') return this;
+    if ((code == '{' && fields.size() == 1) || (code == '[' && count == 1)) return fields[0].singleFloatingField();
+    return nullptr;
+}
+
+ReturnClass guestReturnClass(const Type &type) {
+    if (type.isStruct() && arch::structReturnedInMemory(type.guestSize())) return ReturnClass::Memory;
+    if (arch::kFloatResultsInFpu && type.singleFloatingField()) return ReturnClass::Floating;
+    return ReturnClass::Integer;
 }
 
 size_t Type::hostSize() const { return ffiType(*this)->size; }
