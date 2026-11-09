@@ -5,19 +5,17 @@
 //
 // A Method is a guest method_t { SEL name, const char *types, IMP imp }. A
 // guest class's methods are its own method_t entries. A host method gets one
-// made up the first time it's asked for, whose IMP is a small ARM stub:
-//     ldr r12, [pc]     ; this method_t
-//     .word method_t
-//     ldr pc, [pc]      ; the thunk (out of branch range)
-//     .word thunk
-// so calling it runs the host implementation the method had at that moment,
-// as swizzling code expects when it calls "the original".
+// made up the first time it's asked for, whose IMP is a small stub
+// (arch::writeMethodStub) that passes the method_t to the __b32_call_host_imp
+// thunk, so calling it runs the host implementation the method had at that
+// moment, as swizzling code expects when it calls "the original".
 
 #include "Blocks.h"
 #include "Bridge.h"
 
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "core/arch/Arch.h"
 
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
@@ -32,7 +30,7 @@ using namespace b32::objc;
 
 namespace {
 constexpr uint32_t kMethodSel = 0, kMethodTypes = 4, kMethodImp = 8, kMethodSize = 12;
-constexpr uint32_t kStubSize = 16;
+constexpr uint32_t kStubSize = arch::kMethodStubSize;
 }  // namespace
 
 GuestAddr Bridge::findMethod(ClassInfo *cls, GuestAddr sel) {
@@ -54,10 +52,7 @@ GuestAddr Bridge::findMethod(ClassInfo *cls, GuestAddr sel) {
     mem.write<uint32_t>(m + kMethodSel, sel);
     mem.write<uint32_t>(m + kMethodTypes, rt_.internString(method_getTypeEncoding(hostMethod)));
     mem.write<uint32_t>(m + kMethodImp, stub);
-    mem.write<uint32_t>(stub, 0xe59fc000);      // ldr r12, [pc]   (the word at +8)
-    mem.write<uint32_t>(stub + 4, 0xe59ff000);  // ldr pc, [pc]    (the word at +12)
-    mem.write<uint32_t>(stub + 8, m);
-    mem.write<uint32_t>(stub + 12, thunk);
+    arch::writeMethodStub(mem, stub, m, thunk);
     hostMethods_[m] = {method_getImplementation(hostMethod), hostSel(sel)};
     methodOwners_[m] = {c, sel};
     guestMethodForHost_[static_cast<void *>(hostMethod)] = m;
@@ -123,21 +118,23 @@ GuestAddr Bridge::addMethod(ClassInfo *cls, GuestAddr sel, GuestAddr imp, const 
 }
 
 void Bridge::callHostImp(Call &c, IMP imp, SEL sel) {
-    // A struct result too big for registers comes back through r0, with self in r1.
-    GuestAddr method = c.cpu.reg(12);
+    // A struct result too big for registers comes back through the first
+    // argument, with self second.
+    GuestAddr method = c.cpu.stubContext();
     const char *types = rt_.mem().cstr(rt_.mem().read<uint32_t>(method + kMethodTypes));
     const char *p = types;
     Type ret = parseType(p);
     bool stret = ret.isStruct() && ret.guestSize() > 4;
-    GuestAddr receiver = c.cpu.reg(stret ? 1 : 0);
+    GuestAddr receiver = c.cpu.arg(stret ? 1 : 0);
     hostDispatch(c, receiver, guestSel(sel), nullptr, stret, imp);
 }
 
-// The made-up IMP of a host method (see the top of this file): r12 holds its method_t.
+// The made-up IMP of a host method (see the top of this file): the stub left
+// its method_t in the stub context register.
 B32_THUNK(__b32_call_host_imp) {
     IMP imp;
     SEL sel;
-    if (!c.rt.bridge().hostMethodFor(c.cpu.reg(12), imp, sel)) fatal("host method stub called without its method");
+    if (!c.rt.bridge().hostMethodFor(c.cpu.stubContext(), imp, sel)) fatal("host method stub called without its method");
     c.rt.bridge().callHostImp(c, imp, sel);
 }
 
