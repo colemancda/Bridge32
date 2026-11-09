@@ -108,7 +108,7 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
     bool storeExclusiveFromStatus(VAddr pc) {
         auto &r = jit->Regs();
         uint32_t n, t, d, offset = 0;
-        if (jit->Cpsr() & Cpu::kThumbBit) {
+        if (jit->Cpsr() & ArmCpu::kThumbBit) {
             uint16_t first = load<uint16_t>(pc), second = load<uint16_t>(pc + 2);
             if ((first & 0xfff0) != 0xe840) return false;
             n = first & 15, t = second >> 12, d = (second >> 8) & 15, offset = (second & 0xff) << 2;
@@ -152,7 +152,7 @@ struct DynarmicCpu::Callbacks final : Dynarmic::A32::UserCallbacks {
         case Exception::PreloadDataWithIntentToWrite:
         case Exception::PreloadInstruction:
             // Hints: skip the instruction and carry on.
-            jit->Regs()[15] = pc + ((jit->Cpsr() & Cpu::kThumbBit) ? 2 : 4);
+            jit->Regs()[15] = pc + ((jit->Cpsr() & ArmCpu::kThumbBit) ? 2 : 4);
             return;
         case Exception::Breakpoint:
             fatal("guest breakpoint at 0x%08x", pc);
@@ -258,7 +258,7 @@ std::unique_ptr<Dynarmic::ExclusiveMonitor> DynarmicCpu::makeMonitor() {
 
 DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarmic::ExclusiveMonitor *monitor,
                          size_t processorId)
-    : Cpu(mem, std::move(handler)),
+    : ArmCpu(mem, std::move(handler)),
       callbacks_(std::make_unique<Callbacks>(mem)),
       config_(std::make_unique<Dynarmic::A32::UserConfig>()) {
     Dynarmic::A32::UserConfig &config = *config_;
