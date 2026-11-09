@@ -253,7 +253,39 @@ B32_THUNK(_SecKeyRawSign) {
     size_t length = c.args.u32();
     GuestAddr sig = c.args.ptr(), sigLen = c.args.ptr();
     size_t outLength = sigLen ? c.mem.read<uint32_t>(sigLen) : 0;
+#if TARGET_OS_MACCATALYST
     OSStatus status = SecKeyRawSign(key, padding, c.mem.ptr<uint8_t>(data), length, c.mem.ptr<uint8_t>(sig), &outLength);
+#else
+    // The macOS SDK doesn't declare SecKeyRawSign; SecKeyCreateSignature with
+    // the algorithm the padding names does the same for RSA keys.
+    SecKeyAlgorithm algorithm;
+    switch (padding) {
+    case kSecPaddingNone: algorithm = kSecKeyAlgorithmRSASignatureRaw; break;
+    case kSecPaddingPKCS1: algorithm = kSecKeyAlgorithmRSASignatureDigestPKCS1v15Raw; break;
+    case kSecPaddingPKCS1SHA1: algorithm = kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA1; break;
+    case kSecPaddingPKCS1SHA224: algorithm = kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA224; break;
+    case kSecPaddingPKCS1SHA256: algorithm = kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA256; break;
+    case kSecPaddingPKCS1SHA384: algorithm = kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA384; break;
+    case kSecPaddingPKCS1SHA512: algorithm = kSecKeyAlgorithmRSASignatureDigestPKCS1v15SHA512; break;
+    default: c.ret(uint32_t(errSecParam)); return;
+    }
+    OSStatus status = errSecSuccess;
+    CFDataRef input = CFDataCreate(nullptr, c.mem.ptr<uint8_t>(data), CFIndex(length));
+    CFErrorRef error = nullptr;
+    CFDataRef signature = SecKeyCreateSignature(key, algorithm, input, &error);
+    CFRelease(input);
+    if (!signature) {
+        status = error ? OSStatus(CFErrorGetCode(error)) : errSecParam;
+        if (error) CFRelease(error);
+    } else if (size_t(CFDataGetLength(signature)) > outLength) {
+        status = errSecBufferTooSmall;
+        CFRelease(signature);
+    } else {
+        outLength = size_t(CFDataGetLength(signature));
+        std::memcpy(c.mem.ptr<uint8_t>(sig), CFDataGetBytePtr(signature), outLength);
+        CFRelease(signature);
+    }
+#endif
     if (sigLen) c.mem.write<uint32_t>(sigLen, uint32_t(outLength));
     c.ret(uint32_t(status));
 }
