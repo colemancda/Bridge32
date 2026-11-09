@@ -38,7 +38,7 @@ public:
     // field-by-field conversion.
     template <typename T> T *ptr(GuestAddr addr) const {
 #if defined(B32_GUEST_BIG_ENDIAN)
-        static_assert(std::is_void_v<T> || sizeof(T) == 1,
+        static_assert(sizeof(std::conditional_t<std::is_void_v<T>, char, T>) == 1,
                       "guest memory is big-endian: view it as bytes, or read<T>() the values");
 #endif
         return reinterpret_cast<T *>(base_ + addr);
