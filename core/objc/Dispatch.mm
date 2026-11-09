@@ -176,9 +176,9 @@ GuestAddr trampolineGuestImp(IMP imp);
 void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     Cpu &cpu = c.cpu;
     GuestMemory &mem = rt_.mem();
-    int selfReg = stret ? 1 : 0;
-    GuestAddr first = cpu.reg(selfReg);
-    GuestAddr sel = cpu.reg(selfReg + 1);
+    int selfArg = stret ? 1 : 0;  // a struct result pointer comes first
+    GuestAddr first = cpu.arg(selfArg);
+    GuestAddr sel = cpu.arg(selfArg + 1);
 
     GuestAddr receiver;
     ClassInfo *start;
@@ -191,13 +191,15 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     } else {
         receiver = first;
         if (!receiver) {  // messages to nil return zero
-            cpu.setReg(0, 0);
-            cpu.setReg(1, 0);
+            cpu.setResult64(0);
             return;
         }
-        if (!mem.isMapped(receiver) || !mem.isMapped(receiver + 3))
-            fatal("-[%s] sent to unmapped 0x%08x (from 0x%08x; r4-r8 %08x %08x %08x %08x %08x)", selName(sel), receiver,
-                  cpu.reg(Cpu::LR), cpu.reg(4), cpu.reg(5), cpu.reg(6), cpu.reg(7), cpu.reg(8));
+        if (!mem.isMapped(receiver) || !mem.isMapped(receiver + 3)) {
+            std::string frames;
+            for (uint32_t ret : cpu.frameChain(8)) frames += " " + std::to_string(ret);
+            fatal("-[%s] sent to unmapped 0x%08x (from 0x%08x; frames%s)", selName(sel), receiver, cpu.returnAddress(),
+                  frames.c_str());
+        }
         start = classOf(receiver);
         if (!start && guestProtocols_.count(receiver)) {
             // Protocols are objects that live forever: their memory
@@ -205,7 +207,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             // goes to the host's protocol of the same name.
             const char *name = selName(sel);
             if (!std::strcmp(name, "retain") || !std::strcmp(name, "autorelease") || !std::strcmp(name, "copy")) {
-                cpu.setReg(0, receiver);
+                cpu.setResult(receiver);
                 return;
             }
             if (!std::strcmp(name, "release")) return;
@@ -221,7 +223,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             // apps get away with on iOS) would free it.
             const char *name = selName(sel);
             if (!std::strcmp(name, "retain") || !std::strcmp(name, "autorelease") || !std::strcmp(name, "release")) {
-                cpu.setReg(0, receiver);
+                cpu.setResult(receiver);
                 return;
             }
         }
@@ -235,7 +237,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
             GuestAddr isa = mem.isMapped(receiver) ? mem.read<uint32_t>(receiver) : 0;
             ClassInfo *asClass = classInfo(receiver);
             fatal("-%s sent to 0x%08x, which is not an object (isa 0x%08x; as a class: %s; from 0x%08x)", selName(sel),
-                  receiver, isa, asClass ? asClass->name.c_str() : "unknown", cpu.reg(Cpu::LR));
+                  receiver, isa, asClass ? asClass->name.c_str() : "unknown", cpu.returnAddress());
         }
         if (!start->initialized && start->isGuest) ensureInitialized(start);
     }
@@ -244,7 +246,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     for (; info && info->isGuest; info = info->super) {
         auto it = info->methods.find(sel);
         if (it == info->methods.end()) continue;
-        if (kind != SuperKind::None) cpu.setReg(selfReg, receiver);
+        if (kind != SuperKind::None) cpu.setArg(selfArg, receiver);
         cpu.jump(it->second.imp);
         return;
     }
@@ -276,7 +278,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     if (trace)
         log("guest -> host %c[%s %s]%s (thread %x, from 0x%08x)", object_isClass(recv) ? '+' : '-',
             object_getClassName(recv), name, superInfo ? " (super)" : "", pthread_mach_thread_np(pthread_self()),
-            c.cpu.reg(Cpu::LR));
+            c.cpu.returnAddress());
 
     // A guest method behind a trampoline (a guest category on a host class)
     // runs here in the guest, as the guest's own runtime would run it, rather
@@ -286,7 +288,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         IMP target = direct ? direct
                             : class_getMethodImplementation(superInfo ? superInfo->host : object_getClass(recv), hsel);
         if (GuestAddr guestImp = trampolineGuestImp(target)) {
-            c.cpu.setReg(stret ? 1 : 0, receiver);
+            c.cpu.setArg(stret ? 1 : 0, receiver);
             c.cpu.jump(guestImp);
             return;
         }
@@ -318,7 +320,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         std::string chain;
         for (ClassInfo *k = classOf(receiver); k; k = k->super) chain += " " + k->name + (k->isGuest ? "" : " (host)");
         fatal("unrecognized selector %c[%s %s] (from 0x%08x; classes:%s)", object_isClass(recv) ? '+' : '-',
-              class_getName(object_getClass(recv)), name, c.cpu.reg(Cpu::LR), chain.c_str());
+              class_getName(object_getClass(recv)), name, c.cpu.returnAddress(), chain.c_str());
     }
     if (trace) log("    types %s%s", types.c_str(), guestTypes ? " (a guest method)" : "");
     HostCall &hc = hostCall(types, name, guestTypes);
@@ -439,11 +441,12 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     case 'S': lo = uint32_t(guest[0] | guest[1] << 8); break;
     default: std::memcpy(&lo, guest, 4); break;
     }
-    c.cpu.setReg(0, lo);
     if (size > 4) {
         uint32_t hi;
         std::memcpy(&hi, guest + 4, 4);
-        c.cpu.setReg(1, hi);
+        c.cpu.setResult64(lo | (uint64_t(hi) << 32));
+    } else {
+        c.cpu.setResult(lo);
     }
 }
 
