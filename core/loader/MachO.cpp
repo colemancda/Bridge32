@@ -307,21 +307,25 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             for (uint32_t i = 0; i < dysymtab.nlocrel; i++) {
                 relocation_info rel;
                 std::memcpy(&rel, slice + dysymtab.locreloff + i * sizeof rel, sizeof rel);
+                // As dyld does: only 4-byte vanilla relocations move a pointer;
+                // absolute ones don't, and a prebound lazy pointer is bound below.
                 if (uint32_t(rel.r_address) & R_SCATTERED) {
                     scattered_relocation_info srel;
                     std::memcpy(&srel, &rel, sizeof srel);
-                    rebase(base + srel.r_address);
-                } else if (rel.r_length == 2) {
+                    if (srel.r_length == 2 && srel.r_type == GENERIC_RELOC_VANILLA) rebase(base + srel.r_address);
+                } else if (rel.r_length == 2 && rel.r_type == GENERIC_RELOC_VANILLA && rel.r_symbolnum != R_ABS) {
                     rebase(base + uint32_t(rel.r_address));
                 }
             }
         }
     }
 
-    auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
+    auto targetOf = [&](const std::string &symbol) {
         auto own = defined.find(symbol);
-        GuestAddr target = own != defined.end() ? own->second : resolve_(symbol);
-        mem_.write<uint32_t>(where, uint32_t(target + addend));
+        return own != defined.end() ? own->second : resolve_(symbol);
+    };
+    auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
+        mem_.write<uint32_t>(where, uint32_t(targetOf(symbol) + addend));
         image.bindCount++;
     };
 
@@ -337,6 +341,24 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                 section sect;
                 std::memcpy(&sect, sectCmd + sizeof seg + s * sizeof sect, sizeof sect);
                 uint32_t type = sect.flags & SECTION_TYPE;
+#if defined(B32_GUEST_I386)
+                // Mac OS X 10.4-era __IMPORT,__jump_table: five-byte entries of
+                // hlt that dyld overwrites with `jmp target`.
+                constexpr uint32_t kJumpTableEntry = 5;
+                if (type == S_SYMBOL_STUBS && (sect.flags & S_ATTR_SELF_MODIFYING_CODE) &&
+                    sect.reserved2 == kJumpTableEntry) {
+                    for (uint32_t k = 0; k < sect.size / kJumpTableEntry; k++) {
+                        uint32_t indirect;
+                        std::memcpy(&indirect, slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4, 4);
+                        if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
+                        GuestAddr entry = sect.addr + slide + k * kJumpTableEntry;
+                        mem_.write<uint8_t>(entry, 0xE9);
+                        mem_.write<uint32_t>(entry + 1, targetOf(symbolName(indirect)) - (entry + kJumpTableEntry));
+                        image.bindCount++;
+                    }
+                    continue;
+                }
+#endif
                 if (type != S_NON_LAZY_SYMBOL_POINTERS && type != S_LAZY_SYMBOL_POINTERS) continue;
                 for (uint32_t k = 0; k < sect.size / 4; k++) {
                     uint32_t indirect;
