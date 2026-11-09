@@ -635,13 +635,17 @@ B32_THUNK(_CGDataProviderCreateWithData) {
 }
 
 // bool CGFontGetGlyphAdvances(CGFontRef, const CGGlyph glyphs[], size_t count, int advances[]):
-// both arrays have the same layout in the guest.
+// 16-bit glyphs in, 32-bit advances out, in the guest's byte order.
 B32_THUNK(_CGFontGetGlyphAdvances) {
     auto font = ref<CGFontRef>(c);
     GuestAddr glyphs = c.args.ptr();
     size_t count = c.args.u32();
     GuestAddr advances = c.args.ptr();
-    c.ret(CGFontGetGlyphAdvances(font, c.mem.ptr<CGGlyph>(glyphs), count, c.mem.ptr<int>(advances)));
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    std::vector<int> hostAdvances(count);
+    bool ok = CGFontGetGlyphAdvances(font, hostGlyphs.data(), count, hostAdvances.data());
+    c.mem.writeArray<int32_t>(advances, hostAdvances.data(), count);
+    c.ret(ok);
 }
 
 // bool CGFontGetGlyphBBoxes(CGFontRef, const CGGlyph glyphs[], size_t count, CGRect bboxes[]):
@@ -652,11 +656,12 @@ B32_THUNK(_CGFontGetGlyphBBoxes) {
     size_t count = c.args.u32();
     GuestAddr bboxes = c.args.ptr();
     std::vector<CGRect> rects(count);
-    bool ok = CGFontGetGlyphBBoxes(font, c.mem.ptr<CGGlyph>(glyphs), count, rects.data());
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    bool ok = CGFontGetGlyphBBoxes(font, hostGlyphs.data(), count, rects.data());
     for (size_t i = 0; ok && i < count; i++) {
         const CGRect &r = rects[i];
         const float v[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
-        c.mem.copyIn(bboxes + GuestAddr(i * sizeof v), v, sizeof v);
+        c.mem.writeArray<float>(bboxes + GuestAddr(i * sizeof v), v, 4);
     }
     c.ret(ok);
 }
@@ -718,17 +723,20 @@ CGFloat showGlyphsAt(CGContextRef ctx, CGFloat x, CGFloat y, const CGGlyph *glyp
 B32_THUNK(_CGContextShowGlyphsAtPoint) {
     auto ctx = ref<CGContextRef>(c);
     CGFloat x = cgf(c), y = cgf(c);
-    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
-    showGlyphsAt(ctx, x, y, glyphs, c.args.u32());
+    GuestAddr glyphs = c.args.ptr();
+    size_t count = c.args.u32();
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    showGlyphsAt(ctx, x, y, hostGlyphs.data(), count);
 }
 // void CGContextShowGlyphs(CGContextRef, const CGGlyph glyphs[], size_t count): from the text
 // position, which moves past them.
 B32_THUNK(_CGContextShowGlyphs) {
     auto ctx = ref<CGContextRef>(c);
-    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
+    GuestAddr glyphs = c.args.ptr();
     size_t count = c.args.u32();
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
     CGPoint at = CGContextGetTextPosition(ctx);
-    CGContextSetTextPosition(ctx, showGlyphsAt(ctx, at.x, at.y, glyphs, count), at.y);
+    CGContextSetTextPosition(ctx, showGlyphsAt(ctx, at.x, at.y, hostGlyphs.data(), count), at.y);
 }
 
 // --- transparency layers, masks, shadings, transformed paths ---------------------------------------
@@ -1029,7 +1037,8 @@ B32_THUNK(_CFStringCreateWithCharactersNoCopy) {
     c.args.u32();
     GuestAddr chars = c.args.ptr();
     CFIndex length = c.args.i32();
-    c.ret(c.rt.bridge().toGuest((id)CFStringCreateWithCharacters(nullptr, c.mem.ptr<UniChar>(chars), length)));
+    std::vector<UniChar> hostChars = c.mem.readArray<UniChar>(chars, size_t(std::max<CFIndex>(length, 0)));
+    c.ret(c.rt.bridge().toGuest((id)CFStringCreateWithCharacters(nullptr, hostChars.data(), length)));
 }
 // Boolean CFStringFindCharacterFromSet(CFStringRef, CFCharacterSetRef, CFRange, CFStringCompareFlags, CFRange *)
 B32_THUNK(_CFStringFindCharacterFromSet) {
