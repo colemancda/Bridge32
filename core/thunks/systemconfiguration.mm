@@ -24,10 +24,11 @@ constexpr CFunction kReachability[] = {
 B32_C_FUNCTIONS(kReachability, systemConfiguration);
 
 // SCNetworkReachabilityCreateWithAddress(CFAllocatorRef, const struct sockaddr *): a
-// sockaddr has the same layout in both ABIs.
+// sockaddr is a length and family byte and then address bytes (a port or IPv4
+// address already in network order), so its layout is the same in every ABI.
 B32_THUNK(_SCNetworkReachabilityCreateWithAddress) {
     c.args.ptr();
-    auto *address = c.mem.ptr<const struct sockaddr>(c.args.ptr());
+    auto *address = static_cast<const struct sockaddr *>(c.mem.ptr<void>(c.args.ptr()));
     SCNetworkReachabilityRef target = SCNetworkReachabilityCreateWithAddress(nullptr, address);
     c.ret(c.rt.bridge().toGuest((id)target));
 }
