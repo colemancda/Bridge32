@@ -172,16 +172,24 @@ B32_THUNK(_NXGetLocalArchInfo) {
     B32_THUNK(symbol) { c.ret(KERN_FAILURE); }
 B32_MACH_FAILS(_task_swap_exception_ports)
 B32_MACH_FAILS(_task_get_exception_ports)
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_task_set_exception_ports)
+#endif
 B32_MACH_FAILS(_thread_swap_exception_ports)
 B32_MACH_FAILS(_thread_get_exception_ports)
 B32_MACH_FAILS(_thread_set_exception_ports)
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_port_allocate)
+#endif
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_port_insert_right)
+#endif
 B32_MACH_FAILS(_mach_port_mod_refs)
 B32_MACH_FAILS(_mach_port_move_member)
 B32_MACH_FAILS(_mach_port_request_notification)
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_msg)
+#endif
 B32_MACH_FAILS(_exception_raise)
 B32_MACH_FAILS(_exception_raise_state)
 B32_MACH_FAILS(_exception_raise_state_identity)
