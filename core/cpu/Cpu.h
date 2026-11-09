@@ -40,6 +40,11 @@ public:
     // alignment), the stack pointer, the caller's return address.
     virtual uint32_t arg(int i) const = 0;
     virtual void setArg(int i, uint32_t value) = 0;
+    // Where the ABI passes floating-point arguments in registers of their own
+    // (PowerPC's f1-f13; each still uses up its word or two of the stream
+    // above): whether it does, and the value of the n-th such register.
+    virtual bool floatArgsInRegisters() const { return false; }
+    virtual double floatArg(int n) const { return 0; }
     virtual uint32_t sp() const = 0;
     virtual void setSp(uint32_t value) = 0;
     virtual uint32_t pc() const = 0;
