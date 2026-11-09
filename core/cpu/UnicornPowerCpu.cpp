@@ -21,6 +21,8 @@ namespace {
 constexpr uint32_t kMsrFp = 1u << 13, kMsrVec = 1u << 25;
 // QEMU's exception number for `sc`.
 constexpr int kSyscallException = 8;
+// What __PAGEZERO covers in a Mac OS X executable: nothing below this is ever the guest's.
+constexpr uint32_t kPageZero = 0x1000;
 
 void check(uc_err err, const char *what) {
     if (err != UC_ERR_OK) fatal("unicorn: %s: %s", what, uc_strerror(err));
@@ -98,6 +100,12 @@ bool UnicornPowerCpu::mapAroundForHook(uint64_t address) {
 
 void UnicornPowerCpu::mapPages(uint32_t first, uint32_t end) {
     uint64_t start = uint64_t(first) * GuestMemory::kPageSize, size = uint64_t(end - first) * GuestMemory::kPageSize;
+    // The program's own page zero stays unmapped: a Mach-O's text starts at 0x1000, in the same host page as
+    // address 0, and a null pointer must fault rather than read zeros.
+    if (start < kPageZero) {
+        size -= kPageZero - start;
+        start = kPageZero;
+    }
     check(uc_mem_map_ptr(uc_, start, size, UC_PROT_ALL, mem().base() + start), "map");
     for (uint32_t p = first; p < end; p++) mapped_[p / 8] |= uint8_t(1u << (p % 8));
 }
@@ -105,7 +113,7 @@ void UnicornPowerCpu::mapPages(uint32_t first, uint32_t end) {
 bool UnicornPowerCpu::mapAround(GuestAddr addr) {
     constexpr uint32_t kPages = GuestMemory::kSize / GuestMemory::kPageSize;
     uint32_t page = addr / GuestMemory::kPageSize;
-    if (!mem().isMapped(addr)) {
+    if (addr < kPageZero || !mem().isMapped(addr)) {
         fault_ = Fault{addr, false};
         return false;
     }
@@ -179,8 +187,10 @@ uint32_t UnicornPowerCpu::runUntilSvc() {
                         std::snprintf(text, sizeof text, " %08x", ret);
                         frames += text;
                     }
-                    log("guest at pc=0x%08x lr=0x%08x r1=0x%08x r3=0x%08x r4=0x%08x ctr=0x%08x; frames%s", pc, reg(LR), reg(SP),
-                        reg(R3), reg(R4), reg(CTR), frames.c_str());
+                    log("guest at pc=0x%08x lr=0x%08x ctr=0x%08x cr=0x%08x; frames%s", pc, reg(LR), reg(CTR), reg(CR), frames.c_str());
+                    for (int base = 0; base < 32; base += 8)
+                        log("  r%-2d %08x %08x %08x %08x %08x %08x %08x %08x", base, reg(base), reg(base + 1), reg(base + 2), reg(base + 3),
+                            reg(base + 4), reg(base + 5), reg(base + 6), reg(base + 7));
                 }
                 continue;
             }
