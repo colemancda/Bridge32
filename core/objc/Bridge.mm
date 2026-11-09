@@ -407,31 +407,37 @@ void Bridge::setupImage(const Image &image) {
             GuestAddr target = mem.read<uint32_t>(cat + layout32::kCategoryClass);
             ClassInfo *cls = classInfo(target);
             if (!cls) cls = realizeGuestClass(target);
-            const char *catName = mem.cstr(mem.read<uint32_t>(cat + layout32::kCategoryName));
-
-            for (auto [info, listOffset] : {std::pair{cls, layout32::kCategoryInstanceMethods},
-                                            std::pair{cls->meta, layout32::kCategoryClassMethods}}) {
-                GuestAddr methods = mem.read<uint32_t>(cat + listOffset);
-                if (!methods) continue;
-                ClassInfo staging;
-                addGuestMethods(&staging, methods);
-                for (auto &[sel, method] : staging.methods) {
-                    info->methods[sel] = method;
-                    methodOwners_[method.entry] = {info, sel};  // not the temporary staging class
-                    if (selName(sel) == std::string("load") && info->isMeta) loadMethods_.push_back({info->instance, method.imp});
-                    // Host code must see the category too.
-                    // The bridge runs +initialize itself (ensureInitialized).
-                    if (info->host && !(info->isMeta && selName(sel) == std::string("initialize")))
-                        installTrampoline(info->host, sel, method, info);
-                }
-            }
-            log("category %s(%s) loaded", cls->name.c_str(), catName);
+            addCategoryMethods(cls, mem.cstr(mem.read<uint32_t>(cat + layout32::kCategoryName)),
+                               mem.read<uint32_t>(cat + layout32::kCategoryInstanceMethods),
+                               mem.read<uint32_t>(cat + layout32::kCategoryClassMethods));
         }
     }
+
+#if defined(B32_GUEST_I386)
+    setupLegacyImage(image);
+#endif
 
     settingUp_ = false;
     for (const auto &r : deferredResolvers_) installTrampoline(r.target, r.sel, r.method, r.owner);
     deferredResolvers_.clear();
+}
+
+void Bridge::addCategoryMethods(ClassInfo *cls, const char *category, GuestAddr instanceMethods, GuestAddr classMethods) {
+    for (auto [info, methods] : {std::pair{cls, instanceMethods}, std::pair{cls->meta, classMethods}}) {
+        if (!methods) continue;
+        ClassInfo staging;
+        addGuestMethods(&staging, methods);
+        for (auto &[sel, method] : staging.methods) {
+            info->methods[sel] = method;
+            methodOwners_[method.entry] = {info, sel};  // not the temporary staging class
+            if (selName(sel) == std::string("load") && info->isMeta) loadMethods_.push_back({info->instance, method.imp});
+            // Host code must see the category too.
+            // The bridge runs +initialize itself (ensureInitialized).
+            if (info->host && !(info->isMeta && selName(sel) == std::string("initialize")))
+                installTrampoline(info->host, sel, method, info);
+        }
+    }
+    log("category %s(%s) loaded", cls->name.c_str(), category);
 }
 
 void Bridge::addGuestMethods(ClassInfo *info, GuestAddr list) {
@@ -467,6 +473,8 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
     auto *meta = new ClassInfo;
     cls->addr = addr;
     meta->addr = metaAddr;
+    cls->ro = ro;
+    meta->ro = metaRo;
     cls->name = meta->name = mem.cstr(mem.read<uint32_t>(ro + layout32::kRoName));
     cls->isGuest = meta->isGuest = true;
     meta->isMeta = true;
@@ -510,16 +518,69 @@ ClassInfo *Bridge::realizeGuestClass(GuestAddr addr) {
 
     if (GuestAddr methods = mem.read<uint32_t>(ro + layout32::kRoMethods)) addGuestMethods(cls, methods);
     if (GuestAddr methods = mem.read<uint32_t>(metaRo + layout32::kRoMethods)) addGuestMethods(meta, methods);
-    stubSdkClass(*this, rt_, cls);  // ads, analytics and crash reporters compiled into the app
-    if (GuestAddr protocols = mem.read<uint32_t>(ro + layout32::kRoProtocols)) guestClassProtocols_[addr].push_back(protocols);
+    finishGuestClass(cls);
+    return cls;
+}
 
-    classes_[addr] = cls;
-    classes_[metaAddr] = meta;
+void Bridge::finishGuestClass(ClassInfo *cls) {
+    ClassInfo *meta = cls->meta;
+    stubSdkClass(*this, rt_, cls);  // ads, analytics and crash reporters compiled into the app
+    if (GuestAddr protocols = rt_.mem().read<uint32_t>(cls->ro + layout32::kRoProtocols))
+        guestClassProtocols_[cls->addr].push_back(protocols);
+
+    classes_[cls->addr] = cls;
+    classes_[meta->addr] = meta;
     if (auto load = meta->methods.find(guestSel("load")); load != meta->methods.end())
         loadMethods_.push_back({cls, load->second.imp});
 
-    createShadowClass(cls, ro);
+    createShadowClass(cls, cls->ro);
+}
+
+GuestAddr Bridge::allocateClassPair(ClassInfo *super, const std::string &name) {
+    std::lock_guard guard(lock_);
+    if (classNamed(name)) return 0;
+    GuestMemory &mem = rt_.mem();
+    constexpr uint32_t kRoSize = 40, kPairSize = layout32::kClassSize + kRoSize;
+    GuestAddr cls = rt_.heap().calloc(2, kPairSize), meta = cls + kPairSize;
+    GuestAddr ro = cls + layout32::kClassSize, metaRo = meta + layout32::kClassSize;
+    GuestAddr nameAddr = rt_.internString(name);
+    uint32_t start = super ? super->instanceSize : kObjectHeaderSize;
+    mem.write<uint32_t>(cls + layout32::kClassIsa, meta);
+    mem.write<uint32_t>(cls + layout32::kClassSuper, super ? super->addr : 0);
+    mem.write<uint32_t>(cls + layout32::kClassData, ro);
+    mem.write<uint32_t>(meta + layout32::kClassData, metaRo);
+    mem.write<uint32_t>(ro + layout32::kRoInstanceStart, start);
+    mem.write<uint32_t>(ro + layout32::kRoInstanceSize, start);
+    mem.write<uint32_t>(ro + layout32::kRoName, nameAddr);
+    mem.write<uint32_t>(metaRo + layout32::kRoFlags, layout32::kRoMeta);
+    mem.write<uint32_t>(metaRo + layout32::kRoName, nameAddr);
+    realizeGuestClass(cls);
     return cls;
+}
+
+bool Bridge::addIvar(ClassInfo *cls, const std::string &name, uint32_t size, uint32_t log2Align, const std::string &types) {
+    std::lock_guard guard(lock_);
+    if (!cls->isGuest) return false;
+    for (const GuestIvar &ivar : cls->ivars)
+        if (ivar.name == name) return false;
+    GuestMemory &mem = rt_.mem();
+    uint32_t align = 1u << log2Align, offset = (cls->instanceSize + align - 1) & ~(align - 1);
+    GuestAddr offsetVar = rt_.heap().calloc(1, 4), entry = rt_.heap().calloc(1, 20);
+    mem.write<uint32_t>(offsetVar, offset);
+    mem.write<uint32_t>(entry, offsetVar);
+    mem.write<uint32_t>(entry + 4, rt_.internString(name));
+    mem.write<uint32_t>(entry + 8, rt_.internString(types));
+    mem.write<uint32_t>(entry + 12, log2Align);
+    mem.write<uint32_t>(entry + 16, size);
+    cls->ivars.push_back({name, offsetVar, types, entry});
+    cls->instanceSize = offset + size;
+    return true;
+}
+
+GuestAddr Bridge::protocolData(GuestAddr protocol) {
+    std::lock_guard guard(lock_);
+    auto it = legacyProtocols_.find(protocol);
+    return it == legacyProtocols_.end() ? protocol : it->second;
 }
 
 void Bridge::collectProtocols(GuestAddr list, std::vector<std::string> &names) {
@@ -529,7 +590,7 @@ void Bridge::collectProtocols(GuestAddr list, std::vector<std::string> &names) {
         GuestAddr proto = mem.read<uint32_t>(list + 4 + i * 4);
         names.push_back(mem.cstr(mem.read<uint32_t>(proto + 4)));
         // protocol_t.protocols: the protocols this one adopts.
-        if (GuestAddr inherited = mem.read<uint32_t>(proto + 8)) collectProtocols(inherited, names);
+        if (GuestAddr inherited = mem.read<uint32_t>(protocolData(proto) + 8)) collectProtocols(inherited, names);
     }
 }
 
@@ -978,7 +1039,7 @@ std::string Bridge::guestProtocolTypes(ClassInfo *cls, const char *sel, bool ins
     for (size_t i = 0; i < pending.size() && i < 1000; i++) {
         GuestAddr proto = pending[i];
         for (uint32_t offset : instance ? std::initializer_list<uint32_t>{12, 20} : std::initializer_list<uint32_t>{16, 24}) {
-            GuestAddr methods = mem.read<uint32_t>(proto + offset);
+            GuestAddr methods = mem.read<uint32_t>(protocolData(proto) + offset);
             if (!methods) continue;
             uint32_t entsize = mem.read<uint32_t>(methods) & ~3u, count = mem.read<uint32_t>(methods + 4);
             for (uint32_t m = 0; m < count; m++) {
@@ -987,7 +1048,7 @@ std::string Bridge::guestProtocolTypes(ClassInfo *cls, const char *sel, bool ins
                     return mem.cstr(mem.read<uint32_t>(method + 4));
             }
         }
-        if (GuestAddr inherited = mem.read<uint32_t>(proto + 8)) {
+        if (GuestAddr inherited = mem.read<uint32_t>(protocolData(proto) + 8)) {
             uint32_t count = mem.read<uint32_t>(inherited);
             for (uint32_t k = 0; k < count; k++) pending.push_back(mem.read<uint32_t>(inherited + 4 + k * 4));
         }
