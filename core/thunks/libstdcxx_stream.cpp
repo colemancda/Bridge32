@@ -17,6 +17,7 @@
 #include "Thunks.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "libstdcxx_cow.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -550,3 +551,82 @@ B32_DATA(__ZTTSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE, 16) {
 B32_DATA(__ZTVSt9basic_iosIcSt11char_traitsIcEE, 64) {}
 B32_DATA(__ZTVSt15basic_streambufIcSt11char_traitsIcEE, 64) {}
 B32_DATA(__ZTVSt13basic_filebufIcSt11char_traitsIcEE, 64) {}
+
+// --- basic_ostringstream's out-of-line members ---------------------------------------------
+
+namespace {
+struct NarrowStrings : CowStrings<char> {
+    explicit NarrowStrings(Call &call) : CowStrings(call, "__ZNSs4_Rep20_S_empty_rep_storageE") {}
+};
+constexpr uint32_t kOstringstreamBuffer = 4;
+
+// Points the put area at the buffer's string, with nothing written yet.
+void resetPutArea(Call &c, GuestAddr buffer) {
+    GuestAddr d = c.mem.read<uint32_t>(buffer + kBufString);
+    c.mem.write<uint32_t>(buffer + kOutBeg, d);
+    c.mem.write<uint32_t>(buffer + kOutCur, d);
+    c.mem.write<uint32_t>(buffer + kOutEnd, d + c.mem.read<uint32_t>(d - 8));
+}
+}  // namespace
+
+B32_THUNK(__ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEEC1ESt13_Ios_Openmode) {
+    NarrowStrings s(c);
+    GuestAddr self = c.args.ptr();
+    uint32_t mode = c.args.u32() | kModeOut;
+    GuestAddr vtable = c.rt.dataSymbol("__ZTVSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE");
+    GuestAddr buffer = self + kOstringstreamBuffer, ios = self + kOstringstreamIos;
+    std::memset(c.mem.ptr<uint8_t>(buffer), 0, kBufString + 4);
+    std::memset(c.mem.ptr<uint8_t>(ios), 0, kIosEnd);
+    c.mem.write<uint32_t>(self, vtable + 12);
+    c.mem.write<uint32_t>(ios, vtable + 32);
+    c.mem.write<uint32_t>(buffer, c.rt.dataSymbol("__ZTVSt15basic_stringbufIcSt11char_traitsIcESaIcEE") + 8);
+    c.mem.write<uint32_t>(buffer + kBufMode, mode);
+    c.mem.write<uint32_t>(buffer + kBufString, s.emptyData);
+    resetPutArea(c, buffer);
+    initIos(c, ios, buffer);
+}
+B32_THUNK(__ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEED1Ev) {
+    NarrowStrings s(c);
+    s.release(c.mem.read<uint32_t>(c.args.ptr() + kOstringstreamBuffer + kBufString));
+}
+B32_THUNK(__ZNKSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE3strEv) {
+    NarrowStrings s(c);
+    GuestAddr out = c.args.ptr(), buffer = c.args.ptr() + kOstringstreamBuffer;
+    GuestAddr base = c.mem.read<uint32_t>(buffer + kOutBeg), cur = c.mem.read<uint32_t>(buffer + kOutCur);
+    c.mem.write<uint32_t>(out, s.make({c.mem.ptr<char>(base), cur - base}));
+    c.ret(out);
+    c.cpu.popStructPointer();
+}
+B32_THUNK(__ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE3strERKSs) {
+    NarrowStrings s(c);
+    GuestAddr buffer = c.args.ptr() + kOstringstreamBuffer;
+    std::string text(s.view(c.args.ptr()));
+    s.assign(buffer + kBufString, text);
+    resetPutArea(c, buffer);
+}
+
+// --- inserters --------------------------------------------------------------------------
+
+B32_THUNK(__ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_) {
+    GuestAddr stream = c.args.ptr();
+    insert(c, stream, "\n");
+    GuestAddr buffer = bufferOf(c, stream);
+    if (buffer) c.cpu.call(virtualOf(c, buffer, kSlotSync), {buffer});
+    c.ret(stream);
+}
+// operator<<(ostream &(*)(ostream &)): how endl and friends are applied.
+B32_THUNK(__ZNSolsEPFRSoS_E) {
+    GuestAddr stream = c.args.ptr(), manipulator = c.args.ptr();
+    c.ret(uint32_t(c.cpu.call(manipulator, {stream})));
+}
+B32_THUNK(__ZStlsISt11char_traitsIcEERSt13basic_ostreamIcT_ES5_c) {
+    GuestAddr stream = c.args.ptr();
+    insert(c, stream, std::string(1, char(c.args.u32())));
+    c.ret(stream);
+}
+B32_THUNK(__ZStlsIcSt11char_traitsIcESaIcEERSt13basic_ostreamIT_T0_ES7_RKSbIS4_S5_T1_E) {
+    NarrowStrings s(c);
+    GuestAddr stream = c.args.ptr();
+    insert(c, stream, std::string(s.view(c.args.ptr())));
+    c.ret(stream);
+}
