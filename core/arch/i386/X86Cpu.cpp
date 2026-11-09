@@ -107,6 +107,15 @@ void X86Cpu::deliverFault(uint32_t addr, bool write) {
 
     GuestAddr frame = (reg(ESP) - (kUcontext + kMcontext + kSiginfo)) & ~15u;
     GuestAddr uc = frame, mc = frame + kUcontext, si = mc + kMcontext;
+    if (!mem().isMapped(frame)) {
+        std::string frames;
+        for (uint32_t ret : frameChain(24)) {
+            char text[16];
+            std::snprintf(text, sizeof text, " %08x", ret);
+            frames += text;
+        }
+        fatal("guest stack overflow: fault at 0x%08x with esp=0x%08x, eip=0x%08x (frames%s)", addr, reg(ESP), reg(EIP), frames.c_str());
+    }
     std::memset(mem().ptr<void>(frame), 0, kUcontext + kMcontext + kSiginfo);
     mem().write<uint32_t>(uc + 24, kMcontext);
     mem().write<uint32_t>(uc + 28, mc);
@@ -179,6 +188,21 @@ double fromFloat80(const uint8_t in[10]) {
 namespace arch {
 
 const char *name() { return "i386"; }
+
+// pthread_getspecific as Apple's i386 libSystem has it, so a thread key is a
+// plain %gs-relative load: Mono reads these instructions to learn how to
+// inline it (the third word is the displacement it adds to key * 4), and
+// it's by far the most called import of anything built on TLS.
+//     mov 4(%esp), %eax
+//     mov %gs:0(,%eax,4), %eax
+//     ret
+GuestAddr nativeFunction(GuestMemory &mem, GuestHeap &heap, const std::string &symbol) {
+    if (symbol != "_pthread_getspecific") return 0;
+    static const uint8_t code[] = {0x8B, 0x44, 0x24, 0x04, 0x65, 0x8B, 0x04, 0x85, 0, 0, 0, 0, 0xC3};
+    GuestAddr addr = heap.alloc(sizeof code);
+    mem.copyIn(addr, code, sizeof code);
+    return addr;
+}
 
 double longDouble(const uint32_t *words) {
     uint8_t bytes[10];
