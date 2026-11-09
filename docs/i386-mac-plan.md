@@ -708,9 +708,11 @@ document-based Cocoa app to test with.
 
 **Asphalt 6 (Gameloft, 2011) runs.** It is an AppKit, OpenGL and C++ game linked
 against the system `libstdc++`, wrapped with `tools/make-app.sh`. It plays sound
-and renders its menus and race screens with no GL errors, and a 110-second
-session ran without a crash while writing its save files. Frame rate during a
-race has not been measured. Input hasn't been checked by a script.
+and renders its menus and races with no GL errors: a captured frame shows lap 2
+of 3 of a race, reached by clicks the app posted to itself. Over the last 75
+seconds of that session, which covers the end of loading and the race, it
+averaged about 16 frames per second. Keyboard steering hasn't been checked by a
+script.
 
 It needed:
 
