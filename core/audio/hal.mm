@@ -3,8 +3,9 @@
 // one place to send its samples, so this presents a single stereo output device
 // and feeds the guest's IOProc from the host's default output unit.
 //
-// An IOProc runs as (device, now, in, inTime, out, outTime, client), with
-// AudioTimeStamps of the same layout in both ABIs and 32-bit AudioBufferLists.
+// An IOProc runs as (device, now, in, inTime, out, outTime, client), with 32-bit
+// AudioBufferLists. Everything handed to the guest, and the samples it hands
+// back, are in its byte order, which for a PowerPC guest isn't the host's.
 
 #include "core/Log.h"
 #include "core/Runtime.h"
@@ -54,6 +55,36 @@ AudioStreamBasicDescription format() {
     return d;
 }
 
+// The format as the guest reads it: the same, but "native endian" means the guest's.
+AudioStreamBasicDescription guestFormat() {
+    AudioStreamBasicDescription d = format();
+    d.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+#if defined(B32_GUEST_BIG_ENDIAN)
+    d.mFormatFlags |= kAudioFormatFlagIsBigEndian;
+#endif
+    return d;
+}
+
+// An AudioTimeStamp is 64 bytes in the guest's byte order: { sampleTime, hostTime, rateScalar, wordClockTime,
+// SMPTETime (24 bytes), flags, reserved }.
+void writeTimeStamp(GuestMemory &mem, GuestAddr at, const AudioTimeStamp &s) {
+    mem.write<double>(at, s.mSampleTime);
+    mem.write<uint64_t>(at + 8, s.mHostTime);
+    mem.write<double>(at + 16, s.mRateScalar);
+    mem.write<uint64_t>(at + 24, s.mWordClockTime);
+    mem.write<int16_t>(at + 32, s.mSMPTETime.mSubframes);
+    mem.write<int16_t>(at + 34, s.mSMPTETime.mSubframeDivisor);
+    mem.write<uint32_t>(at + 36, s.mSMPTETime.mCounter);
+    mem.write<uint32_t>(at + 40, s.mSMPTETime.mType);
+    mem.write<uint32_t>(at + 44, s.mSMPTETime.mFlags);
+    mem.write<int16_t>(at + 48, s.mSMPTETime.mHours);
+    mem.write<int16_t>(at + 50, s.mSMPTETime.mMinutes);
+    mem.write<int16_t>(at + 52, s.mSMPTETime.mSeconds);
+    mem.write<int16_t>(at + 54, s.mSMPTETime.mFrames);
+    mem.write<uint32_t>(at + 56, s.mFlags);
+    mem.write<uint32_t>(at + 60, s.mReserved);
+}
+
 GuestMemory &guestMemory() { return objc::Bridge::shared()->runtime().mem(); }
 GuestHeap &guestHeap() { return objc::Bridge::shared()->runtime().heap(); }
 
@@ -71,7 +102,7 @@ OSStatus render(void *, AudioUnitRenderActionFlags *, const AudioTimeStamp *time
     AudioTimeStamp stamp = *time;
     stamp.mSampleTime = Float64(device.sampleTime.load());
     stamp.mFlags |= kAudioTimeStampSampleTimeValid;
-    for (uint32_t i = 0; i < 3; i++) mem.copyIn(base + i * sizeof stamp, &stamp, sizeof stamp);
+    for (uint32_t i = 0; i < 3; i++) writeTimeStamp(mem, base + i * uint32_t(sizeof stamp), stamp);
     mem.write<uint32_t>(base + inputList, 0);
     mem.write<uint32_t>(base + outputList, 1);
     mem.write<uint32_t>(base + outputList + 4, kChannels);
@@ -81,7 +112,10 @@ OSStatus render(void *, AudioUnitRenderActionFlags *, const AudioTimeStamp *time
 
     Runtime::threadCpu().call(device.proc, {kDevice, base, base + inputList, base + 64, base + outputList, base + 128, device.client});
 
-    std::memcpy(output.mData, mem.ptr<uint8_t>(base + samples), std::min(bytes, output.mDataByteSize));
+    // The guest mixed floats in its own byte order.
+    float *out = static_cast<float *>(output.mData);
+    uint32_t count = std::min(bytes, output.mDataByteSize) / sizeof(float);
+    for (uint32_t i = 0; i < count; i++) out[i] = mem.read<float>(base + samples + i * 4);
     device.sampleTime += frames;
     return noErr;
 }
@@ -128,9 +162,15 @@ void logUnknown(uint32_t property) {
 
 // The property's value in guest form, or empty if there's no such property.
 bool deviceProperty(Call &c, bool isInput, uint32_t property, std::vector<uint8_t> &out) {
-    auto scalar = [&](auto value) {
-        out.resize(sizeof value);
-        std::memcpy(out.data(), &value, sizeof value);
+    // Each value is appended in the guest's byte order.
+    auto put = [&](auto value) {
+        auto guest = GuestMemory::inGuestOrder(value);
+        out.insert(out.end(), reinterpret_cast<uint8_t *>(&guest), reinterpret_cast<uint8_t *>(&guest) + sizeof guest);
+    };
+    out.clear();
+    auto scalar = [&](auto value) { put(value); };
+    auto words = [&](std::initializer_list<uint32_t> values) {
+        for (uint32_t value : values) put(value);
     };
     switch (property) {
     case kAudioDevicePropertyDeviceNameCFString:
@@ -142,29 +182,37 @@ bool deviceProperty(Call &c, bool isInput, uint32_t property, std::vector<uint8_
     case kAudioDevicePropertyBufferFrameSize:
         scalar(device.frames);
         return true;
+    case kAudioDevicePropertyBufferSize:  // in bytes of the output stream's frames
+        scalar(device.frames * kFrameBytes);
+        return true;
+    case kAudioDevicePropertyBufferSizeRange:  // an AudioValueRange of doubles
+        put(double(kMinFrames * kFrameBytes));
+        put(double(kMaxFrames * kFrameBytes));
+        return true;
     case kAudioDevicePropertyLatency:
         scalar(uint32_t(0));
         return true;
     case kAudioDevicePropertyStreamFormat:
         if (isInput) return false;
-        scalar(format());
+        {
+            // The 40 bytes of the struct, field by field in the guest's byte order (see writeFormat).
+            AudioStreamBasicDescription d = guestFormat();
+            put(d.mSampleRate);
+            for (uint32_t field : {d.mFormatID, d.mFormatFlags, d.mBytesPerPacket, d.mFramesPerPacket, d.mBytesPerFrame,
+                                   d.mChannelsPerFrame, d.mBitsPerChannel, d.mReserved})
+                put(field);
+        }
         return true;
     case kAudioDevicePropertyStreamConfiguration: {
-        uint32_t list[4] = {0, kChannels, device.frames * kFrameBytes, 0};
-        if (isInput) {
-            out.assign(4, 0);
-        } else {
-            list[0] = 1;
-            out.resize(sizeof list);
-            std::memcpy(out.data(), list, sizeof list);
-        }
+        if (isInput)
+            words({0});
+        else
+            words({1, kChannels, device.frames * kFrameBytes, 0});
         return true;
     }
     case kAudioDevicePropertyPreferredChannelLayout: {
         if (isInput) return false;
-        uint32_t layout[3] = {kAudioChannelLayoutTag_Stereo, 0, 0};
-        out.resize(sizeof layout);
-        std::memcpy(out.data(), layout, sizeof layout);
+        words({kAudioChannelLayoutTag_Stereo, 0, 0});
         return true;
     }
     }
@@ -236,7 +284,9 @@ B32_THUNK(_AudioDeviceGetPropertyInfo) {
         return;
     }
     if (size) c.mem.write<uint32_t>(size, uint32_t(value.size()));
-    if (writable) c.mem.write<uint8_t>(writable, property == kAudioDevicePropertyBufferFrameSize || property == kAudioDevicePropertyNominalSampleRate);
+    if (writable)
+        c.mem.write<uint8_t>(writable, property == kAudioDevicePropertyBufferFrameSize || property == kAudioDevicePropertyBufferSize ||
+                                           property == kAudioDevicePropertyNominalSampleRate);
     c.ret(0);
 }
 // OSStatus AudioDeviceGetProperty(device, channel, isInput, id, UInt32 *ioSize, void *out)
@@ -280,6 +330,9 @@ B32_THUNK(_AudioDeviceSetProperty) {
     case kAudioDevicePropertyNominalSampleRate: device.rate = c.mem.read<Float64>(data); break;
     case kAudioDevicePropertyBufferFrameSize:
         device.frames = std::clamp(c.mem.read<uint32_t>(data), kMinFrames, kMaxFrames);
+        break;
+    case kAudioDevicePropertyBufferSize:
+        device.frames = std::clamp(c.mem.read<uint32_t>(data) / kFrameBytes, kMinFrames, kMaxFrames);
         break;
     case kAudioDevicePropertyStreamFormat: device.rate = c.mem.read<Float64>(data); break;
     default:
@@ -332,6 +385,6 @@ B32_THUNK(_AudioDeviceGetCurrentTime) {
     stamp.mSampleTime = Float64(device.sampleTime.load());
     stamp.mHostTime = AudioGetCurrentHostTime();
     stamp.mFlags = kAudioTimeStampSampleTimeValid | kAudioTimeStampHostTimeValid;
-    c.mem.copyIn(out, &stamp, sizeof stamp);
+    writeTimeStamp(c.mem, out, stamp);
     c.ret(0);
 }
