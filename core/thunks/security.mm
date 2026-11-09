@@ -290,17 +290,23 @@ B32_THUNK(_SecKeyRawSign) {
     c.ret(uint32_t(status));
 }
 
-// --- incremental digests and HMAC: the contexts are arrays of 32-bit words in both ABIs ---------
+// --- incremental digests and HMAC: the contexts are opaque to the guest, only these thunks touch
+// them, and they are the same size in both ABIs, so the host works on them in place whatever the
+// guest's byte order ---------
 
-B32_THUNK(_CC_SHA1_Init) { c.ret(uint32_t(CC_SHA1_Init(c.mem.ptr<CC_SHA1_CTX>(c.args.ptr())))); }
+namespace {
+template <typename T> T *opaque(Call &c, GuestAddr p) { return static_cast<T *>(c.mem.ptr<void>(p)); }
+}  // namespace
+
+B32_THUNK(_CC_SHA1_Init) { c.ret(uint32_t(CC_SHA1_Init(opaque<CC_SHA1_CTX>(c, c.args.ptr())))); }
 B32_THUNK(_CC_SHA1_Update) {
-    auto *ctx = c.mem.ptr<CC_SHA1_CTX>(c.args.ptr());
+    auto *ctx = opaque<CC_SHA1_CTX>(c, c.args.ptr());
     GuestAddr data = c.args.ptr();
     c.ret(uint32_t(CC_SHA1_Update(ctx, c.mem.ptr<void>(data), c.args.u32())));
 }
 B32_THUNK(_CC_SHA1_Final) {
     GuestAddr md = c.args.ptr();
-    c.ret(uint32_t(CC_SHA1_Final(c.mem.ptr<unsigned char>(md), c.mem.ptr<CC_SHA1_CTX>(c.args.ptr()))));
+    c.ret(uint32_t(CC_SHA1_Final(c.mem.ptr<unsigned char>(md), opaque<CC_SHA1_CTX>(c, c.args.ptr()))));
 }
 B32_THUNK(_CC_SHA384) {
     GuestAddr data = c.args.ptr();
@@ -310,17 +316,17 @@ B32_THUNK(_CC_SHA384) {
     c.ret(md);
 }
 B32_THUNK(_CCHmacInit) {
-    auto *ctx = c.mem.ptr<CCHmacContext>(c.args.ptr());
+    auto *ctx = opaque<CCHmacContext>(c, c.args.ptr());
     CCHmacAlgorithm algorithm = c.args.u32();
     GuestAddr key = c.args.ptr();
     CCHmacInit(ctx, algorithm, key ? c.mem.ptr<void>(key) : nullptr, c.args.u32());
 }
 B32_THUNK(_CCHmacUpdate) {
-    auto *ctx = c.mem.ptr<CCHmacContext>(c.args.ptr());
+    auto *ctx = opaque<CCHmacContext>(c, c.args.ptr());
     GuestAddr data = c.args.ptr();
     CCHmacUpdate(ctx, c.mem.ptr<void>(data), c.args.u32());
 }
 B32_THUNK(_CCHmacFinal) {
-    auto *ctx = c.mem.ptr<CCHmacContext>(c.args.ptr());
+    auto *ctx = opaque<CCHmacContext>(c, c.args.ptr());
     CCHmacFinal(ctx, c.mem.ptr<void>(c.args.ptr()));
 }
