@@ -8,8 +8,12 @@
 #include "core/mem/Layout.h"
 #include "core/thunks/Thunks.h"
 
+#include <signal.h>
+#include <unistd.h>
+
 #include <cmath>
 #include <cstring>
+#include <string>
 
 namespace b32 {
 
@@ -61,23 +65,69 @@ uint64_t X86Cpu::call(GuestAddr fn, const std::vector<uint32_t> &args) {
     return result;
 }
 
-void X86Cpu::retStruct(const void *value, uint32_t size) {
-    mem().copyIn(arg(0), value, size);
+void X86Cpu::popStructPointer() {
     uint32_t sp = reg(ESP);
     mem().write<uint32_t>(sp + 4, mem().read<uint32_t>(sp));
     setReg(ESP, sp + 4);
 }
 
+// The i386 Mac layouts: ucontext { uc_onstack, uc_sigmask, uc_stack { ss_sp,
+// ss_size, ss_flags }, uc_link, uc_mcsize, uc_mcontext } (32 bytes) pointing at
+// mcontext { __es { trapno, cpu, err, faultvaddr }, __ss (x86_thread_state32),
+// __fs (x86_float_state32, 524 bytes) } (600 bytes), and a 64-byte siginfo
+// { si_signo, si_errno, si_code, si_pid, si_uid, si_status, si_addr, si_value,
+// si_band, pad }. Only the control words of __fs are filled in; the floating
+// point state the handler runs with is the faulting code's, and is put back
+// when it returns, so a handler can't change it through the context.
 void X86Cpu::deliverFault(uint32_t addr, bool write) {
-    // Guest signal handlers on i386 (x86 ucontext layout) aren't delivered yet.
-    std::string frames;
-    for (uint32_t ret : frameChain(16)) {
-        char text[16];
-        std::snprintf(text, sizeof text, " %08x", ret);
-        frames += text;
+    int sig = signalAction(SIGSEGV).handler > 1 ? SIGSEGV : SIGBUS;
+    SignalAction action = signalAction(sig);
+    if (action.handler <= 1) {
+        std::string frames;
+        for (uint32_t ret : frameChain(16)) {
+            char text[16];
+            std::snprintf(text, sizeof text, " %08x", ret);
+            frames += text;
+        }
+        fatal("guest %s of unmapped 0x%08x (eip=0x%08x esp=0x%08x; frames%s)", write ? "write" : "read", addr, reg(EIP),
+              reg(ESP), frames.c_str());
     }
-    fatal("guest %s of unmapped 0x%08x (eip=0x%08x esp=0x%08x; frames%s)", write ? "write" : "read", addr, reg(EIP),
-          reg(ESP), frames.c_str());
+
+    constexpr uint32_t kUcontext = 32, kMcontext = 600, kSiginfo = 64;
+    constexpr uint32_t kSs = 12, kFs = kSs + 64;
+    constexpr uint32_t kPageFault = 14, kUserAccess = 4, kWriteAccess = 2;
+    // x86_thread_state32's order; ss, cs, ds, es, fs and gs are fixed here.
+    static constexpr Reg kStateOrder[] = {EAX, EBX, ECX, EDX, EDI, ESI, EBP, ESP};
+    constexpr uint32_t kEflagsSlot = 9, kEipSlot = 10;
+
+    GuestAddr frame = (reg(ESP) - (kUcontext + kMcontext + kSiginfo)) & ~15u;
+    GuestAddr uc = frame, mc = frame + kUcontext, si = mc + kMcontext;
+    std::memset(mem().ptr<void>(frame), 0, kUcontext + kMcontext + kSiginfo);
+    mem().write<uint32_t>(uc + 24, kMcontext);
+    mem().write<uint32_t>(uc + 28, mc);
+    mem().write<uint16_t>(mc, kPageFault);
+    mem().write<uint32_t>(mc + 4, kUserAccess | (write ? kWriteAccess : 0));
+    mem().write<uint32_t>(mc + 8, addr);
+    for (uint32_t i = 0; i < 8; i++) mem().write<uint32_t>(mc + kSs + i * 4, reg(kStateOrder[i]));
+    const uint32_t segments[] = {0x10, 0x08, 0x10, 0x10, 0x10, 0x18};  // ss, then cs ds es fs gs (see UnicornCpu)
+    mem().write<uint32_t>(mc + kSs + 8 * 4, segments[0]);
+    mem().write<uint32_t>(mc + kSs + kEflagsSlot * 4, reg(EFLAGS));
+    mem().write<uint32_t>(mc + kSs + kEipSlot * 4, reg(EIP));
+    for (uint32_t i = 1; i < 6; i++) mem().write<uint32_t>(mc + kSs + (10 + i) * 4, segments[i]);
+    mem().write<uint16_t>(mc + kFs + 8, 0x037F);    // fcw, the default
+    mem().write<uint32_t>(mc + kFs + 32, 0x1F80);   // mxcsr, the default
+    mem().write<uint32_t>(si, uint32_t(sig));
+    mem().write<uint32_t>(si + 8, SEGV_MAPERR);
+    mem().write<uint32_t>(si + 12, uint32_t(getpid()));
+    mem().write<uint32_t>(si + 24, addr);
+
+    setReg(ESP, frame);
+    call(action.handler, {uint32_t(sig), si, uc});
+
+    // sigreturn: the state the handler left in the context.
+    for (uint32_t i = 0; i < 8; i++) setReg(kStateOrder[i], mem().read<uint32_t>(mc + kSs + i * 4));
+    setReg(EFLAGS, mem().read<uint32_t>(mc + kSs + kEflagsSlot * 4));
+    setReg(EIP, mem().read<uint32_t>(mc + kSs + kEipSlot * 4));
 }
 
 // --- x87 extended precision -------------------------------------------------------
@@ -124,6 +174,12 @@ double fromFloat80(const uint8_t in[10]) {
 namespace arch {
 
 const char *name() { return "i386"; }
+
+double longDouble(const uint32_t *words) {
+    uint8_t bytes[10];
+    std::memcpy(bytes, words, sizeof bytes);
+    return fromFloat80(bytes);
+}
 
 // `hlt; ret`, padded: the hlt traps to the host with the stub's index (from
 // its address); the ret runs when the guest resumes. A thunk that tail-calls
