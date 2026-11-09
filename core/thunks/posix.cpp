@@ -275,6 +275,63 @@ B32_THUNK(_readdir) { readDirectory(c, kPlainInode64); }
 B32_THUNK(_readdir$INODE64) { readDirectory(c, true); }
 #endif
 
+// int scandir(const char *dir, struct dirent ***names, int (*select)(struct dirent *),
+//             int (*compar)(const void *, const void *)): the entries as the old 32-bit
+// layout, in a guest array the caller frees; the callbacks are guest functions.
+namespace {
+GuestAddr guestDirent(Call &c, const struct dirent &e) {
+    constexpr uint32_t kOldNameMax = 255;
+    uint32_t length = std::min<uint32_t>(e.d_namlen, kOldNameMax);
+    uint32_t size = ((8 + length + 1) + 3) & ~3u;
+    GuestAddr entry = c.heap.calloc(1, std::max(size, 12u));
+    c.mem.write<uint32_t>(entry, uint32_t(e.d_ino));
+    c.mem.write<uint16_t>(entry + 4, uint16_t(size));
+    c.mem.write<uint8_t>(entry + 6, e.d_type);
+    c.mem.write<uint8_t>(entry + 7, uint8_t(length));
+    c.mem.copyIn(entry + 8, e.d_name, length);
+    return entry;
+}
+}  // namespace
+B32_THUNK(_scandir) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr out = c.args.ptr(), select = c.args.ptr(), compar = c.args.ptr();
+    DIR *dir = ::opendir(path);
+    if (!dir) {
+        setGuestErrno(c, errno);
+        c.ret(uint32_t(-1));
+        return;
+    }
+    std::vector<GuestAddr> entries;
+    while (struct dirent *e = ::readdir(dir)) {
+        GuestAddr entry = guestDirent(c, *e);
+        if (select && !uint32_t(c.cpu.call(select, {entry}))) {
+            c.heap.free(entry);
+            continue;
+        }
+        entries.push_back(entry);
+    }
+    ::closedir(dir);
+    if (compar) {
+        // qsort hands the comparison pointers to the array's elements.
+        GuestAddr scratch = c.heap.calloc(2, 4);
+        std::stable_sort(entries.begin(), entries.end(), [&](GuestAddr a, GuestAddr b) {
+            c.mem.write<uint32_t>(scratch, a);
+            c.mem.write<uint32_t>(scratch + 4, b);
+            return int32_t(c.cpu.call(compar, {scratch, scratch + 4})) < 0;
+        });
+        c.heap.free(scratch);
+    }
+    GuestAddr array = c.heap.calloc(uint32_t(std::max<size_t>(entries.size(), 1)), 4);
+    for (size_t i = 0; i < entries.size(); i++) c.mem.write<uint32_t>(array + uint32_t(i) * 4, entries[i]);
+    c.mem.write<uint32_t>(out, array);
+    c.ret(uint32_t(entries.size()));
+}
+// int alphasort(const void *, const void *): the elements are pointers to dirent pointers.
+B32_THUNK(_alphasort) {
+    GuestAddr a = c.mem.read<uint32_t>(c.args.ptr()), b = c.mem.read<uint32_t>(c.args.ptr());
+    c.ret(uint32_t(std::strcmp(c.mem.cstr(a + 8), c.mem.cstr(b + 8))));
+}
+
 B32_THUNK(_closedir) {
     GuestAddr handle = c.args.ptr();
     std::lock_guard guard(dirsLock);
