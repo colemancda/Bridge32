@@ -34,6 +34,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFDictionaryGetCount", "z:o"},
     
     {"CFPreferencesAppSynchronize", "B:o"}, {"CFPreferencesCopyAppValue", "o:oo"},
+    {"CFPreferencesCopyKeyList", "o:ooo"}, {"CFPreferencesSetValue", "v:ooooo"}, {"CFPreferencesSynchronize", "B:ooo"},
     {"CFPreferencesSetAppValue", "v:ooo"},
     {"CFRunLoopGetCurrent", "o:"}, {"CFRunLoopGetMain", "o:"}, {"CFRunLoopPerformBlock", "v:ooo"},
     {"CFRunLoopWakeUp", "v:o"}, {"CFRunLoopRun", "v:"},
@@ -48,7 +49,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFSetGetTypeID", "z:"}, {"CFDateGetTypeID", "z:"}, {"CFNullGetTypeID", "z:"}, {"CFURLGetTypeID", "z:"},
     {"CFBooleanGetValue", "B:o"}, {"CFNumberIsFloatType", "B:o"}, {"CFEqual", "B:oo"}, {"CFHash", "z:o"},
     {"CFURLCreateWithFileSystemPath", "o:ooiu"}, {"CFBundleGetMainBundle", "o:"},
-    {"CFBundleCopyResourceURL", "o:oooo"},
+    {"CFBundleCopyResourceURL", "o:oooo"}, {"CFBundleCopyResourcesDirectoryURL", "o:o"},
     {"CFLocaleCopyCurrent", "o:"}, {"CFLocaleGetIdentifier", "o:o"}, {"CFLocaleGetSystem", "o:"},
     // Strings, locales, time zones, calendars and formatters (Adobe AIR).
     {"CFStringNormalize", "v:oz"}, {"CFStringCreateWithBytes", "o:opzuu"}, {"CFStringCreateWithCharacters", "o:opz"},

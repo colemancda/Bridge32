@@ -97,7 +97,7 @@ if(B32_GUEST_ARCH STREQUAL "arm")
     target_sources(b32core PRIVATE core/arch/arm/ArmCpu.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_ARM=1)
 else()
-    target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp)
+    target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_wstring.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1)
 endif()
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -156,10 +156,10 @@ if(B32_MAC)
         message(FATAL_ERROR "The AppKit shell is the i386 guest's and needs Unicorn in external/unicorn")
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/appkit/appkit.mm core/appkit/compat.mm
-        core/appkit/macsys.mm core/appkit/carbon.mm core/appkit/carbon_ui.mm core/appkit/carbon_files.mm core/appkit/agl.mm core/appkit/controller.mm core/gl/opengl.mm core/audio/audiounit.mm core/audio/audioqueue.mm)
+        core/appkit/macsys.mm core/appkit/carbon.mm core/appkit/carbon_ui.mm core/appkit/carbon_files.mm core/appkit/agl.mm core/appkit/controller.mm core/gl/opengl.mm core/audio/audiounit.mm core/audio/audioqueue.mm core/audio/hal.mm)
     target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
         "-framework QuartzCore" "-framework CoreData" "-framework OpenGL" "-framework ImageIO"
-        "-framework AudioToolbox" "-framework AudioUnit" "-framework ApplicationServices" "-framework CoreVideo" "-framework GameController" "-framework Carbon" "-framework CoreServices")
+        "-framework AudioToolbox" "-framework AudioUnit" "-framework CoreAudio" "-framework ApplicationServices" "-framework CoreVideo" "-framework GameController" "-framework Carbon" "-framework CoreServices")
 
     add_executable(Bridge32 MACOSX_BUNDLE app/mac/main.mm)
     target_link_libraries(Bridge32 PRIVATE b32core)
