@@ -13,3 +13,19 @@
 @end
 @implementation NSMovieView
 @end
+
+// QTKit is gone altogether. A class can inherit these, and a movie never plays.
+@interface QTMovieView : NSView
+@end
+@implementation QTMovieView
+@end
+
+@interface QTMovie : NSObject
+@end
+@implementation QTMovie
+- (id)initWithFile:(NSString *)path error:(NSError **)error {
+    if (error) *error = nil;
+    [self release];
+    return nil;
+}
+@end
