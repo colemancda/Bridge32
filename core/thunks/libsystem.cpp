@@ -110,6 +110,15 @@ bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr len
     } else if (name == "hw.cpufrequency") {
         int32_t hz = 1000000000;
         reply(&hz, 4);
+#if defined(B32_GUEST_I386)
+    } else if (name == "hw.cpufrequency_max") {
+        // What a 2006-era game wants to see of an Intel Mac; 32 or 64 bits as asked.
+        uint64_t hz = 2400000000ull;
+        reply(&hz, lenp && c.mem.read<uint32_t>(lenp) >= 8 ? 8 : 4);
+    } else if (name == "hw.optional.altivec") {
+        int32_t none = 0;
+        reply(&none, 4);
+#endif
     } else if (name == "kern.boottime") {
         // struct timeval: two 32-bit words in the guest.
         int32_t tv[2] = {int32_t(std::time(nullptr) - 3600), 0};
@@ -153,6 +162,18 @@ B32_THUNK(_sysctl) {
         c.ret(0);
         return;
     }
+#if defined(B32_GUEST_I386)
+    if (top == CTL_KERN && second == KERN_PROC && length > 2 && c.mem.read<int32_t>(mib + 8) == KERN_PROC_ALL) {
+        // The process list. A guest sees no other processes, just one blank
+        // entry for itself: real lists are never empty, and code that searches
+        // one subtracts from its length without checking.
+        constexpr uint32_t kKinfoProcSize = 492;
+        if (out) std::memset(c.mem.ptr<void>(out), 0, std::min(c.mem.read<uint32_t>(lenp), kKinfoProcSize));
+        if (lenp) c.mem.write<uint32_t>(lenp, kKinfoProcSize);
+        c.ret(0);
+        return;
+    }
+#endif
     if (top == CTL_KERN && second == KERN_PROC) {
         // kinfo_proc, asked for to see whether a debugger is attached: all zeros
         // (not traced) in whatever size the guest's struct is.

@@ -16,6 +16,7 @@
 #include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -25,6 +26,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
@@ -137,6 +139,33 @@ B32_THUNK(__NSGetEnviron) {
         c.mem.write<uint32_t>(holder, list);
     }
     c.ret(holder);
+}
+
+// int getmntinfo(struct statfs **list, int flags): the mounted volumes, in the
+// plain i386 struct statfs (272 bytes; see libsystem.cpp's _statfs).
+B32_THUNK(_getmntinfo) {
+    GuestAddr out = c.args.ptr();
+    int flags = c.args.i32();
+    struct statfs *mounts = nullptr;
+    int count = ::getmntinfo(&mounts, flags);
+    GuestAddr list = c.heap.calloc(uint32_t(std::max(count, 1)), 272);
+    for (int i = 0; i < count; i++) {
+        GuestAddr e = list + uint32_t(i) * 272;
+        const struct statfs &m = mounts[i];
+        c.mem.write<int32_t>(e + 4, int32_t(m.f_bsize));
+        c.mem.write<int32_t>(e + 8, int32_t(m.f_iosize));
+        const uint64_t counts[] = {m.f_blocks, m.f_bfree, m.f_bavail, m.f_files, m.f_ffree};
+        for (int k = 0; k < 5; k++) c.mem.write<int32_t>(e + 12 + uint32_t(k) * 4, int32_t(std::min<uint64_t>(counts[k], INT32_MAX)));
+        c.mem.copyIn(e + 32, &m.f_fsid, 8);
+        c.mem.write<uint32_t>(e + 40, m.f_owner);
+        c.mem.write<int16_t>(e + 46, int16_t(m.f_type));
+        c.mem.write<int32_t>(e + 48, int32_t(m.f_flags));
+        strlcpy(c.mem.ptr<char>(e + 60), m.f_fstypename, 15);
+        strlcpy(c.mem.ptr<char>(e + 75), m.f_mntonname, 90);
+        strlcpy(c.mem.ptr<char>(e + 165), m.f_mntfromname, 90);
+    }
+    c.mem.write<uint32_t>(out, list);
+    c.ret(uint32_t(count));
 }
 
 // --- things Boehm's collector asks about the image --------------------------------------
