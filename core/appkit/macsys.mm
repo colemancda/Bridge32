@@ -305,11 +305,22 @@ B32_THUNK(_UTTypeConformsTo) {
     NSString *b = bridge(c).toHost(c.args.ptr());
     c.ret(UTTypeConformsTo((CFStringRef)a, (CFStringRef)b));
 }
+// OSErr Gestalt(OSType selector, SInt32 *response): the guest sees Mac OS X 10.6.8,
+// the last system that ran both its PowerPC-era and Intel-era APIs.
 B32_THUNK(_Gestalt) {
-    c.args.u32();
+    uint32_t selector = c.args.u32();
     GuestAddr out = c.args.ptr();
-    if (out) c.mem.write<uint32_t>(out, 0);
-    c.ret(uint32_t(-5551));  // gestaltUndefSelectorErr
+    int32_t value = -1;
+    switch (selector) {
+    case 'sysv': value = 0x1068; break;
+    case 'sys1': value = 10; break;
+    case 'sys2': value = 6; break;
+    case 'sys3': value = 8; break;
+    case 'qtim': value = 0x07658000; break;  // QuickTime 7.6.5; its calls are thunks that fail softly
+    default: break;
+    }
+    if (out) c.mem.write<int32_t>(out, value < 0 ? 0 : value);
+    c.ret(value < 0 ? uint32_t(-5551) : 0);  // gestaltUndefSelectorErr
 }
 
 // AbsoluteTime is 8 bytes (EAX:EDX); as ticks of mach_absolute_time, which is
