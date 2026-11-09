@@ -1,9 +1,12 @@
-// Loads a 32-bit ARM Mach-O executable into guest memory at its preferred
-// address, or a dylib at a given base (sliding it), and binds its imports. Handles both eras of binaries:
-//  - iPhone OS 2-3: LC_UNIXTHREAD, a __dyld section, external relocations
-//  - iOS 4+: LC_MAIN and LC_DYLD_INFO bind opcodes
+// Loads a 32-bit Mach-O executable (armv6/armv7 or i386, per the build's
+// guest architecture) into guest memory at its preferred address, or a dylib
+// at a given base (sliding it), and binds its imports. Handles both eras of
+// binaries:
+//  - iPhone OS 2-3 and Mac OS X 10.4-10.5: LC_UNIXTHREAD, a __dyld section,
+//    external relocations
+//  - iOS 4+ and Mac OS X 10.6+: LC_MAIN and LC_DYLD_INFO bind opcodes
 // Lazy and non-lazy symbol pointers are bound eagerly through the indirect
-// symbol table, which every armv6/armv7 binary has.
+// symbol table.
 #pragma once
 
 #include "core/mem/GuestMemory.h"
