@@ -140,6 +140,30 @@ if(B32_CATALYST)
         COMMENT "Signing Bridge32.app (ad hoc)")
 endif()
 
+# The AppKit shell for i386 Mac apps (configure with -DB32_MAC=ON). Apps are
+# wrapped into copies of it by tools/make-app.sh.
+option(B32_MAC "Build the AppKit shell for i386 Mac apps" OFF)
+if(B32_MAC)
+    if(NOT B32_GUEST_ARCH STREQUAL "i386" OR NOT B32_HAVE_ENGINE)
+        message(FATAL_ERROR "The AppKit shell is the i386 guest's and needs Unicorn in external/unicorn")
+    endif()
+    target_sources(b32core PRIVATE core/objc/foundation.mm core/appkit/appkit.mm core/appkit/compat.mm)
+    target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
+        "-framework QuartzCore" "-framework CoreData")
+
+    add_executable(Bridge32 MACOSX_BUNDLE app/mac/main.mm)
+    target_link_libraries(Bridge32 PRIVATE b32core)
+    target_compile_options(Bridge32 PRIVATE -fno-objc-arc)
+    set_target_properties(Bridge32 PROPERTIES MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/app/mac/Info.plist")
+    # AppKit keeps old behaviors for executables linked against an old SDK
+    # (no forced layer-backing, Auto Layout or dark appearance), which is what
+    # the guests were written for, so the shell claims the 10.14 SDK.
+    add_custom_command(TARGET Bridge32 POST_BUILD
+        COMMAND xcrun vtool -set-build-version macos 14.0 10.14 -replace -output $<TARGET_FILE:Bridge32> $<TARGET_FILE:Bridge32>
+        COMMAND codesign --force --sign - $<TARGET_BUNDLE_DIR:Bridge32>
+        COMMENT "Marking Bridge32.app as built for the 10.14 SDK")
+endif()
+
 # Guest tests: binaries built by tests/guest/Makefile (ARCH=arm or i386).
 enable_testing()
 if(B32_GUEST_ARCH STREQUAL "arm")
@@ -169,6 +193,14 @@ if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "i386")
         "count=102 name=pac.*formatted=<Counter pac: 102> / 7 / 2\\.5.*array count=3 joined=abc csv=a,b,c.*number=42.*shout=WAKA!.*class=Counter super=NSObject.*dealloc pac.*done")
     add_test(NAME run-objclegacy COMMAND b32-run "${B32_GUEST_DIR}/objclegacy")
     set_tests_properties(run-objclegacy PROPERTIES PASS_REGULAR_EXPRESSION "objclegacy passed")
+    if(B32_MAC)
+        # Opens a window for a moment, so it needs a logged-in session.
+        add_test(NAME wrap-appkit COMMAND sh "${CMAKE_SOURCE_DIR}/tools/make-app.sh" "${B32_GUEST_DIR}/AppKitTest.app")
+        set_tests_properties(wrap-appkit PROPERTIES FIXTURES_SETUP AppKitTestApp)
+        add_test(NAME run-appkit COMMAND "${CMAKE_SOURCE_DIR}/build/apps/AppKitTest.app/Contents/MacOS/Bridge32")
+        set_tests_properties(run-appkit PROPERTIES FIXTURES_REQUIRED AppKitTestApp ENVIRONMENT "B32_LOG_TO_STDERR=1"
+            TIMEOUT 60 PASS_REGULAR_EXPRESSION "appkit passed")
+    endif()
     add_test(NAME run-classic COMMAND b32-run "${B32_GUEST_DIR}/classic" "${B32_GUEST_DIR}/libclassic.dylib")
     set_tests_properties(run-classic PROPERTIES PASS_REGULAR_EXPRESSION "classic passed")
 endif()
