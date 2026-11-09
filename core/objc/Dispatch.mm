@@ -445,7 +445,16 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     @try {
         ffi_call(&hc.cif, direct ? FFI_FN(direct) : superInfo ? FFI_FN(objc_msgSendSuper) : FFI_FN(objc_msgSend),
                  result, values.data());
-    } @catch (NSException *e) {
+    } @catch (id thrown) {
+#if defined(B32_GUEST_I386)
+        // Legacy-runtime guests do catch: a @try in the guest code that made
+        // this call resumes, and one further out is reached by unwinding.
+        ExceptionDelivery delivery = deliverGuestException(c.cpu, toGuest(thrown));
+        if (delivery == ExceptionDelivery::Delivered) return;
+        if (delivery == ExceptionDelivery::OuterFrame) @throw;
+#endif
+        if (![thrown isKindOfClass:[NSException class]]) @throw;
+        NSException *e = thrown;
         log("%c[%s %s] threw %s: %s; returning zero to the guest", object_isClass(recv) ? '+' : '-',
             object_getClassName(recv), name, e.name.UTF8String, e.reason.UTF8String);
         std::memset(result, 0, sizeof result);
