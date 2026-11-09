@@ -76,6 +76,8 @@ if [ -d "$input/Contents" ]; then
     # codesign refuses a bundle with extended attributes, which old apps have.
     xattr -cr "$out"
     codesign --force --sign - "$out"
+    # Re-wrapping leaves LaunchServices remembering the old signature.
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$out"
     echo "$out"
     exit 0
 fi
