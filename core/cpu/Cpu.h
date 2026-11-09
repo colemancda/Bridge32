@@ -61,6 +61,10 @@ public:
     virtual uint64_t result() const = 0;
     virtual double floatingResult(bool isFloat) = 0;
 
+    // Ends a host function that returned a struct through a hidden pointer
+    // (arch::structReturnedInMemory), for ABIs where the callee pops it.
+    virtual void popStructPointer() {}
+
     // The word a method stub (arch::writeMethodStub) left for its thunk.
     virtual uint32_t stubContext() const = 0;
     // Return addresses up the guest's frame chain, innermost first, for logs.
