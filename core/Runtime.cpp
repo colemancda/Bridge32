@@ -177,6 +177,8 @@ GuestAddr Runtime::resolve(const std::string &symbol) {
         return isConstructorOrDestructor(symbol) ? thisReturning(it->second) : it->second;
     if (GuestAddr data = dataSymbol(symbol)) return data;
     if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
+    if (auto it = nativeFunctions_.find(symbol); it != nativeFunctions_.end()) return it->second;
+    if (GuestAddr code = arch::nativeFunction(*mem_, *heap_, symbol)) return nativeFunctions_[symbol] = code;
     // Object constants (notification names, keys...) the host exports.
     if (!ThunkRegistry::find(symbol))
         if (GuestAddr constant = bridge_->resolveHostConstant(symbol)) return constant;
@@ -361,6 +363,12 @@ GuestAddr Runtime::buildProcessStack(GuestAddr top, const std::vector<std::strin
 int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::string> &envp) {
     GuestAddr stackBottom = layout::kStackBase;
     mem_->map(stackBottom, layout::kStackSize);
+#if defined(B32_GUEST_I386)
+    // A Mac main thread has 8 MB, and runtimes like Mono use it. The extra
+    // goes below the first stack slot, which is the main thread's.
+    constexpr uint32_t kMainStackExtra = 7 * 1024 * 1024;
+    mem_->map(stackBottom - kMainStackExtra, kMainStackExtra);
+#endif
     GuestAddr argvAddr, envpAddr, appleAddr;
     GuestAddr sp = buildProcessStack(stackBottom + layout::kStackSize, argv, envp, &argvAddr, &envpAddr, &appleAddr);
     cpu_->setSp(sp);
