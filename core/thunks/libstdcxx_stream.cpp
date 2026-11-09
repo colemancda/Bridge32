@@ -279,6 +279,8 @@ B32_THUNK(__ZNSo9_M_insertImEERSoT_) {
     insert(c, stream, formatInteger(c.mem.read<uint32_t>(iosOf(c, stream) + kFlags), value, false));
     c.ret(stream);
 }
+// ostream::operator<<(unsigned long), which older libstdc++ builds export as a member.
+B32_THUNK(__ZNSolsEm) { thunk___ZNSo9_M_insertImEERSoT_(c); }
 B32_THUNK(__ZNSo9_M_insertIdEERSoT_) {
     GuestAddr stream = c.args.ptr();
     double value = c.args.f64();
@@ -364,6 +366,45 @@ B32_THUNK(__ZNSt13basic_fstreamIcSt11char_traitsIcEE4openEPKcSt13_Ios_Openmode) 
     c.mem.write<uint32_t>(ios + kState, openFile(c, self + kFstreamBuffer, path, mode) ? kGoodBit : kFailBit);
 }
 B32_THUNK(__ZNSt13basic_fstreamIcSt11char_traitsIcEE5closeEv) { closeFile(c.args.ptr() + kFstreamBuffer); }
+
+// --- ofstream: an ostream's vptr, the filebuf, then the virtual basic_ios ------------------
+
+namespace {
+constexpr uint32_t kOfstreamBuffer = 4, kOfstreamIos = kOfstreamBuffer + kFilebufSize;
+
+GuestAddr ofstreamVtable(Call &c) {
+    static GuestAddr table = 0;
+    static std::mutex lock;
+    std::lock_guard guard(lock);
+    if (!table) {
+        table = c.heap.calloc(8, 4);
+        c.mem.write<int32_t>(table, kOfstreamIos);  // vptr[-3], the offset of the virtual basic_ios
+    }
+    return table;
+}
+}  // namespace
+
+B32_THUNK(__ZNSt14basic_ofstreamIcSt11char_traitsIcEEC1Ev) {
+    GuestAddr self = c.args.ptr();
+    c.mem.write<uint32_t>(self, ofstreamVtable(c) + 12);
+    std::memset(c.mem.ptr<uint8_t>(self + kOfstreamIos), 0, kIosEnd);
+    initIos(c, self + kOfstreamIos, self + kOfstreamBuffer);
+    c.ret(self);
+}
+B32_THUNK(__ZNSt14basic_ofstreamIcSt11char_traitsIcEEC2Ev) { thunk___ZNSt14basic_ofstreamIcSt11char_traitsIcEEC1Ev(c); }
+B32_THUNK(__ZNSt14basic_ofstreamIcSt11char_traitsIcEED1Ev) {
+    GuestAddr self = c.args.ptr();
+    closeFile(self + kOfstreamBuffer);
+    c.ret(self);
+}
+B32_THUNK(__ZNSt14basic_ofstreamIcSt11char_traitsIcEED2Ev) { thunk___ZNSt14basic_ofstreamIcSt11char_traitsIcEED1Ev(c); }
+B32_THUNK(__ZNSt14basic_ofstreamIcSt11char_traitsIcEE4openEPKcSt13_Ios_Openmode) {
+    GuestAddr self = c.args.ptr();
+    const char *path = c.mem.cstr(c.args.ptr());
+    uint32_t mode = c.args.u32() | kModeOut;
+    c.mem.write<uint32_t>(self + kOfstreamIos + kState, openFile(c, self + kOfstreamBuffer, path, mode) ? kGoodBit : kFailBit);
+}
+B32_THUNK(__ZNSt14basic_ofstreamIcSt11char_traitsIcEE5closeEv) { closeFile(c.args.ptr() + kOfstreamBuffer); }
 B32_THUNK(__ZNSt13basic_fstreamIcSt11char_traitsIcEE7is_openEv) { c.ret(fileOf(c.args.ptr() + kFstreamBuffer) ? 1 : 0); }
 
 // istream &read(char *, streamsize), on a file stream.
@@ -594,6 +635,17 @@ B32_THUNK(__ZNKSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE3strEv) {
     GuestAddr out = c.args.ptr(), buffer = c.args.ptr() + kOstringstreamBuffer;
     GuestAddr base = c.mem.read<uint32_t>(buffer + kOutBeg), cur = c.mem.read<uint32_t>(buffer + kOutCur);
     c.mem.write<uint32_t>(out, s.make({c.mem.ptr<char>(base), cur - base}));
+    c.ret(out);
+    c.cpu.popStructPointer();
+}
+// string basic_stringbuf::str() const: what's been put, or else what can be got.
+B32_THUNK(__ZNKSt15basic_stringbufIcSt11char_traitsIcESaIcEE3strEv) {
+    NarrowStrings s(c);
+    GuestAddr out = c.args.ptr(), buffer = c.args.ptr();
+    bool putting = c.mem.read<uint32_t>(buffer + kBufMode) & kModeOut;
+    GuestAddr base = c.mem.read<uint32_t>(buffer + (putting ? kOutBeg : kInBeg));
+    GuestAddr end = c.mem.read<uint32_t>(buffer + (putting ? kOutCur : kInEnd));
+    c.mem.write<uint32_t>(out, s.make(base && end > base ? std::string_view(c.mem.ptr<char>(base), end - base) : std::string_view()));
     c.ret(out);
     c.cpu.popStructPointer();
 }
