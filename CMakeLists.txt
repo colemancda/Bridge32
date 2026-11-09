@@ -37,9 +37,13 @@ else()
         # Unicorn never sets CF_PARALLEL, so lock-prefixed instructions would
         # compile to plain loads and stores; guest threads share memory here,
         # so the first patch makes them real atomics. The second runs the ones
-        # the host can't do atomically, rather than retrying them forever.
+        # the host can't do atomically, rather than retrying them forever. The
+        # other two are for speed: writes only take the slow path on pages
+        # with translated code, and the exit check is inline, once per block.
         foreach(patch unicorn-parallel:B32_CF_PARALLEL:qemu/include/exec/exec-all.h
-                      unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c)
+                      unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c
+                      unicorn-fast-writes:B32_FAST_WRITES:qemu/accel/tcg/cputlb.c
+                      unicorn-inline-exit-check:B32_INLINE_EXIT_CHECK:qemu/include/exec/gen-icount.h)
             string(REPLACE ":" ";" B32_PATCH_FIELDS "${patch}")
             list(GET B32_PATCH_FIELDS 0 B32_PATCH_NAME)
             list(GET B32_PATCH_FIELDS 1 B32_PATCH_MARKER)
@@ -191,6 +195,10 @@ if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "i386")
     set_tests_properties(run-rbtree PROPERTIES PASS_REGULAR_EXPRESSION "rbtree passed")
     add_test(NAME run-threads COMMAND b32-run "${B32_GUEST_DIR}/threads")
     set_tests_properties(run-threads PROPERTIES PASS_REGULAR_EXPRESSION "threads passed")
+    add_test(NAME run-smc COMMAND b32-run "${B32_GUEST_DIR}/smc")
+    set_tests_properties(run-smc PROPERTIES PASS_REGULAR_EXPRESSION "smc passed")
+    add_test(NAME run-fault COMMAND b32-run "${B32_GUEST_DIR}/fault")
+    set_tests_properties(run-fault PROPERTIES PASS_REGULAR_EXPRESSION "fault passed")
     add_test(NAME run-cxx COMMAND b32-run "${B32_GUEST_DIR}/cxx")
     set_tests_properties(run-cxx PROPERTIES PASS_REGULAR_EXPRESSION
         "area=42.*array\\[3\\]=9.*static init ran.*counter=2.*try=42")
