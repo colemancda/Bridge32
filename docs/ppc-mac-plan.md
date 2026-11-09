@@ -55,7 +55,7 @@ been run here. Phase 1 must confirm the rest against real binaries.
 | 64-bit arguments | Two words, low first | Two words, **high first**, no alignment padding |
 | Integer return | EAX, EAX:EDX | `r3`, `r3`:`r4` (high first) |
 | Float return | ST(0) | `f1`; `long double` in `f1`:`f2` |
-| Struct return | In registers up to 8 bytes | Always a hidden pointer in `r3`; the callee pops nothing |
+| Struct return | In registers up to 8 bytes | Up to 8 bytes in `r3`:`r4`, larger through a hidden pointer in `r3` that the callee doesn't pop (GCC's rule for Darwin; to confirm in Phase 1) |
 | Return address | On the stack | Link register, saved by the callee |
 | `sizeof(bool)` | 1 | **4** in C++ and `_Bool`; ObjC `BOOL` stays 1 |
 | `long double` | 80-bit x87 | 128-bit double-double from 10.4 (`$LDBL128` symbols), 64-bit before |
@@ -172,8 +172,8 @@ does, with `UNICORN_ARCH=ppc` and a new `core/arch/ppc/PowerCpu.{h,cpp}`.
 - `arg(i)`: `r3+i` for the first 8 words, then `24(r1) + 4i`. `Args::f32`/`f64`
   take the next FPR and still advance 1 or 2 words; in a `va_list` they read words.
 - `Args::u64` and the 64-bit result are high word first.
-- `structReturnedInMemory` is true for any non-empty struct, and
-  `popStructPointer` does nothing.
+- `structReturnedInMemory` is true above 8 bytes, and `popStructPointer` does
+  nothing.
 - `kFloatResultsInFpu = true`; `kLongDoubleWords = 4`, with `$LDBL128` thunks
   converting double-double to host `long double`.
 - Thunk stub: `sc` then `blr`, which fits the existing 8 bytes. The index comes
