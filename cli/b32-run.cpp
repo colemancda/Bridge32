@@ -9,6 +9,8 @@
 #if defined(B32_GUEST_ARM)
 #include "core/cpu/DynarmicCpu.h"
 #include <dynarmic/interface/exclusive_monitor.h>
+#elif defined(B32_GUEST_PPC)
+#include "core/cpu/UnicornPowerCpu.h"
 #else
 #include "core/cpu/UnicornCpu.h"
 #endif
@@ -27,6 +29,11 @@ int main(int argc, char **argv) {
                                                   monitor.get(), nextProcessor++);
     });
     std::vector<std::string> envp = {"HOME=/var/mobile", "TMPDIR=/tmp"};
+#elif defined(B32_GUEST_PPC)
+    b32::Runtime rt([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
+        return std::make_unique<b32::UnicornPowerCpu>(mem, std::move(handler));
+    });
+    std::vector<std::string> envp = {"HOME=/Users/guest", "TMPDIR=/tmp"};
 #else
     b32::Runtime rt([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
         return std::make_unique<b32::UnicornCpu>(mem, std::move(handler));
