@@ -459,6 +459,76 @@ B32_RETURNS_THIS(__ZTv0_n12_NSoD1Ev)
 
 B32_THUNK(__ZSt19__throw_logic_errorPKc) { fatal("guest threw std::logic_error: %s", c.mem.cstr(c.args.ptr())); }
 
+// basic_stringbuf's own vtable, for a stream built from the library's rather
+// than from a copy the guest instantiated. Writing grows the string as the
+// real one does; the put area is the string's buffer, which guest inline
+// str() reads directly.
+B32_THUNK(__b32_stringbuf_overflow) {
+    GuestAddr self = c.args.ptr();
+    int32_t ch = c.args.i32();
+    constexpr int32_t kEof = -1;
+    if (ch == kEof) {
+        c.ret(0);
+        return;
+    }
+    if (!(c.mem.read<uint32_t>(self + kBufMode) & kModeOut)) {
+        c.ret(uint32_t(kEof));
+        return;
+    }
+    GuestAddr cur = c.mem.read<uint32_t>(self + kOutCur), end = c.mem.read<uint32_t>(self + kOutEnd);
+    if (cur >= end) {
+        GuestAddr old = c.mem.read<uint32_t>(self + kBufString), base = c.mem.read<uint32_t>(self + kOutBeg);
+        uint32_t used = cur - base, capacity = std::max(c.mem.read<uint32_t>(old - 8) * 2, 512u);
+        GuestAddr rep = c.heap.alloc(12 + capacity + 1), data = rep + 12;
+        c.mem.write<uint32_t>(rep, used);
+        c.mem.write<uint32_t>(rep + 4, capacity);
+        c.mem.write<int32_t>(rep + 8, 0);
+        if (used) c.mem.copyIn(data, c.mem.ptr<char>(base), used);
+        c.mem.write<uint8_t>(data + used, 0);
+        c.mem.write<uint32_t>(self + kBufString, data);
+        c.mem.write<uint32_t>(self + kOutBeg, data);
+        c.mem.write<uint32_t>(self + kOutEnd, data + capacity);
+        cur = data + used;
+        if (old != c.rt.dataSymbol("__ZNSs4_Rep20_S_empty_rep_storageE") + 12) {
+            auto *refcount = c.mem.ptr<int32_t>(old - 4);
+            if (__atomic_fetch_sub(refcount, 1, __ATOMIC_ACQ_REL) <= 0) c.heap.free(old - 12);
+        }
+    }
+    c.mem.write<uint8_t>(cur, uint8_t(ch));
+    c.mem.write<uint32_t>(self + kOutCur, cur + 1);
+    c.ret(uint32_t(ch) & 0xff);
+}
+B32_THUNK(__b32_stringbuf_underflow) {
+    GuestAddr self = c.args.ptr();
+    GuestAddr cur = c.mem.read<uint32_t>(self + kInCur), end = c.mem.read<uint32_t>(self + kInEnd);
+    c.ret(cur < end ? c.mem.read<uint8_t>(cur) : uint32_t(-1));
+}
+B32_THUNK(__b32_returns_this) { c.ret(c.args.ptr()); }
+B32_THUNK(__b32_returns_eof) { c.ret(uint32_t(-1)); }
+B32_THUNK(__b32_returns_zero) { c.ret(0); }
+
+// { offset to top, typeinfo, then the slots of basic_streambuf }.
+B32_DATA(__ZTVSt15basic_stringbufIcSt11char_traitsIcESaIcEE, 64) {
+    static const char *const kSlots[] = {
+        "__b32_returns_this",                                        // complete destructor
+        "__b32_returns_this",                                        // deleting destructor
+        "__ZNSt15basic_streambufIcSt11char_traitsIcEE5imbueERKSt6locale",
+        "__b32_returns_this",                                        // setbuf
+        "__b32_returns_eof",                                         // seekoff
+        "__b32_returns_eof",                                         // seekpos
+        "__ZNSt15basic_streambufIcSt11char_traitsIcEE4syncEv",
+        "__b32_returns_zero",                                        // showmanyc
+        "__ZNSt15basic_streambufIcSt11char_traitsIcEE6xsgetnEPci",
+        "__b32_stringbuf_underflow",
+        "__ZNSt15basic_streambufIcSt11char_traitsIcEE5uflowEv",
+        "__b32_returns_eof",                                         // pbackfail
+        "__ZNSt15basic_streambufIcSt11char_traitsIcEE6xsputnEPKci",
+        "__b32_stringbuf_overflow",
+    };
+    for (uint32_t i = 0; i < sizeof kSlots / sizeof kSlots[0]; i++)
+        rt.mem().write<uint32_t>(addr + 8 + i * 4, rt.thunks().stubFor(kSlots[i]));
+}
+
 // The library's vtables that guest inline code stores while building an
 // object it finishes itself. Nothing calls through these in the base state.
 // basic_ostringstream: the stream's vptr, its stringbuf, then the virtual ios,
@@ -479,5 +549,4 @@ B32_DATA(__ZTTSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE, 16) {
 }
 B32_DATA(__ZTVSt9basic_iosIcSt11char_traitsIcEE, 64) {}
 B32_DATA(__ZTVSt15basic_streambufIcSt11char_traitsIcEE, 64) {}
-B32_DATA(__ZTVSt15basic_stringbufIcSt11char_traitsIcESaIcEE, 64) {}
 B32_DATA(__ZTVSt13basic_filebufIcSt11char_traitsIcEE, 64) {}
