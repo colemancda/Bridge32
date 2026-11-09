@@ -14,10 +14,27 @@ OUT     ?= ../../build/guest-i386
 CFLAGS  := -arch i386 -target i386-apple-macos10.13 -mdynamic-no-pic -fno-asynchronous-unwind-tables \
            -fno-unwind-tables -O1 -Wall -Wno-unused-command-line-argument
 LINK    := python3 ../../tools/i386-link.py
-TESTS   := hello rbtree threads bench
+TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
+
+# clang++ warns that libc++ no longer supports the target; the test uses none of it.
+$(OUT)/cxx: cxx/cxx.cpp ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -std=c++17 -Wno-\#warnings -x c++ -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+# Linked the way Mac OS X 10.4's ld did it.
+$(OUT)/classic: classic/classic.c ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c -o $@.o $<
+	$(LINK) --classic --entry start -o $@ $@.o
+
+$(OUT)/libclassic.dylib: classic/libclassic.c ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(filter-out -mdynamic-no-pic,$(CFLAGS)) -fPIC -c -o $@.o $<
+	$(LINK) --dylib -o $@ $@.o
 
 .SECONDEXPANSION:
 $(OUT)/%: $$*/$$*.c ../../tools/i386-link.py
