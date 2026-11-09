@@ -1,4 +1,4 @@
-// The AppKit shell for i386 Mac apps. tools/make-app.sh wraps a guest .app into
+// The AppKit shell for i386 and PowerPC Mac apps. tools/make-app.sh wraps a guest .app into
 // a copy of this app: the guest's Resources become the shell's, so NSBundle
 // mainBundle, its nibs and its Info.plist are the guest's, and its executable
 // and frameworks go in Contents/B32Guest, keeping their relative layout. The
@@ -6,7 +6,11 @@
 
 #include "core/Log.h"
 #include "core/Runtime.h"
+#if defined(B32_GUEST_PPC)
+#include "core/cpu/UnicornPowerCpu.h"
+#else
 #include "core/cpu/UnicornCpu.h"
+#endif
 
 #import <AppKit/AppKit.h>
 #include <unistd.h>
@@ -51,7 +55,11 @@ int main(int argc, char **argv) {
         // Never destroyed: quitting runs exit()'s static destructors while the
         // guest's threads are still running.
         static b32::Runtime &rt = *new b32::Runtime([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
+#if defined(B32_GUEST_PPC)
+            return std::make_unique<b32::UnicornPowerCpu>(mem, std::move(handler));
+#else
             return std::make_unique<b32::UnicornCpu>(mem, std::move(handler));
+#endif
         });
         if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
         // A guest's libraries: its Frameworks folder and, for apps that set
