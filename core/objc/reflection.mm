@@ -124,7 +124,7 @@ void Bridge::callHostImp(Call &c, IMP imp, SEL sel) {
     const char *types = rt_.mem().cstr(rt_.mem().read<uint32_t>(method + kMethodTypes));
     const char *p = types;
     Type ret = parseType(p);
-    bool stret = ret.isStruct() && ret.guestSize() > 4;
+    bool stret = guestReturnClass(ret) == ReturnClass::Memory;
     GuestAddr receiver = c.cpu.arg(stret ? 1 : 0);
     hostDispatch(c, receiver, guestSel(sel), nullptr, stret, imp);
 }
@@ -555,7 +555,8 @@ B32_THUNK(_objc_getProtocol) { c.ret(bridge(c).protocolNamed(c.mem.cstr(c.args.p
 // struct objc_method_description protocol_getMethodDescription(Protocol *, SEL, BOOL required,
 //     BOOL instance): { SEL name; char *types }, 8 bytes, returned through r0.
 B32_THUNK(_protocol_getMethodDescription) {
-    GuestAddr out = c.args.ptr(), p = c.args.ptr(), sel = c.args.u32();
+    StructResult out(c, 8);
+    GuestAddr p = c.args.ptr(), sel = c.args.u32();
     bool required = c.args.u32() != 0, instance = c.args.u32() != 0;
     c.mem.write<uint32_t>(out, 0);
     c.mem.write<uint32_t>(out + 4, 0);
