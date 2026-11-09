@@ -121,7 +121,17 @@ void GuestHeap::free(GuestAddr addr) {
 void GuestHeap::freeLocked(GuestAddr addr) {
     if (redzones) checkRedzone(addr);
     auto it = live_.find(addr);
-    if (it == live_.end()) fatal("guest free of unknown pointer 0x%08x", addr);
+    if (it == live_.end()) {
+#if defined(B32_GUEST_I386)
+        // The Mac's malloc complains about a bad free and carries on, and
+        // shipped games have got away with them ever since.
+        Cpu *cpu = Runtime::currentCpu();
+        log("guest free of unknown pointer 0x%08x (from 0x%08x); ignored, as the Mac's malloc does", addr, cpu ? cpu->returnAddress() : 0);
+        return;
+#else
+        fatal("guest free of unknown pointer 0x%08x", addr);
+#endif
+    }
     uint32_t size = it->second;
     live_.erase(it);
     // Cleared, so a block comes back zeroed, padding to the grain included, as
