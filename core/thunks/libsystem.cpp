@@ -27,6 +27,7 @@
 #include <ctime>
 #include <unistd.h>
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -36,7 +37,14 @@ using namespace b32;
 
 namespace {
 thread_local GuestAddr errnoSlot = 0;
+// Mac OS X 10.3 and 10.4 binaries read errno as a variable libSystem exports,
+// not through __error(); it follows the thread that sets it.
+std::atomic<GuestAddr> errnoVariable{0};
 }  // namespace
+
+#if defined(B32_GUEST_MAC)
+B32_DATA(_errno, 4) { errnoVariable = addr; }
+#endif
 
 B32_THUNK(___error) {
     if (!errnoSlot) errnoSlot = c.heap.calloc(1, 4);
@@ -46,6 +54,7 @@ B32_THUNK(___error) {
 void b32::setGuestErrno(Call &c, int value) {
     if (!errnoSlot) errnoSlot = c.heap.calloc(1, 4);
     c.mem.write<int32_t>(errnoSlot, value);
+    if (GuestAddr variable = errnoVariable) c.mem.write<int32_t>(variable, value);
 }
 
 B32_THUNK(___assert_rtn) {
