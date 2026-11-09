@@ -11,16 +11,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# The guest architecture: arm (armv6/armv7 iOS apps, run by dynarmic) or
-# i386 (32-bit Intel Mac apps, run by Unicorn). One build serves one guest.
-set(B32_GUEST_ARCH "arm" CACHE STRING "Guest architecture: arm or i386")
-set_property(CACHE B32_GUEST_ARCH PROPERTY STRINGS arm i386)
-if(NOT B32_GUEST_ARCH STREQUAL "arm" AND NOT B32_GUEST_ARCH STREQUAL "i386")
-    message(FATAL_ERROR "B32_GUEST_ARCH must be arm or i386, not ${B32_GUEST_ARCH}")
+# The guest architecture: arm (armv6/armv7 iOS apps, run by dynarmic), i386
+# (32-bit Intel Mac apps, run by Unicorn) or ppc (32-bit PowerPC Mac apps, run
+# by Unicorn; so far only the CPU). One build serves one guest.
+set(B32_GUEST_ARCH "arm" CACHE STRING "Guest architecture: arm, i386 or ppc")
+set_property(CACHE B32_GUEST_ARCH PROPERTY STRINGS arm i386 ppc)
+if(NOT B32_GUEST_ARCH STREQUAL "arm" AND NOT B32_GUEST_ARCH STREQUAL "i386" AND NOT B32_GUEST_ARCH STREQUAL "ppc")
+    message(FATAL_ERROR "B32_GUEST_ARCH must be arm, i386 or ppc, not ${B32_GUEST_ARCH}")
 endif()
 
 # The JIT: dynarmic (A32 frontend, arm64 backend) for arm, Unicorn (QEMU's
-# TCG) for i386. Without the engine only the loader tools build.
+# TCG) for i386 and ppc. Without the engine only the loader tools build.
 set(B32_HAVE_ENGINE OFF)
 if(B32_GUEST_ARCH STREQUAL "arm")
     set(B32_DYNARMIC_DIR "${CMAKE_SOURCE_DIR}/external/dynarmic" CACHE PATH "dynarmic source tree")
@@ -38,12 +39,18 @@ else()
         # compile to plain loads and stores; guest threads share memory here,
         # so the first patch makes them real atomics. The second runs the ones
         # the host can't do atomically, rather than retrying them forever. The
-        # other two are for speed: writes only take the slow path on pages
+        # next two are for speed: writes only take the slow path on pages
         # with translated code, and the exit check is inline, once per block.
-        foreach(patch unicorn-parallel:B32_CF_PARALLEL:qemu/include/exec/exec-all.h
-                      unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c
-                      unicorn-fast-writes:B32_FAST_WRITES:qemu/accel/tcg/cputlb.c
-                      unicorn-inline-exit-check:B32_INLINE_EXIT_CHECK:qemu/include/exec/gen-icount.h)
+        # The last is the PowerPC target's: a running time base, the AltiVec
+        # registers, XER's carry, and a per-target helper name.
+        set(B32_UNICORN_PATCHES unicorn-parallel:B32_CF_PARALLEL:qemu/include/exec/exec-all.h
+                                unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c
+                                unicorn-fast-writes:B32_FAST_WRITES:qemu/accel/tcg/cputlb.c
+                                unicorn-inline-exit-check:B32_INLINE_EXIT_CHECK:qemu/include/exec/gen-icount.h)
+        if(B32_GUEST_ARCH STREQUAL "ppc")
+            list(APPEND B32_UNICORN_PATCHES unicorn-ppc:B32_PPC:qemu/target/ppc/timebase_helper.c)
+        endif()
+        foreach(patch ${B32_UNICORN_PATCHES})
             string(REPLACE ":" ";" B32_PATCH_FIELDS "${patch}")
             list(GET B32_PATCH_FIELDS 0 B32_PATCH_NAME)
             list(GET B32_PATCH_FIELDS 1 B32_PATCH_MARKER)
@@ -58,13 +65,39 @@ else()
                 endif()
             endif()
         endforeach()
-        set(UNICORN_ARCH "x86" CACHE STRING "" FORCE)
+        if(B32_GUEST_ARCH STREQUAL "ppc")
+            set(UNICORN_ARCH "ppc" CACHE STRING "" FORCE)
+        else()
+            set(UNICORN_ARCH "x86" CACHE STRING "" FORCE)
+        endif()
         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
         set(UNICORN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
         set(UNICORN_LEGACY_STATIC_ARCHIVE OFF CACHE BOOL "" FORCE)
         add_subdirectory("${B32_UNICORN_DIR}" unicorn EXCLUDE_FROM_ALL)
     endif()
+endif()
+
+# The PowerPC guest so far is the CPU: the engine, the calling convention and
+# big-endian guest memory, tested without a loader (tests/ppc). The runtime
+# around it (b32core, the shell, b32-run) arrives with the loader.
+if(B32_GUEST_ARCH STREQUAL "ppc")
+    if(NOT B32_HAVE_ENGINE)
+        message(FATAL_ERROR "The ppc guest needs Unicorn in external/unicorn")
+    endif()
+    add_library(b32cpu OBJECT core/Log.cpp core/mem/GuestMemory.cpp core/cpu/Cpu.cpp
+        core/arch/ppc/PowerCpu.cpp core/cpu/UnicornPowerCpu.cpp)
+    target_compile_definitions(b32cpu PUBLIC B32_GUEST_PPC=1 B32_GUEST_BIG_ENDIAN=1)
+    target_include_directories(b32cpu PUBLIC "${CMAKE_SOURCE_DIR}" "${B32_UNICORN_DIR}/include")
+    target_compile_options(b32cpu PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    target_link_libraries(b32cpu PUBLIC unicorn)
+
+    add_executable(b32-ppc-cpu-test tests/ppc/cpu-test.cpp)
+    target_link_libraries(b32-ppc-cpu-test PRIVATE b32cpu)
+    enable_testing()
+    add_test(NAME ppc-cpu COMMAND b32-ppc-cpu-test)
+    set_tests_properties(ppc-cpu PROPERTIES PASS_REGULAR_EXPRESSION "ppc cpu passed" FAIL_REGULAR_EXPRESSION "FAIL")
+    return()
 endif()
 
 # An OBJECT library so the B32_THUNK registrars in every file are linked in.
