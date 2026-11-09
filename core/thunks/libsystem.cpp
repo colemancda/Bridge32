@@ -476,7 +476,7 @@ void timeToGuestTm(Call &c, bool local) {
         return;
     }
     const int32_t ints[] = {r.tm_sec, r.tm_min, r.tm_hour, r.tm_mday, r.tm_mon, r.tm_year, r.tm_wday, r.tm_yday, r.tm_isdst};
-    c.mem.copyIn(out, ints, sizeof ints);
+    c.mem.writeWords(out, ints, sizeof ints);
     c.mem.write<int32_t>(out + 36, int32_t(r.tm_gmtoff));
     c.mem.write<uint32_t>(out + 40, r.tm_zone ? c.rt.internString(r.tm_zone) : 0);
     c.ret(out);
@@ -601,7 +601,7 @@ B32_THUNK(_getrusage) {
                              usage.ru_nswap, usage.ru_inblock, usage.ru_oublock, usage.ru_msgsnd, usage.ru_msgrcv,
                              usage.ru_nsignals, usage.ru_nvcsw, usage.ru_nivcsw};
         for (int i = 0; i < 13; i++) words[5 + i] = int32_t(rest[i]);
-        c.mem.copyIn(out, words, sizeof words);
+        c.mem.writeWords(out, words, sizeof words);
     }
     c.ret(uint32_t(r));
 }
