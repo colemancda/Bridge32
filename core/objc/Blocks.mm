@@ -96,7 +96,8 @@ std::string guestSignature(GuestAddr block) {
 }
 
 bool isGeometry(const std::string &name) {
-    return name.rfind("CG", 0) == 0 || name.rfind("UIEdgeInsets", 0) == 0 || name.rfind("UIOffset", 0) == 0;
+    return name.rfind("CG", 0) == 0 || name.rfind("UIEdgeInsets", 0) == 0 || name.rfind("UIOffset", 0) == 0 ||
+           name == "_NSPoint" || name == "_NSSize" || name == "_NSRect";
 }
 
 // Guest encodings describe 32-bit types: a float is CGFloat as often as not
