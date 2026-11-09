@@ -31,7 +31,7 @@ B32_C_FUNCTIONS(kFunctions, process);
 //     CLLocationDistance latitudinalMeters, CLLocationDistance longitudinalMeters)
 // Everything is double in both ABIs; the 32-byte result goes through r0.
 B32_THUNK(_MKCoordinateRegionMakeWithDistance) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 32);
     CLLocationCoordinate2D center;
     center.latitude = c.args.f64();
     center.longitude = c.args.f64();
