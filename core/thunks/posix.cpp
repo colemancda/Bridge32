@@ -833,7 +833,19 @@ B32_THUNK(_getsectdatafromheader) {
 B32_THUNK(_getcwd) {
     GuestAddr buf = c.args.ptr();
     uint32_t size = c.args.u32();
-    if (!buf) fatal("getcwd(NULL) isn't supported");
+    if (!buf) {
+        // The BSD form: a NULL buffer is allocated, from the guest heap so free() takes it back.
+        char path[PATH_MAX];
+        if (!::getcwd(path, sizeof path)) {
+            setGuestErrno(c, errno);
+            c.ret(0);
+            return;
+        }
+        GuestAddr copy = c.heap.alloc(uint32_t(std::max<size_t>(std::strlen(path) + 1, size)));
+        c.mem.copyIn(copy, path, std::strlen(path) + 1);
+        c.ret(copy);
+        return;
+    }
     c.ret(::getcwd(c.mem.ptr<char>(buf), size) ? buf : 0);
 }
 
