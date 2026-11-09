@@ -155,9 +155,12 @@ def main():
     text_secs = [s for s in sections if kept(s) and s.segname == "__TEXT"]
     data_secs = [s for s in sections if kept(s) and s.segname in ("__DATA", "__IMPORT") and not s.zerofill]
     bss_secs = [s for s in sections if kept(s) and s.segname in ("__DATA", "__IMPORT") and s.zerofill]
+    objc_secs = [s for s in sections if kept(s) and s.segname == "__OBJC"]  # the legacy runtime's own segment
     for s in sections:
-        if kept(s) and s not in text_secs + data_secs + bss_secs:
+        if kept(s) and s not in text_secs + data_secs + bss_secs + objc_secs:
             sys.exit(f"unsupported section {s.segname},{s.sectname}")
+    for s in objc_secs:
+        s.out_segment = "__OBJC"
     for s in data_secs + bss_secs:
         s.out_segment = "__DATA"
     for s in text_secs:
@@ -166,7 +169,10 @@ def main():
     # Imports: undefined, non-common externals. Functions and data alike get a
     # stub (jmp *lazy_pointer); direct data references go through the object's
     # own non-lazy pointer sections.
-    imports = [s for s in symbols if s.external and s.undefined and not s.common]
+    # .objc_class_name_ references only ever forced a class to be linked; ld
+    # records them, and nothing binds them.
+    imports = [s for s in symbols if s.external and s.undefined and not s.common
+               and not s.name.startswith(".objc_class_name_")]
     commons = [s for s in symbols if s.common]
     import_index = {s.name: i for i, s in enumerate(imports)}
 
@@ -196,13 +202,13 @@ def main():
         stub_size = 6
 
     # Layout. __TEXT holds the header and load commands first.
-    out_sections = text_secs + data_secs + bss_secs + import_secs
+    out_sections = text_secs + data_secs + bss_secs + objc_secs + import_secs
     header_size = 28
     def dylib_cmd_size(name):
         return 24 + align_up(len(name), 4)
     libsystem = b"/usr/lib/libSystem.B.dylib\0"
     dylinker = b"/usr/lib/dyld\0"
-    segment_count = 3 + (0 if args.dylib else 1) + (1 if classic else 0)
+    segment_count = 3 + (0 if args.dylib else 1) + (1 if classic else 0) + (1 if objc_secs else 0)
     cmds_size = 56 * segment_count + 68 * len(out_sections) + 24 + 80 + dylib_cmd_size(libsystem)
     if args.dylib:
         cmds_size += dylib_cmd_size(install_name)
@@ -234,13 +240,20 @@ def main():
         sym.out_value = common_base
         common_base += sym.n_value
     data_end = align_up(common_base, PAGE)
-    addr = import_start = data_end
+    addr = objc_start = data_end
+    for s in objc_secs:
+        addr = align_up(addr, 1 << s.align)
+        s.out_addr = addr
+        addr += s.size
+    objc_file_end = addr
+    objc_end = align_up(addr, PAGE)
+    addr = import_start = objc_end
     for s in import_secs:
         addr = align_up(addr, 1 << s.align)
         s.out_addr = addr
         addr += s.size
     import_file_end = addr
-    import_end = align_up(addr, PAGE) if import_secs else data_end
+    import_end = align_up(addr, PAGE) if import_secs else objc_end
 
     in_sections = sections  # 1-based n_sect indexes into this
     def section_of_addr(a):
@@ -259,6 +272,7 @@ def main():
     # Addresses of the 4-byte words holding an address inside this image, and
     # the words of __absolute sections: the dylib's local relocations.
     slid_words, absolute_words = [], []
+    external_relocs = []
 
     # Symbol values.
     for sym in symbols:
@@ -328,6 +342,11 @@ def main():
                     # The assembler stored A - (P_in + 4) with S = 0.
                     addend = content + place_in + 4
                     value = target + addend - (place_out + 4)
+                elif symbols[r_symbolnum].undefined and symbols[r_symbolnum].name in import_index and sec.segname != "__TEXT":
+                    # A pointer in data to an import, like a constant string's
+                    # isa: dyld binds it, keeping the addend stored here.
+                    value = content
+                    external_relocs.append((place_out, symbols[r_symbolnum]))
                 else:
                     value = target + content
                     slid_words.append(place_out)
@@ -409,7 +428,9 @@ def main():
     # File layout: __TEXT at file 0, __DATA, then __LINKEDIT.
     text_file_size = text_end - TEXT_BASE
     data_file_size = align_up(data_file_end - data_start, PAGE) if data_secs else 0
-    import_file_off = text_file_size + data_file_size
+    objc_file_off = text_file_size + data_file_size
+    objc_file_size = align_up(objc_file_end - objc_start, PAGE) if objc_secs else 0
+    import_file_off = objc_file_off + objc_file_size
     import_file_size = align_up(import_file_end - import_start, PAGE) if import_secs else 0
     linkedit_off = import_file_off + import_file_size
     out = bytearray(linkedit_off)
@@ -418,6 +439,9 @@ def main():
         out[s.offset:s.offset + len(s.data)] = s.data
     for s in data_secs:
         s.offset = text_file_size + (s.out_addr - data_start)
+        out[s.offset:s.offset + len(s.data)] = s.data
+    for s in objc_secs:
+        s.offset = objc_file_off + (s.out_addr - objc_start)
         out[s.offset:s.offset + len(s.data)] = s.data
     for s in import_secs:
         s.offset = import_file_off + (s.out_addr - import_start)
@@ -435,12 +459,16 @@ def main():
                 locrel += struct.pack("<II", where, 1 | (2 << 25))
         for where in absolute_words:
             locrel += struct.pack("<II", where, R_ABS | (2 << 25))
+    extrel = bytearray()
+    for where, sym in external_relocs:
+        extrel += struct.pack("<II", where, sym.out_index | (2 << 25) | (1 << 27))  # length 2, r_extern
     locreloff = linkedit_off
-    symoff = locreloff + len(locrel)
+    extreloff = locreloff + len(locrel)
+    symoff = extreloff + len(extrel)
     indirectsymoff = symoff + len(nlist)
     stroff = indirectsymoff + 4 * len(out_indirect)
     strtab += b"\0" * (align_up(len(strtab), 4) - len(strtab))
-    linkedit = bytes(locrel) + bytes(nlist) + struct.pack(f"<{len(out_indirect)}I", *out_indirect) + bytes(strtab)
+    linkedit = bytes(locrel) + bytes(extrel) + bytes(nlist) + struct.pack(f"<{len(out_indirect)}I", *out_indirect) + bytes(strtab)
     out += linkedit
 
     def segment(name, vmaddr, vmsize, fileoff, filesize, maxprot, initprot, secs):
@@ -467,6 +495,8 @@ def main():
         add(segment("__PAGEZERO", 0, TEXT_BASE, 0, 0, 0, 0, []))
     add(segment("__TEXT", TEXT_BASE, text_file_size, 0, text_file_size, rx, rx, text_secs))
     add(segment("__DATA", data_start, data_end - data_start, text_file_size, data_file_size, rw, rw, data_secs + bss_secs))
+    if objc_secs:
+        add(segment("__OBJC", objc_start, objc_end - objc_start, objc_file_off, objc_file_size, rw, rw, objc_secs))
     if import_secs:
         rwx = rw | VM_PROT_EXECUTE
         add(segment("__IMPORT", import_start, import_end - import_start, import_file_off, import_file_size, rwx, rwx, import_secs))
@@ -475,7 +505,7 @@ def main():
     add(struct.pack("<6I", LC_SYMTAB, 24, symoff, len(out_syms), stroff, len(strtab)))
     nundef = len(imports)
     add(struct.pack("<20I", LC_DYSYMTAB, 80, 0, 0, 0, len(defined), len(defined), nundef, 0, 0, 0, 0, 0, 0,
-                    indirectsymoff, len(out_indirect), 0, 0, locreloff, len(locrel) // 8))
+                    indirectsymoff, len(out_indirect), extreloff, len(extrel) // 8, locreloff, len(locrel) // 8))
     if args.dylib:
         add(dylib_cmd(LC_ID_DYLIB, install_name))
     else:
