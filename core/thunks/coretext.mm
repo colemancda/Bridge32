@@ -41,7 +41,7 @@ void writeFloat(Call &c, GuestAddr out, CGFloat value) {
 // An optional const CGAffineTransform *: six floats in the guest.
 bool transformAt(Call &c, GuestAddr p, CGAffineTransform &t) {
     if (!p) return false;
-    const float *f = c.mem.ptr<float>(p);
+    std::vector<float> f = c.mem.readArray<float>(p, 6);
     t = CGAffineTransformMake(f[0], f[1], f[2], f[3], f[4], f[5]);
     return true;
 }
@@ -81,11 +81,12 @@ B32_THUNK(_CTFontGetBoundingRectsForGlyphs) {
     GuestAddr glyphs = c.args.ptr(), rects = c.args.ptr();
     CFIndex count = c.args.i32();
     std::vector<CGRect> host(rects ? size_t(count) : 0);
-    CGRect all = CTFontGetBoundingRectsForGlyphs(font, orientation, c.mem.ptr<CGGlyph>(glyphs),
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, size_t(std::max<CFIndex>(count, 0)));
+    CGRect all = CTFontGetBoundingRectsForGlyphs(font, orientation, hostGlyphs.data(),
                                                  rects ? host.data() : nullptr, count);
     auto writeRect = [&](GuestAddr p, CGRect r) {
         const float f[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
-        c.mem.copyIn(p, f, sizeof f);
+        c.mem.writeArray<float>(p, f, 4);
     };
     for (size_t i = 0; i < host.size(); i++) writeRect(rects + uint32_t(i) * 16, host[i]);
     writeRect(out, all);
@@ -98,9 +99,10 @@ B32_THUNK(_CTFontDrawGlyphs) {
     size_t count = c.args.u32();
     auto context = ref<CGContextRef>(c);
     std::vector<CGPoint> points(count);
-    const float *f = c.mem.ptr<float>(positions);
+    std::vector<float> f = c.mem.readArray<float>(positions, count * 2);
     for (size_t i = 0; i < count; i++) points[i] = CGPointMake(f[i * 2], f[i * 2 + 1]);
-    CTFontDrawGlyphs(font, c.mem.ptr<CGGlyph>(glyphs), points.data(), count, context);
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    CTFontDrawGlyphs(font, hostGlyphs.data(), points.data(), count, context);
 }
 
 // bool CTFontManagerRegisterFontsForURL(CFURLRef, CTFontManagerScope, CFErrorRef *)
@@ -315,7 +317,9 @@ B32_THUNK(_CTRunGetGlyphs) {
     auto run = ref<CTRunRef>(c);
     CFRange r = range(c);
     GuestAddr out = c.args.ptr();
-    CTRunGetGlyphs(run, r, c.mem.ptr<CGGlyph>(out));
+    std::vector<CGGlyph> glyphs(size_t(std::max<CFIndex>(r.length, 0)));
+    CTRunGetGlyphs(run, r, glyphs.data());
+    c.mem.writeArray<CGGlyph>(out, glyphs.data(), glyphs.size());
 }
 // void CTRunGetPositions(CTRunRef, CFRange, CGPoint buffer[])
 B32_THUNK(_CTRunGetPositions) {
@@ -350,7 +354,11 @@ B32_THUNK(_CTFontGetGlyphsForCharacters) {
     auto font = ref<CTFontRef>(c);
     GuestAddr chars = c.args.ptr(), glyphs = c.args.ptr();
     CFIndex count = c.args.i32();
-    c.ret(CTFontGetGlyphsForCharacters(font, c.mem.ptr<UniChar>(chars), c.mem.ptr<CGGlyph>(glyphs), count));
+    std::vector<UniChar> hostChars = c.mem.readArray<UniChar>(chars, size_t(std::max<CFIndex>(count, 0)));
+    std::vector<CGGlyph> hostGlyphs(hostChars.size());
+    bool ok = CTFontGetGlyphsForCharacters(font, hostChars.data(), hostGlyphs.data(), count);
+    c.mem.writeArray<CGGlyph>(glyphs, hostGlyphs.data(), hostGlyphs.size());
+    c.ret(ok);
 }
 B32_THUNK(_CTFontManagerUnregisterFontsForURL) {
     auto url = ref<CFURLRef>(c);
