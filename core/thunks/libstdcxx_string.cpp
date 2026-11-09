@@ -19,22 +19,41 @@ B32_THUNK(__ZNSaIcED1Ev) {}
 B32_THUNK(__ZNSaIcED2Ev) {}
 B32_THUNK(__ZNSaIcEC1ERKS_) {}
 B32_THUNK(__ZNSaIcEC2ERKS_) {}
+B32_THUNK(__ZNSaIcEC2Ev) {}
+// allocator<wchar_t>: wide strings aren't shimmed, but a guest still constructs the allocator.
+B32_THUNK(__ZNSaIwEC1Ev) {}
+B32_THUNK(__ZNSaIwEC2Ev) {}
+B32_THUNK(__ZNSaIwEC1ERKS_) {}
+B32_THUNK(__ZNSaIwEC2ERKS_) {}
+B32_THUNK(__ZNSaIwED1Ev) {}
+B32_THUNK(__ZNSaIwED2Ev) {}
 
 B32_THUNK(__ZNSsC1Ev) {
     Strings s(c);
     c.mem.write<uint32_t>(c.args.ptr(), s.emptyData);
 }
+// The base object constructors (C2) are the complete object ones (C1): nothing is virtual.
+B32_THUNK(__ZNSsC2Ev) { thunk___ZNSsC1Ev(c); }
 // basic_string(const char *, const allocator &)
 B32_THUNK(__ZNSsC1EPKcRKSaIcE) {
     Strings s(c);
     GuestAddr self = c.args.ptr();
     c.mem.write<uint32_t>(self, s.make(cstring(c, c.args.ptr())));
 }
+B32_THUNK(__ZNSsC2EPKcRKSaIcE) { thunk___ZNSsC1EPKcRKSaIcE(c); }
+// basic_string(const char *, size_type, const allocator &)
+B32_THUNK(__ZNSsC1EPKcmRKSaIcE) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), text = c.args.ptr();
+    c.mem.write<uint32_t>(self, s.make(bytes(c, text, c.args.u32())));
+}
+B32_THUNK(__ZNSsC2EPKcmRKSaIcE) { thunk___ZNSsC1EPKcmRKSaIcE(c); }
 B32_THUNK(__ZNSsC1ERKSs) {
     Strings s(c);
     GuestAddr self = c.args.ptr(), other = c.args.ptr();
     c.mem.write<uint32_t>(self, s.share(s.data(other)));
 }
+B32_THUNK(__ZNSsC2ERKSs) { thunk___ZNSsC1ERKSs(c); }
 // basic_string(const string &, pos, n)
 B32_THUNK(__ZNSsC1ERKSsmm) {
     Strings s(c);
@@ -115,6 +134,11 @@ B32_THUNK(__ZNKSs12find_last_ofEcm) {
     char ch = char(c.args.u32());
     c.ret(found(s.view(self).find_last_of(ch, hostPos(c.args.u32()))));
 }
+B32_THUNK(__ZNKSs13find_first_ofERKSsm) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr(), set = c.args.ptr();
+    c.ret(found(s.view(self).find_first_of(s.view(set), c.args.u32())));
+}
 B32_THUNK(__ZNKSs13find_first_ofEPKcm) {
     Strings s(c);
     GuestAddr self = c.args.ptr(), set = c.args.ptr();
@@ -171,6 +195,12 @@ B32_THUNK(__ZNSspLEc) {
     GuestAddr self = c.args.ptr();
     char ch = char(c.args.u32());
     s.splice(self, uint32_t(s.view(self).size()), 0, std::string_view(&ch, 1));
+    finish(c, self);
+}
+B32_THUNK(__ZNSs6assignEPKc) {
+    Strings s(c);
+    GuestAddr self = c.args.ptr();
+    s.assign(self, cstring(c, c.args.ptr()));
     finish(c, self);
 }
 B32_THUNK(__ZNSs6assignEPKcm) {
