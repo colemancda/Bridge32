@@ -56,7 +56,7 @@ B32_THUNK(___cxa_guard_release) {
 B32_THUNK(___cxa_guard_abort) { guardLock.unlock(); }
 
 B32_THUNK(___cxa_atexit) { c.ret(0); }  // the process never runs static destructors
-B32_THUNK(___cxa_pure_virtual) { fatal("guest called a pure virtual function (from 0x%08x)", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(___cxa_pure_virtual) { fatal("guest called a pure virtual function (from 0x%08x)", c.cpu.returnAddress()); }
 
 // --- SjLj exception registration -------------------------------------------
 
@@ -86,7 +86,7 @@ B32_THUNK(___cxa_throw) {
     // std::type_info is {vtable, const char *name}.
     GuestAddr name = typeInfo ? c.mem.read<uint32_t>(typeInfo + 4) : 0;
     fatal("guest threw a C++ exception of type %s (object 0x%08x, from 0x%08x); throwing is not supported yet",
-          name ? c.mem.cstr(name) : "?", exception, c.cpu.reg(Cpu::LR));
+          name ? c.mem.cstr(name) : "?", exception, c.cpu.returnAddress());
 }
 
 // --- keymgr (libgcc keeps its EH and atexit globals here) -------------------
