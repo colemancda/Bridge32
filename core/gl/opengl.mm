@@ -64,6 +64,7 @@ const CFunction kCGL[] = {
     {"CGLClearDrawable", "i:h"},
     {"CGLErrorString", "s:i"},
     {"gluCheckExtension", "B:pp"},
+    {"gluLookAt", "v:ddddddddd"},
 };
 }  // namespace
 
