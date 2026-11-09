@@ -63,10 +63,20 @@ struct ClassInfo {
     ClassInfo *instance = nullptr;  // for metaclasses: their class
     Class host = nullptr;   // shadow class for guest classes; the host class for stubs
     uint32_t instanceSize = kObjectHeaderSize;
+    GuestAddr ro = 0;       // its class_ro_t (for a legacy class, one made from it); guest classes
     std::unordered_map<GuestAddr, GuestMethod> methods;  // guest SEL -> method
     std::vector<GuestIvar> ivars;  // guest classes only
     bool initialized = false;      // +initialize has run (guest classes)
 };
+
+#if defined(B32_GUEST_I386)
+// A host exception reaching guest code, or a guest throw: Delivered means the
+// guest's innermost @try on this thread is resuming (a longjmp, already done
+// to the Cpu); OuterFrame that it's in guest code below host frames, so the
+// exception must keep unwinding on the host; NoFrame that no @try is waiting.
+enum class ExceptionDelivery { Delivered, OuterFrame, NoFrame };
+ExceptionDelivery deliverGuestException(Cpu &cpu, GuestAddr exception);
+#endif
 
 class Bridge {
 public:
@@ -103,6 +113,9 @@ public:
     // A protocol by name as a guest protocol_t: the app's own, or one standing
     // for the host's; 0 if neither has it.
     GuestAddr protocolNamed(const std::string &name);
+    // The modern protocol_t behind a guest protocol (itself, unless it's a
+    // legacy image's protocol).
+    GuestAddr protocolData(GuestAddr protocol);
 
     // Reflection (class_getInstanceMethod, method_exchangeImplementations...).
     // A Method is a guest method_t { SEL, types, IMP }: a guest class's own,
@@ -138,6 +151,11 @@ public:
     ClassInfo *classInfo(GuestAddr cls);
     // A class the guest built at run time (objc_readClassPair: Swift's generic classes).
     ClassInfo *addGuestClass(GuestAddr cls) { return realizeGuestClass(cls); }
+    // objc_allocateClassPair: a new guest class, usable at once (registering
+    // it adds nothing); 0 if a class has the name. class_addIvar: false once
+    // the name's taken.
+    GuestAddr allocateClassPair(ClassInfo *super, const std::string &name);
+    bool addIvar(ClassInfo *cls, const std::string &name, uint32_t size, uint32_t log2Align, const std::string &types);
     ClassInfo *classOf(GuestAddr object);  // via the object's isa
     ClassInfo *stubFor(Class hostClass);
 
@@ -204,6 +222,17 @@ public:
 private:
     ClassInfo *makeStub(Class hostClass, const std::string &name);
     ClassInfo *realizeGuestClass(GuestAddr cls);
+    // What's left once a class's info is filled in: the host side of it.
+    void finishGuestClass(ClassInfo *cls);
+    void addCategoryMethods(ClassInfo *cls, const char *category, GuestAddr instanceMethods, GuestAddr classMethods);
+    // Legacy __OBJC images (LegacyImage.mm).
+    void setupLegacyImage(const Image &image);
+    ClassInfo *realizeLegacyClass(GuestAddr cls);
+    GuestAddr makeLegacyProtocolList(GuestAddr list);
+    GuestAddr makeLegacyDescriptionList(GuestAddr list);
+    void prepareLegacyMethods(GuestAddr list);
+    GuestAddr makeLegacyRo(uint32_t flags, GuestAddr name, GuestAddr methods, GuestAddr protocols, GuestAddr ivars,
+                           GuestAddr properties, uint32_t instanceStart, uint32_t instanceSize);
     void addGuestMethods(ClassInfo *info, GuestAddr methodList);
     void createShadowClass(ClassInfo *info, GuestAddr ro);
     void installTrampoline(Class target, GuestAddr sel, const GuestMethod &method, ClassInfo *owner);
@@ -263,6 +292,8 @@ private:
     std::unordered_map<GuestAddr, id> aliases_;
     std::unordered_map<GuestAddr, std::string> guestProtocols_;  // protocol_t -> name
     std::unordered_map<std::string, GuestAddr> guestProtocolByName_;
+    std::unordered_map<GuestAddr, GuestAddr> legacyProtocols_;  // the guest's protocol -> its modern protocol_t
+    std::unordered_map<std::string, GuestAddr> legacyClasses_;   // while reading a legacy image, by name
     Protocol *hostProtocol(const std::string &name);
     std::recursive_mutex initLock_;
     bool running_ = false;     // guest code has started (runLoadMethods)
