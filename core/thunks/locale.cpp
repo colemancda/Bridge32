@@ -439,38 +439,35 @@ B32_THUNK(_asprintf_l) {
 // int swprintf(wchar_t *, size_t, const wchar_t *format, ...): libc++ formats
 // numbers with it, so the format is plain ASCII; it runs as printf and the
 // result is widened.
-B32_THUNK(_swprintf) {
-    wchar_t *buf = hostWide(c, c.args.ptr());
-    uint32_t size = c.args.u32();
-    std::string format;
-    for (const wchar_t *f = hostWide(c, c.args.ptr()); *f; f++) format += char(*f);
-    std::string s = formatGuest(c, format.c_str(), c.args);
-    if (!size || s.size() >= size) {
-        if (size) buf[0] = 0;
+// The wide printf family formats in UTF-8 and converts: the format string and the result are the guest's wchar_t.
+namespace {
+void wideFormat(Call &c, GuestAddr buffer, uint32_t size, const std::wstring &format, Args &args) {
+    std::wstring result = utf8ToWide(formatGuest(c, wideToUTF8(format).c_str(), args));
+    if (!size || result.size() >= size) {
+        if (size) c.mem.write<uint32_t>(buffer, 0);
         c.ret(uint32_t(-1));
         return;
     }
-    for (size_t i = 0; i < s.size(); i++) buf[i] = wchar_t(static_cast<unsigned char>(s[i]));
-    buf[s.size()] = 0;
-    c.ret(uint32_t(s.size()));
+    c.mem.writeWide(buffer, result);
+    c.ret(uint32_t(result.size()));
+}
+}  // namespace
+
+// int swprintf(wchar_t *, size_t, const wchar_t *format, ...)
+B32_THUNK(_swprintf) {
+    GuestAddr buffer = c.args.ptr();
+    uint32_t size = c.args.u32();
+    std::wstring format = c.mem.readWide(c.args.ptr());
+    wideFormat(c, buffer, size, format, c.args);
 }
 
 // int vswprintf(wchar_t *, size_t, const wchar_t *format, va_list)
 B32_THUNK(_vswprintf) {
-    wchar_t *buf = hostWide(c, c.args.ptr());
+    GuestAddr buffer = c.args.ptr();
     uint32_t size = c.args.u32();
-    std::string format;
-    for (const wchar_t *f = hostWide(c, c.args.ptr()); *f; f++) format += char(*f);
+    std::wstring format = c.mem.readWide(c.args.ptr());
     Args va = Args::fromVaList(c.cpu, c.args.ptr());
-    std::string s = formatGuest(c, format.c_str(), va);
-    if (!size || s.size() >= size) {
-        if (size) buf[0] = 0;
-        c.ret(uint32_t(-1));
-        return;
-    }
-    for (size_t i = 0; i < s.size(); i++) buf[i] = wchar_t(static_cast<unsigned char>(s[i]));
-    buf[s.size()] = 0;
-    c.ret(uint32_t(s.size()));
+    wideFormat(c, buffer, size, format, va);
 }
 
 // --- message catalogs: none, so std::messages returns its defaults -------------------------
