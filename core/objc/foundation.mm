@@ -29,7 +29,7 @@ Bridge &bridge(Call &c) { return c.rt.bridge(); }
 GuestAddr exceptionHandler = 0;
 
 CGRect guestRect(Call &c) {
-    float x = c.args.f32(), y = c.args.f32(), w = c.args.f32(), h = c.args.f32();
+    float x = c.args.structFloat(), y = c.args.structFloat(), w = c.args.structFloat(), h = c.args.structFloat();
     return CGRectMake(x, y, w, h);
 }
 void writeRect(Call &c, GuestAddr out, CGRect r) {
@@ -67,12 +67,12 @@ B32_THUNK(_NSLogv) {
 #if TARGET_OS_MACCATALYST  // UIKit's string functions
 B32_THUNK(_NSStringFromCGRect) { c.ret(bridge(c).toGuest(NSStringFromCGRect(guestRect(c)))); }
 B32_THUNK(_NSStringFromCGSize) {
-    float w = c.args.f32();
-    c.ret(bridge(c).toGuest(NSStringFromCGSize(CGSizeMake(w, c.args.f32()))));
+    float w = c.args.structFloat();
+    c.ret(bridge(c).toGuest(NSStringFromCGSize(CGSizeMake(w, c.args.structFloat()))));
 }
 B32_THUNK(_NSStringFromCGPoint) {
-    float x = c.args.f32();
-    c.ret(bridge(c).toGuest(NSStringFromCGPoint(CGPointMake(x, c.args.f32()))));
+    float x = c.args.structFloat();
+    c.ret(bridge(c).toGuest(NSStringFromCGPoint(CGPointMake(x, c.args.structFloat()))));
 }
 // CGRect CGRectFromString(NSString *): 16 bytes, returned through r0.
 B32_THUNK(_CGRectFromString) {
@@ -241,7 +241,7 @@ B32_THUNK(_GLKMatrix4Invert) {
     StructResult out(c, 64);
     simd_float4x4 m;
     float *f = reinterpret_cast<float *>(&m);
-    for (int i = 0; i < 16; i++) f[i] = c.args.f32();
+    for (int i = 0; i < 16; i++) f[i] = c.args.structFloat();
     GuestAddr invertibleOut = c.args.ptr();
     bool invertible = simd_determinant(m) != 0;
     simd_float4x4 result = invertible ? simd_inverse(m) : matrix_identity_float4x4;
@@ -251,7 +251,7 @@ B32_THUNK(_GLKMatrix4Invert) {
 B32_THUNK(_GLKMatrix3Invert) {
     StructResult out(c, 36);
     float in[9];
-    for (float &v : in) v = c.args.f32();
+    for (float &v : in) v = c.args.structFloat();
     GuestAddr invertibleOut = c.args.ptr();
     simd_float3x3 m = simd_matrix(simd_make_float3(in[0], in[1], in[2]), simd_make_float3(in[3], in[4], in[5]),
                                   simd_make_float3(in[6], in[7], in[8]));
@@ -278,7 +278,7 @@ namespace {
 CATransform3D transformArg(Call &c) {
     CATransform3D t;
     CGFloat *v = &t.m11;
-    for (int i = 0; i < 16; i++) v[i] = c.args.f32();
+    for (int i = 0; i < 16; i++) v[i] = c.args.structFloat();
     return t;
 }
 void returnTransform(Call &c, GuestAddr out, const CATransform3D &t) {
@@ -300,8 +300,8 @@ B32_THUNK(_CATransform3DMakeRotation) {
 B32_THUNK(_CATransform3DMakeAffineTransform) {
     StructResult out(c, 64);
     CGAffineTransform m;
-    m.a = c.args.f32(), m.b = c.args.f32(), m.c = c.args.f32(), m.d = c.args.f32();
-    m.tx = c.args.f32(), m.ty = c.args.f32();
+    m.a = c.args.structFloat(), m.b = c.args.structFloat(), m.c = c.args.structFloat(), m.d = c.args.structFloat();
+    m.tx = c.args.structFloat(), m.ty = c.args.structFloat();
     returnTransform(c, out, CATransform3DMakeAffineTransform(m));
 }
 // CATransform3D CATransform3DScale/Translate(CATransform3D, CGFloat, CGFloat, CGFloat)
