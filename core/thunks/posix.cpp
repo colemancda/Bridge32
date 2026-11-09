@@ -119,7 +119,7 @@ B32_THUNK(_access) {
 //   dev 0, ino 4, mode 8, nlink 10, uid 12, gid 16, rdev 20, atime 24, mtime 32,
 //   ctime 40, size 48, blocks 56, blksize 64, flags 68, gen 72
 namespace {
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 constexpr bool kPlainInode64 = false;
 #else
 constexpr bool kPlainInode64 = true;
@@ -191,7 +191,7 @@ void statDescriptor(Call &c, bool inode64) {
 B32_THUNK(_stat) { statPath(c, ::stat, kPlainInode64); }
 B32_THUNK(_lstat) { statPath(c, ::lstat, kPlainInode64); }
 B32_THUNK(_fstat) { statDescriptor(c, kPlainInode64); }
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 B32_THUNK(_stat$INODE64) { statPath(c, ::stat, true); }
 B32_THUNK(_lstat$INODE64) { statPath(c, ::lstat, true); }
 B32_THUNK(_fstat$INODE64) { statDescriptor(c, true); }
@@ -271,7 +271,7 @@ void readDirectory(Call &c, bool inode64) {
 }  // namespace
 
 B32_THUNK(_readdir) { readDirectory(c, kPlainInode64); }
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 B32_THUNK(_readdir$INODE64) { readDirectory(c, true); }
 #endif
 
@@ -382,11 +382,14 @@ B32_THUNK(_strptime) {
 
 // size_t wcsftime(wchar_t *s, size_t max, const wchar_t *format, const struct tm *tm)
 B32_THUNK(_wcsftime) {
-    wchar_t *out = c.mem.ptr<wchar_t>(c.args.ptr());
+    GuestAddr out = c.args.ptr();
     size_t max = c.args.u32();
-    const wchar_t *format = c.mem.ptr<wchar_t>(c.args.ptr());
+    std::wstring format = c.mem.readWide(c.args.ptr());
     struct tm t = hostTm(c, c.args.ptr());
-    c.ret(uint32_t(std::wcsftime(out, max, format, &t)));
+    std::vector<wchar_t> text(max + 1);
+    size_t n = std::wcsftime(text.data(), max, format.c_str(), &t);
+    if (n) c.mem.writeWide(out, std::wstring(text.data(), n));
+    c.ret(uint32_t(n));
 }
 
 B32_THUNK(_localtime) {
@@ -419,8 +422,15 @@ B32_DATA(_tzname, 8) {
 
 B32_DATA(_mach_task_self_, 4) { rt.mem().write<uint32_t>(addr, mach_task_self()); }
 B32_THUNK(_mach_absolute_time) { c.ret64(mach_absolute_time()); }
-// struct mach_timebase_info { uint32_t numer, denom } matches the host's.
-B32_THUNK(_mach_timebase_info) { c.ret(mach_timebase_info(c.mem.ptr<mach_timebase_info_data_t>(c.args.ptr()))); }
+// struct mach_timebase_info is { uint32_t numer, denom }.
+B32_THUNK(_mach_timebase_info) {
+    GuestAddr out = c.args.ptr();
+    mach_timebase_info_data_t info;
+    kern_return_t kr = mach_timebase_info(&info);
+    c.mem.write<uint32_t>(out, info.numer);
+    c.mem.write<uint32_t>(out + 4, info.denom);
+    c.ret(kr);
+}
 
 // Semaphores are Mach port names, the same 32-bit values in both.
 B32_THUNK(_semaphore_create) {
@@ -685,8 +695,12 @@ B32_THUNK(_ioctl) {
     unsigned long request = c.args.u32();
     GuestAddr arg = c.args.ptr();
     if ((request == FIONBIO || request == FIONREAD) && arg) {
-        int r = ::ioctl(fd, request, c.mem.ptr<int>(arg));
-        if (r < 0) setGuestErrno(c, errno);
+        int value = c.mem.read<int32_t>(arg);
+        int r = ::ioctl(fd, request, &value);
+        if (r < 0)
+            setGuestErrno(c, errno);
+        else
+            c.mem.write<int32_t>(arg, value);
         c.ret(uint32_t(r));
         return;
     }
@@ -694,11 +708,21 @@ B32_THUNK(_ioctl) {
     c.ret(uint32_t(-1));
 }
 
-// struct pollfd { int fd; short events, revents; } matches the host's.
+// struct pollfd { int fd; short events, revents; }: 8 bytes in the guest, whose
+// byte order the host's isn't.
 B32_THUNK(_poll) {
-    auto *fds = c.mem.ptr<struct pollfd>(c.args.ptr());
+    GuestAddr guestFds = c.args.ptr();
     nfds_t count = c.args.u32();
-    c.ret(uint32_t(::poll(fds, count, c.args.i32())));
+    int timeout = c.args.i32();
+    std::vector<struct pollfd> fds(count);
+    for (nfds_t i = 0; i < count; i++) {
+        fds[i].fd = c.mem.read<int32_t>(guestFds + i * 8);
+        fds[i].events = c.mem.read<int16_t>(guestFds + i * 8 + 4);
+        fds[i].revents = 0;
+    }
+    int r = ::poll(fds.data(), count, timeout);
+    for (nfds_t i = 0; i < count; i++) c.mem.write<int16_t>(guestFds + i * 8 + 6, fds[i].revents);
+    c.ret(uint32_t(r));
 }
 
 // ssize_t writev(int fd, const struct iovec *iov, int count): guest iovecs
