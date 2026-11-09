@@ -34,7 +34,11 @@
 using namespace b32;
 
 namespace {
-std::atomic<int32_t> &atomicAt(Call &c, GuestAddr p) { return *reinterpret_cast<std::atomic<int32_t> *>(c.mem.ptr<int32_t>(p)); }
+// The guest's words are in its byte order, so each operation goes through
+// GuestMemory's atomics, which convert around the host's.
+uint32_t addTo(Call &c, GuestAddr word, int32_t amount) {
+    return c.mem.atomicUpdate<uint32_t>(word, [&](uint32_t v) { return v + uint32_t(amount); }) + uint32_t(amount);
+}
 }  // namespace
 
 // --- OSAtomic and OSSpinLock --------------------------------------------------------------------
@@ -42,31 +46,31 @@ std::atomic<int32_t> &atomicAt(Call &c, GuestAddr p) { return *reinterpret_cast<
 // int32_t OSAtomicAdd32(int32_t amount, volatile int32_t *value): returns the new value.
 B32_THUNK(_OSAtomicAdd32) {
     int32_t amount = c.args.i32();
-    c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_add(amount) + amount));
+    c.ret(addTo(c, c.args.ptr(), amount));
 }
 B32_THUNK(_OSAtomicAdd32Barrier) {
     int32_t amount = c.args.i32();
-    c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_add(amount) + amount));
+    c.ret(addTo(c, c.args.ptr(), amount));
 }
-B32_THUNK(_OSAtomicIncrement32Barrier) { c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_add(1) + 1)); }
-B32_THUNK(_OSAtomicDecrement32Barrier) { c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_sub(1) - 1)); }
-B32_THUNK(_OSAtomicIncrement32) { c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_add(1) + 1)); }
-B32_THUNK(_OSAtomicDecrement32) { c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_sub(1) - 1)); }
+B32_THUNK(_OSAtomicIncrement32Barrier) { c.ret(addTo(c, c.args.ptr(), 1)); }
+B32_THUNK(_OSAtomicDecrement32Barrier) { c.ret(addTo(c, c.args.ptr(), -1)); }
+B32_THUNK(_OSAtomicIncrement32) { c.ret(addTo(c, c.args.ptr(), 1)); }
+B32_THUNK(_OSAtomicDecrement32) { c.ret(addTo(c, c.args.ptr(), -1)); }
 B32_THUNK(_OSAtomicAnd32Barrier) {
-    int32_t mask = c.args.i32();
-    c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_and(mask) & mask));
+    uint32_t mask = c.args.u32();
+    c.ret(c.mem.atomicUpdate<uint32_t>(c.args.ptr(), [&](uint32_t v) { return v & mask; }) & mask);
 }
 B32_THUNK(_OSAtomicOr32Barrier) {
-    int32_t mask = c.args.i32();
-    c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_or(mask) | mask));
+    uint32_t mask = c.args.u32();
+    c.ret(c.mem.atomicUpdate<uint32_t>(c.args.ptr(), [&](uint32_t v) { return v | mask; }) | mask);
 }
 
 // bool OSAtomicCompareAndSwap32(int32_t old, int32_t new, volatile int32_t *value),
 // and the pointer, int and long flavors, which are all 32-bit in the guest.
-#define B32_ATOMIC_CAS(symbol)                                          \
-    B32_THUNK(symbol) {                                                 \
-        int32_t expected = c.args.i32(), desired = c.args.i32();        \
-        c.ret(atomicAt(c, c.args.ptr()).compare_exchange_strong(expected, desired) ? 1 : 0); \
+#define B32_ATOMIC_CAS(symbol)                                                           \
+    B32_THUNK(symbol) {                                                                  \
+        uint32_t expected = c.args.u32(), desired = c.args.u32();                        \
+        c.ret(c.mem.atomicCompareExchange<uint32_t>(c.args.ptr(), expected, desired) ? 1 : 0); \
     }
 B32_ATOMIC_CAS(_OSAtomicCompareAndSwap32)
 B32_ATOMIC_CAS(_OSAtomicCompareAndSwap32Barrier)
@@ -81,14 +85,11 @@ B32_THUNK(_OSMemoryBarrier) { std::atomic_thread_fence(std::memory_order_seq_cst
 
 // OSSpinLock is an int32_t: 0 unlocked.
 B32_THUNK(_OSSpinLockLock) {
-    auto &lock = atomicAt(c, c.args.ptr());
-    for (int32_t expected = 0; !lock.compare_exchange_weak(expected, 1); expected = 0) std::this_thread::yield();
+    GuestAddr lock = c.args.ptr();
+    while (!c.mem.atomicCompareExchange<uint32_t>(lock, 0, 1)) std::this_thread::yield();
 }
-B32_THUNK(_OSSpinLockTry) {
-    int32_t expected = 0;
-    c.ret(atomicAt(c, c.args.ptr()).compare_exchange_strong(expected, 1) ? 1 : 0);
-}
-B32_THUNK(_OSSpinLockUnlock) { atomicAt(c, c.args.ptr()).store(0); }
+B32_THUNK(_OSSpinLockTry) { c.ret(c.mem.atomicCompareExchange<uint32_t>(c.args.ptr(), 0, 1) ? 1 : 0); }
+B32_THUNK(_OSSpinLockUnlock) { c.mem.atomicStore<uint32_t>(c.args.ptr(), 0); }
 
 // --- dyld's image list: the app, then the guest libraries -------------------------------------------
 
@@ -172,22 +173,22 @@ B32_THUNK(_NXGetLocalArchInfo) {
     B32_THUNK(symbol) { c.ret(KERN_FAILURE); }
 B32_MACH_FAILS(_task_swap_exception_ports)
 B32_MACH_FAILS(_task_get_exception_ports)
-#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
+#if !defined(B32_GUEST_MAC)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_task_set_exception_ports)
 #endif
 B32_MACH_FAILS(_thread_swap_exception_ports)
 B32_MACH_FAILS(_thread_get_exception_ports)
 B32_MACH_FAILS(_thread_set_exception_ports)
-#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
+#if !defined(B32_GUEST_MAC)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_port_allocate)
 #endif
-#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
+#if !defined(B32_GUEST_MAC)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_port_insert_right)
 #endif
 B32_MACH_FAILS(_mach_port_mod_refs)
 B32_MACH_FAILS(_mach_port_move_member)
 B32_MACH_FAILS(_mach_port_request_notification)
-#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
+#if !defined(B32_GUEST_MAC)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_msg)
 #endif
 B32_MACH_FAILS(_exception_raise)
@@ -725,11 +726,11 @@ B32_THUNK(_qsort_b) {
 }
 
 B32_THUNK(_OSAtomicOr32Orig) {
-    int32_t mask = c.args.i32();
-    c.ret(uint32_t(atomicAt(c, c.args.ptr()).fetch_or(mask)));
+    uint32_t mask = c.args.u32();
+    c.ret(c.mem.atomicUpdate<uint32_t>(c.args.ptr(), [&](uint32_t v) { return v | mask; }));
 }
 
-// The clock service: mach_timespec_t { unsigned tv_sec; int tv_nsec } is the same in both.
+// The clock service: mach_timespec_t is { unsigned tv_sec; int tv_nsec }.
 B32_THUNK(_host_get_clock_service) {
     c.args.u32();
     int id = c.args.i32();
@@ -740,7 +741,12 @@ B32_THUNK(_host_get_clock_service) {
 }
 B32_THUNK(_clock_get_time) {
     clock_serv_t clock = c.args.u32();
-    c.ret(uint32_t(clock_get_time(clock, c.mem.ptr<mach_timespec_t>(c.args.ptr()))));
+    GuestAddr out = c.args.ptr();
+    mach_timespec_t time;
+    kern_return_t kr = clock_get_time(clock, &time);
+    c.mem.write<int32_t>(out, time.tv_sec);
+    c.mem.write<int32_t>(out + 4, time.tv_nsec);
+    c.ret(uint32_t(kr));
 }
 
 B32_DATA(_in6addr_any, 16) {}
