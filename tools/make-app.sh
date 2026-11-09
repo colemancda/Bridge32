@@ -75,6 +75,12 @@ if [ -d "$input/Contents" ]; then
     [ -d "$guest/Contents/Frameworks" ] && clone "$guest/Contents/Frameworks" "$out/Contents/B32Guest/Frameworks"
     python3 -I "$here/merge-mac-plist.py" "$guest/Contents/Info.plist" "$root/app/mac/Info.plist" "$out/Contents/Info.plist" "$executable"
     [ -n "$chdir_flag" ] && /usr/libexec/PlistBuddy -c "Add :B32GuestChdir bool true" "$out/Contents/Info.plist"
+    # Resource forks go alongside as plain files, since signing can't take them.
+    (cd "$guest/Contents" && find . -type f -xattrname com.apple.ResourceFork) | while IFS= read -r file; do
+        relative=${file#./}
+        mkdir -p "$out/Contents/B32Guest/Forks/$(dirname "$relative")"
+        cat "$guest/Contents/$relative/..namedfork/rsrc" > "$out/Contents/B32Guest/Forks/$relative"
+    done
     # codesign refuses a bundle with extended attributes, which old apps have.
     xattr -cr "$out"
     codesign --force --sign - "$out"
