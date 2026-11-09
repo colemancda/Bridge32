@@ -240,19 +240,15 @@ B32_THUNK(_thread_resume) {
 }
 
 // kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t, thread_state_t, mach_msg_type_number_t *count):
-// ARM_THREAD_STATE (1) only, the 32-bit arm_thread_state_t { r[13], sp, lr, pc, cpsr }.
+// the guest's native flavor only (ARM_THREAD_STATE or x86_THREAD_STATE32).
 B32_THUNK(_thread_get_state) {
     Cpu *cpu = guestThread(c.args.u32());
     int flavor = c.args.i32();
     GuestAddr state = c.args.ptr(), countOut = c.args.ptr();
-    constexpr uint32_t kArmThreadState = 1, kArmThreadStateCount = 17;
-    if (!cpu || flavor != kArmThreadState || c.mem.read<uint32_t>(countOut) < kArmThreadStateCount) {
+    if (!cpu || !cpu->threadState(flavor, state, countOut)) {
         c.ret(KERN_INVALID_ARGUMENT);
         return;
     }
-    for (int r = 0; r < 16; r++) c.mem.write<uint32_t>(state + r * 4, cpu->reg(r));
-    c.mem.write<uint32_t>(state + 64, cpu->cpsr());
-    c.mem.write<uint32_t>(countOut, kArmThreadStateCount);
     c.ret(KERN_SUCCESS);
 }
 
