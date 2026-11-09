@@ -68,9 +68,11 @@ if [ -d "$input/Contents" ]; then
     rm -rf "$out"
     cp -R "$shell_app" "$out"
     mkdir -p "$out/Contents/B32Guest/MacOS" "$out/Contents/Resources"
-    cp -R "$guest/Contents/MacOS/." "$out/Contents/B32Guest/MacOS/"
-    [ -d "$guest/Contents/Resources" ] && cp -R "$guest/Contents/Resources/." "$out/Contents/Resources/"
-    [ -d "$guest/Contents/Frameworks" ] && cp -R "$guest/Contents/Frameworks" "$out/Contents/B32Guest/Frameworks"
+    # Clones where the disk can: guests are often gigabytes.
+    clone() { cp -cR "$1" "$2" 2>/dev/null || cp -R "$1" "$2"; }
+    clone "$guest/Contents/MacOS/." "$out/Contents/B32Guest/MacOS/"
+    [ -d "$guest/Contents/Resources" ] && clone "$guest/Contents/Resources/." "$out/Contents/Resources/"
+    [ -d "$guest/Contents/Frameworks" ] && clone "$guest/Contents/Frameworks" "$out/Contents/B32Guest/Frameworks"
     python3 -I "$here/merge-mac-plist.py" "$guest/Contents/Info.plist" "$root/app/mac/Info.plist" "$out/Contents/Info.plist" "$executable"
     [ -n "$chdir_flag" ] && /usr/libexec/PlistBuddy -c "Add :B32GuestChdir bool true" "$out/Contents/Info.plist"
     # codesign refuses a bundle with extended attributes, which old apps have.
