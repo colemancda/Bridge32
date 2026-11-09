@@ -52,6 +52,9 @@ std::string macRomanToUtf8(const char *bytes, size_t n) {
     NSString *s = [[[NSString alloc] initWithBytes:bytes length:n encoding:NSMacOSRomanStringEncoding] autorelease];
     return s.UTF8String ?: "";
 }
+// An FSRef is 80 opaque bytes the guest only hands back to these calls, so the
+// host's can sit in guest memory whatever the byte order.
+FSRef *fsRef(Call &c, GuestAddr p) { return static_cast<FSRef *>(c.mem.ptr<void>(p)); }
 std::string pascalString(Call &c, GuestAddr p) {
     return p ? macRomanToUtf8(c.mem.ptr<char>(p + 1), c.mem.read<uint8_t>(p)) : "";
 }
@@ -246,7 +249,7 @@ B32_THUNK(_FSpSetFInfo) { c.ret(0); }
 // OSErr FSpMakeFSRef(spec, FSRef *)
 B32_THUNK(_FSpMakeFSRef) {
     std::string path = specPath(c, c.args.ptr());
-    c.ret(uint32_t(int32_t(FSPathMakeRef(reinterpret_cast<const UInt8 *>(path.c_str()), c.mem.ptr<FSRef>(c.args.ptr()), nullptr))));
+    c.ret(uint32_t(int32_t(FSPathMakeRef(reinterpret_cast<const UInt8 *>(path.c_str()), fsRef(c, c.args.ptr()), nullptr))));
 }
 B32_THUNK(_FSRead) { fileRead(c, false); }
 B32_THUNK(_FSWrite) { fileRead(c, true); }
@@ -336,7 +339,7 @@ GuestAddr toGuestHandle(Call &c, Handle host) {
 
 // ResFileRefNum FSOpenResFile(const FSRef *, SInt8 permission)
 B32_THUNK(_FSOpenResFile) {
-    const FSRef *ref = c.mem.ptr<FSRef>(c.args.ptr());
+    const FSRef *ref = fsRef(c, c.args.ptr());
     SInt8 permission = SInt8(c.args.u32());
     UInt8 path[1024];
     ResFileRefNum number = -1;
