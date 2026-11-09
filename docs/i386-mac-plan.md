@@ -701,6 +701,55 @@ Limits to carry forward:
 - `_signal` handlers still don't run, and the shell has no sandbox or
   entitlements, unlike the Catalyst shell.
 
+## Phase 4 progress (2026-11-09)
+
+Phase 4 is under way, against the real i386 apps available. This Mac has no
+document-based Cocoa app to test with.
+
+**Asphalt 6 (Gameloft, 2011) runs.** It is an AppKit, OpenGL and C++ game linked
+against the system `libstdc++`, wrapped with `tools/make-app.sh`. It plays sound
+and renders its menus and race screens with no GL errors, and a 110-second
+session ran without a crash while writing its save files. Frame rate during a
+race has not been measured. Input hasn't been checked by a script.
+
+It needed:
+
+- Desktop OpenGL through a table generated from the SDK's headers
+  (`tools/gen-gl-table.py`, about 1,100 functions), CGL, and a real
+  `CVDisplayLink` calling guest code.
+- GCC's copy-on-write `std::string` and the iostream classes the game uses
+  (`core/thunks/libstdcxx_string.cpp`, `libstdcxx_stream.cpp`), written against
+  the object layouts its inline code expects. No guest `libstdc++` exists here.
+- Shader source fixes for today's stricter GLSL compiler: names starting `GL_`
+  can't be defined, so they're renamed, and stray text after `#endif` is dropped.
+- A `-lockFocus` call before a guest view's first draw in a window. AppKit
+  stopped making it in 10.14, and OpenGL views of the era attach their context
+  there. Without it the context has no drawable and the screen stays black.
+- QTKit stubs: its intro movies don't play.
+
+The game contains a Mac App Store receipt check that calls `exit(173)`, and this
+copy has no `_MASReceipt`. It hasn't run in any session so far. Nothing here
+patches or fakes it: the libcrypto and keychain functions it uses have no thunks,
+and the game will stop if it reaches them. 32 of its imports remain unimplemented.
+Nearly all are that check's (libcrypto, the keychain, `ifstream`), and two are
+C++ exception entry points, so a thrown C++ exception is still fatal.
+
+**TowerFall (Mono, SDL2, OpenAL) is parked** at SDL's video setup, by request, to
+do Asphalt first. Mono 2.10 boots and runs managed code. That took real Mach
+ports for its exception thread, an i386-native `pthread_getspecific` (Mono reads
+its instructions to inline thread-local access), an 8 MB main thread stack, and
+a Unicorn patch (`external/unicorn-step-atomic.patch`) for locked instructions
+the host can't do atomically, which otherwise retried forever.
+
+Other limits:
+
+- Display capture and mode changes succeed and do nothing, deliberately.
+- HID reports no devices, so game controllers don't work yet.
+- `glMapBuffer` returns NULL, and the `GLsync` functions aren't in the table.
+
+Debugging options added: `B32_TRACE_SHADERS=1` logs shader sources and compile
+logs, and `B32_GL_SNAPSHOT=path.png` saves every 60th presented frame.
+
 ## Cross-cutting items already missing on the iOS side
 
 These block Mac apps sooner than iOS games, so they land in the plan:
