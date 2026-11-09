@@ -514,8 +514,8 @@ B32_THUNK(_localeconv) {
     c.ret(lconv);
 }
 
-// long long llroundl(long double): long double is double here.
-B32_THUNK(_llroundl) { c.ret64(uint64_t(std::llround(c.args.f64()))); }
+// long long llroundl(long double)
+B32_THUNK(_llroundl) { c.ret64(uint64_t(std::llround(c.args.longDouble()))); }
 
 // --- compiler helpers ----------------------------------------------------------------------------
 
@@ -540,13 +540,13 @@ B32_THUNK(___exp10) { c.retF64(std::pow(10.0, c.args.f64())); }
 B32_THUNK(___exp10f) { c.retF32(std::pow(10.0f, c.args.f32())); }
 // struct { float sin, cos; } __sincosf_stret(float): 8 bytes, returned through r0.
 B32_THUNK(___sincosf_stret) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     float x = c.args.f32();
     c.mem.write<float>(out, std::sin(x));
     c.mem.write<float>(out + 4, std::cos(x));
 }
 B32_THUNK(___sincos_stret) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     double x = c.args.f64();
     c.mem.write<double>(out, std::sin(x));
     c.mem.write<double>(out + 8, std::cos(x));
