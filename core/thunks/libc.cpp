@@ -842,7 +842,7 @@ B32_THUNK(___atomic_store) {
 // --- more math ------------------------------------------------------------------------------------
 
 B32_THUNK(___fpclassifyd) { c.ret(uint32_t(std::fpclassify(c.args.f64()))); }
-B32_THUNK(___fpclassify) { c.ret(uint32_t(std::fpclassify(c.args.f64()))); }  // long double is double
+B32_THUNK(___fpclassify) { c.ret(uint32_t(std::fpclassify(c.args.longDouble()))); }
 B32_THUNK(___fpclassifyf) { c.ret(uint32_t(std::fpclassify(c.args.f32()))); }
 B32_THUNK(_remainderf) {
     float x = c.args.f32();
@@ -857,6 +857,6 @@ B32_THUNK(_nextafter) {
     c.retF64(std::nextafter(x, c.args.f64()));
 }
 B32_THUNK(_fmodl) {
-    double x = c.args.f64();
-    c.retF64(std::fmod(x, c.args.f64()));
+    double x = c.args.longDouble();
+    c.retF64(std::fmod(x, c.args.longDouble()));
 }
