@@ -756,6 +756,22 @@ Other limits:
 Debugging options added: `B32_TRACE_SHADERS=1` logs shader sources and compile
 logs, and `B32_GL_SNAPSHOT=path.png` saves every 60th presented frame.
 
+## Carbon layer progress (2026-11-09)
+
+Halo (2006, Carbon and AGL) is the test case for a first Carbon layer, which the
+plan had left out of scope. `core/appkit/carbon_ui.mm` rebuilds windows, controls,
+menus and Carbon events on AppKit, reading Interface Builder's `objects.xib`.
+`agl.mm` puts AGL and CGL on NSOpenGL. `carbon_files.mm` has the classic File
+Manager (FSSpec, directory IDs, volume enumeration) and the Resource Manager, with
+resource forks carried beside a wrapped app in `Contents/B32Guest/Forks`.
+
+Halo runs through its startup and its OS, QuickTime, OpenGL, disk-space and sound
+checks, then stops at its own disc verification ("Halo game CD-ROM was not found",
+`CDROMNotVerified`), even with the install image mounted and visible through the
+real volume list. That check was left alone: nothing here patches it or fakes a
+disc. So windows, controls, AGL drawing and the game's rendering have not been
+exercised by the running game. 232 imports remain, and the Sound Manager is silent.
+
 ## Cross-cutting items already missing on the iOS side
 
 These block Mac apps sooner than iOS games, so they land in the plan:
