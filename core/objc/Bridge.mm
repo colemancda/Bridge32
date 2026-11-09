@@ -1083,11 +1083,11 @@ id Bridge::toHost(GuestAddr addr) {
         if (isa && isa->isGuest && !isa->isMeta && isa->host) return adoptGuestObject(addr, isa);
         if (mem.isMapped(addr))
             fatal("0x%08x is not a live object (from 0x%08x; isa %s; words %08x %08x %08x %08x)", addr,
-                  Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
+                  Runtime::currentCpu() ? Runtime::currentCpu()->returnAddress() : 0,
                   isa ? isa->name.c_str() : "unknown", mem.read<uint32_t>(addr), mem.read<uint32_t>(addr + 4),
                   mem.read<uint32_t>(addr + 8), mem.read<uint32_t>(addr + 12));
         fatal("0x%08x is not a live object (unmapped; thread %x, from 0x%08x; guest return addresses:%s)", addr,
-              pthread_mach_thread_np(pthread_self()), Runtime::currentCpu() ? Runtime::currentCpu()->reg(Cpu::LR) : 0,
+              pthread_mach_thread_np(pthread_self()), Runtime::currentCpu() ? Runtime::currentCpu()->returnAddress() : 0,
               guestFrames(mem).c_str());
     }
     uint32_t handle = it->second;
