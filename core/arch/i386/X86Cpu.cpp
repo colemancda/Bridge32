@@ -58,7 +58,12 @@ uint64_t X86Cpu::call(GuestAddr fn, const std::vector<uint32_t> &args) {
     mem().write<uint32_t>(sp, layout::kSentinel);
     setReg(ESP, sp);
     setReg(EIP, fn);
-    run();
+    try {
+        run();
+    } catch (...) {  // a throw on its way through host frames (legacy_thunks.mm)
+        restoreState(saved);
+        throw;
+    }
     uint64_t result = this->result();
     lastX87Result_ = x87HasResult() ? popX87() : 0;
     restoreState(saved);
@@ -223,17 +228,17 @@ void saveContext(Call &c, GuestAddr buf) {
     c.mem.write<uint32_t>(buf + 16, cpu.reg(X86Cpu::ESP) + 4);
     c.mem.write<uint32_t>(buf + 20, cpu.returnAddress());
 }
-void restoreContext(Call &c, GuestAddr buf, uint32_t value) {
-    X86Cpu &cpu = x86(c);
-    cpu.setReg(X86Cpu::EBX, c.mem.read<uint32_t>(buf));
-    cpu.setReg(X86Cpu::ESI, c.mem.read<uint32_t>(buf + 4));
-    cpu.setReg(X86Cpu::EDI, c.mem.read<uint32_t>(buf + 8));
-    cpu.setReg(X86Cpu::EBP, c.mem.read<uint32_t>(buf + 12));
-    cpu.setReg(X86Cpu::ESP, c.mem.read<uint32_t>(buf + 16));
-    cpu.setReg(X86Cpu::EAX, value ? value : 1);
-    cpu.jump(c.mem.read<uint32_t>(buf + 20));
-}
 }  // namespace
+
+void X86Cpu::longjmpTo(GuestAddr buf, uint32_t value) {
+    setReg(EBX, mem().read<uint32_t>(buf));
+    setReg(ESI, mem().read<uint32_t>(buf + 4));
+    setReg(EDI, mem().read<uint32_t>(buf + 8));
+    setReg(EBP, mem().read<uint32_t>(buf + 12));
+    setReg(ESP, mem().read<uint32_t>(buf + 16));
+    setReg(EAX, value ? value : 1);
+    jump(mem().read<uint32_t>(buf + 20));
+}
 
 B32_THUNK(_setjmp) {
     saveContext(c, c.args.ptr());
@@ -249,15 +254,15 @@ B32_THUNK(_sigsetjmp) {
 }
 B32_THUNK(_longjmp) {
     GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
+    x86(c).longjmpTo(buf, c.args.u32());
 }
 B32_THUNK(__longjmp) {
     GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
+    x86(c).longjmpTo(buf, c.args.u32());
 }
 B32_THUNK(_siglongjmp) {
     GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
+    x86(c).longjmpTo(buf, c.args.u32());
 }
 
 }  // namespace b32
