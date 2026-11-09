@@ -183,10 +183,42 @@ B32_THUNK(_time) {
 
 // The guest's struct statfs (64-bit inode variant) has the host's layout:
 // its 8-byte fields happen to sit at 8-byte-aligned offsets.
+#if defined(B32_GUEST_I386)
+B32_THUNK(_statfs$INODE64) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    c.ret(uint32_t(::statfs(path, c.mem.ptr<struct statfs>(c.args.ptr()))));
+}
+// i386 Mac's plain struct statfs, 272 bytes: otype 0, oflags 2, bsize 4,
+// iosize 8, blocks 12, bfree 16, bavail 20, files 24, ffree 28, fsid 32,
+// owner 40, reserved1 44, type 46, flags 48, reserved2 52, fstypename[15] 60,
+// mntonname[90] 75, mntfromname[90] 165.
+B32_THUNK(_statfs) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    struct statfs st;
+    int rc = ::statfs(path, &st);
+    if (rc == 0) {
+        std::memset(c.mem.ptr<uint8_t>(out), 0, 272);
+        c.mem.write<int32_t>(out + 4, int32_t(st.f_bsize));
+        c.mem.write<int32_t>(out + 8, int32_t(st.f_iosize));
+        const uint64_t counts[] = {st.f_blocks, st.f_bfree, st.f_bavail, st.f_files, st.f_ffree};
+        for (int i = 0; i < 5; i++) c.mem.write<int32_t>(out + 12 + i * 4, int32_t(std::min<uint64_t>(counts[i], INT32_MAX)));
+        c.mem.copyIn(out + 32, &st.f_fsid, 8);
+        c.mem.write<uint32_t>(out + 40, st.f_owner);
+        c.mem.write<int16_t>(out + 46, int16_t(st.f_type));
+        c.mem.write<int32_t>(out + 48, int32_t(st.f_flags));
+        strlcpy(c.mem.ptr<char>(out + 60), st.f_fstypename, 15);
+        strlcpy(c.mem.ptr<char>(out + 75), st.f_mntonname, 90);
+        strlcpy(c.mem.ptr<char>(out + 165), st.f_mntfromname, 90);
+    }
+    c.ret(uint32_t(rc));
+}
+#else
 B32_THUNK(_statfs) {
     const char *path = c.mem.cstr(c.args.ptr());
     c.ret(uint32_t(::statfs(path, c.mem.ptr<struct statfs>(c.args.ptr()))));
 }
+#endif
 
 // Used for "don't back up" flags; nothing to back up from here.
 B32_THUNK(_setxattr) { c.ret(0); }
