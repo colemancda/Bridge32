@@ -162,6 +162,18 @@ B32_THUNK(_sysctl) {
         c.ret(0);
         return;
     }
+#if defined(B32_GUEST_I386)
+    if (top == CTL_KERN && second == KERN_PROC && length > 2 && c.mem.read<int32_t>(mib + 8) == KERN_PROC_ALL) {
+        // The process list. A guest sees no other processes, just one blank
+        // entry for itself: real lists are never empty, and code that searches
+        // one subtracts from its length without checking.
+        constexpr uint32_t kKinfoProcSize = 492;
+        if (out) std::memset(c.mem.ptr<void>(out), 0, std::min(c.mem.read<uint32_t>(lenp), kKinfoProcSize));
+        if (lenp) c.mem.write<uint32_t>(lenp, kKinfoProcSize);
+        c.ret(0);
+        return;
+    }
+#endif
     if (top == CTL_KERN && second == KERN_PROC) {
         // kinfo_proc, asked for to see whether a debugger is attached: all zeros
         // (not traced) in whatever size the guest's struct is.
