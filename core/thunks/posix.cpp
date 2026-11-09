@@ -640,6 +640,22 @@ B32_THUNK(_sscanf) {
     c.ret(uint32_t(scanGuest(c, c.args, input, format)));
 }
 
+// int swscanf(const wchar_t *, const wchar_t *format, ...): numbers only, so
+// the narrow scanner reads them. %s and %c would store wide characters.
+B32_THUNK(_swscanf) {
+    auto narrow = [&](GuestAddr p) {
+        std::string out;
+        for (;; p += 4) {
+            uint32_t ch = c.mem.read<uint32_t>(p);
+            if (!ch) return out;
+            out.push_back(ch < 128 ? char(ch) : '?');
+        }
+    };
+    std::string input = narrow(c.args.ptr()), format = narrow(c.args.ptr());
+    if (format.find_first_of("sc[") != std::string::npos) fatal("swscanf with a wide-character conversion: %s", format.c_str());
+    c.ret(uint32_t(scanGuest(c, c.args, input.c_str(), format.c_str())));
+}
+
 // int vsscanf(const char *, const char *format, va_list)
 B32_THUNK(_vsscanf) {
     const char *input = c.mem.cstr(c.args.ptr());
