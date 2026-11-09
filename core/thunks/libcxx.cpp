@@ -1,13 +1,17 @@
 // The few out-of-line parts of LLVM's libc++ (iOS 6+) that apps call: most
 // of the library is templates compiled into the app. There's no guest build
 // of libc++ to load, so these work on guest memory directly, in the 32-bit
-// layouts the app's inline code also uses.
+// layouts the app's inline code also uses. (Compiled out for the PowerPC guest:
+// libc++ came with Mac OS X 10.7, which never ran on a PowerPC, and these copy
+// wide characters in the host's byte order.)
 //
 // std::wstring (12 bytes, libc++'s standard layout on armv7):
 //   long:  { capacity + 1 | 1, size, wchar_t *data }
 //   short: { (size << 1) in the first byte, wchar_t data[2] at offset 4 }
 // The low bit of the first byte tells them apart. Buffers come from operator
 // new, which is the guest heap.
+
+#if !defined(B32_GUEST_BIG_ENDIAN)
 
 #include "Thunks.h"
 #include "core/Log.h"
@@ -151,3 +155,5 @@ B32_DATA(__ZTISt9exception, 8) {
     rt.mem().write<uint32_t>(addr, rt.dataSymbol("__ZTVN10__cxxabiv117__class_type_infoE") + 8);
     rt.mem().write<uint32_t>(addr + 4, rt.internString("St9exception"));
 }
+
+#endif  // !B32_GUEST_BIG_ENDIAN
