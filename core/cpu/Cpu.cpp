@@ -99,6 +99,12 @@ void Cpu::leaveGuest() {
 }
 
 void Cpu::run() {
+    // A guest or host exception can leave through here (Bridge's throw paths).
+    struct Depth {
+        int &value;
+        explicit Depth(int &v) : value(v) { value++; }
+        ~Depth() { value--; }
+    } depth(runDepth_);
     while (!stopRequested_) {
         uint32_t index = runUntilSvc();
         if (index == kSentinelSvc) return;
