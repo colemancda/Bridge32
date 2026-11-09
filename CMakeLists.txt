@@ -36,16 +36,24 @@ else()
         set(B32_HAVE_ENGINE ON)
         # Unicorn never sets CF_PARALLEL, so lock-prefixed instructions would
         # compile to plain loads and stores; guest threads share memory here,
-        # so the patch makes them real atomics (external/unicorn-parallel.patch).
-        execute_process(COMMAND grep -q B32_CF_PARALLEL "${B32_UNICORN_DIR}/qemu/include/exec/exec-all.h"
-            RESULT_VARIABLE B32_UNICORN_UNPATCHED)
-        if(B32_UNICORN_UNPATCHED)
-            execute_process(COMMAND git -C "${B32_UNICORN_DIR}" apply "${CMAKE_SOURCE_DIR}/external/unicorn-parallel.patch"
-                RESULT_VARIABLE B32_PATCH_FAILED)
-            if(B32_PATCH_FAILED)
-                message(FATAL_ERROR "Could not apply external/unicorn-parallel.patch to ${B32_UNICORN_DIR}")
+        # so the first patch makes them real atomics. The second runs the ones
+        # the host can't do atomically, rather than retrying them forever.
+        foreach(patch unicorn-parallel:B32_CF_PARALLEL:qemu/include/exec/exec-all.h
+                      unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c)
+            string(REPLACE ":" ";" B32_PATCH_FIELDS "${patch}")
+            list(GET B32_PATCH_FIELDS 0 B32_PATCH_NAME)
+            list(GET B32_PATCH_FIELDS 1 B32_PATCH_MARKER)
+            list(GET B32_PATCH_FIELDS 2 B32_PATCH_FILE)
+            execute_process(COMMAND grep -q "${B32_PATCH_MARKER}" "${B32_UNICORN_DIR}/${B32_PATCH_FILE}"
+                RESULT_VARIABLE B32_UNICORN_UNPATCHED)
+            if(B32_UNICORN_UNPATCHED)
+                execute_process(COMMAND git -C "${B32_UNICORN_DIR}" apply "${CMAKE_SOURCE_DIR}/external/${B32_PATCH_NAME}.patch"
+                    RESULT_VARIABLE B32_PATCH_FAILED)
+                if(B32_PATCH_FAILED)
+                    message(FATAL_ERROR "Could not apply external/${B32_PATCH_NAME}.patch to ${B32_UNICORN_DIR}")
+                endif()
             endif()
-        endif()
+        endforeach()
         set(UNICORN_ARCH "x86" CACHE STRING "" FORCE)
         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
         set(UNICORN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -89,7 +97,7 @@ if(B32_GUEST_ARCH STREQUAL "arm")
     target_sources(b32core PRIVATE core/arch/arm/ArmCpu.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_ARM=1)
 else()
-    target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm)
+    target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1)
 endif()
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
@@ -97,7 +105,7 @@ target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # The bridge manages host object lifetimes by hand.
 target_compile_options(b32core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fno-objc-arc>)
 target_link_libraries(b32core PUBLIC "-framework Foundation" "-framework CoreGraphics" "-framework CFNetwork" "-framework Accelerate" "-framework CoreText"
-    "-framework SystemConfiguration" "-framework Security" sqlite3 z ffi)
+    "-framework SystemConfiguration" "-framework Security" sqlite3 z ffi iconv)
 
 if(B32_HAVE_ENGINE)
     if(B32_GUEST_ARCH STREQUAL "arm")
@@ -147,9 +155,11 @@ if(B32_MAC)
     if(NOT B32_GUEST_ARCH STREQUAL "i386" OR NOT B32_HAVE_ENGINE)
         message(FATAL_ERROR "The AppKit shell is the i386 guest's and needs Unicorn in external/unicorn")
     endif()
-    target_sources(b32core PRIVATE core/objc/foundation.mm core/appkit/appkit.mm core/appkit/compat.mm)
+    target_sources(b32core PRIVATE core/objc/foundation.mm core/appkit/appkit.mm core/appkit/compat.mm
+        core/appkit/macsys.mm core/gl/opengl.mm core/audio/audiounit.mm core/audio/audioqueue.mm)
     target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
-        "-framework QuartzCore" "-framework CoreData")
+        "-framework QuartzCore" "-framework CoreData" "-framework OpenGL" "-framework ImageIO"
+        "-framework AudioToolbox" "-framework AudioUnit" "-framework ApplicationServices" "-framework CoreVideo")
 
     add_executable(Bridge32 MACOSX_BUNDLE app/mac/main.mm)
     target_link_libraries(Bridge32 PRIVATE b32core)
