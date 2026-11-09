@@ -1058,7 +1058,8 @@ id Bridge::cfstringToHost(GuestAddr addr) {
     uint32_t length = mem.read<uint32_t>(addr + 12);
     NSString *s;
     if (flags == 0x7d0) {  // UTF-16 contents
-        s = [[NSString alloc] initWithCharacters:mem.ptr<unichar>(bytes) length:length];
+        std::vector<unichar> characters = mem.readArray<unichar>(bytes, length);
+        s = [[NSString alloc] initWithCharacters:characters.data() length:length];
     } else {
         s = [[NSString alloc] initWithBytes:mem.ptr<char>(bytes) length:length encoding:NSUTF8StringEncoding];
         if (!s) s = [[NSString alloc] initWithBytes:mem.ptr<char>(bytes) length:length encoding:NSMacOSRomanStringEncoding];
