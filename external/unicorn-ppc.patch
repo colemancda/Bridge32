@@ -1,0 +1,221 @@
+Support for the PowerPC guest (B32_PPC). Four things Bridge32 needs from the
+ppc target that Unicorn 2.1.4 lacks:
+
+- tb_page_has_code (unicorn-fast-writes.patch) gets a per-target name, since
+  a ppc build links the ppc and ppc64 targets into one archive.
+- mftb and mfspr 268/269 read the host's monotonic clock at 25 MHz. Unicorn
+  compiles them as plain SPR reads that stay 0, because it has no virtual
+  clock and never sets up the time base.
+- The AltiVec registers VR0-VR31, VSCR and VRSAVE are readable and writable
+  (VRn as 16 bytes, most significant first, as stvx stores them).
+- XER reads and writes include SO, OV and CA, which QEMU keeps in fields of
+  their own, so a saved and restored context keeps its carry.
+
+Applied by CMakeLists.txt at configure time.
+diff --git a/include/unicorn/ppc.h b/include/unicorn/ppc.h
+index f421e5e6..4a7db793 100644
+--- a/include/unicorn/ppc.h
++++ b/include/unicorn/ppc.h
+@@ -424,6 +424,43 @@ typedef enum uc_ppc_reg {
+     UC_PPC_REG_FPSCR,
+     UC_PPC_REG_CR,
+ 
++    // AltiVec (B32_PPC): VRn is 16 bytes in the order stvx stores them,
++    // most significant first.
++    UC_PPC_REG_VR0,
++    UC_PPC_REG_VR1,
++    UC_PPC_REG_VR2,
++    UC_PPC_REG_VR3,
++    UC_PPC_REG_VR4,
++    UC_PPC_REG_VR5,
++    UC_PPC_REG_VR6,
++    UC_PPC_REG_VR7,
++    UC_PPC_REG_VR8,
++    UC_PPC_REG_VR9,
++    UC_PPC_REG_VR10,
++    UC_PPC_REG_VR11,
++    UC_PPC_REG_VR12,
++    UC_PPC_REG_VR13,
++    UC_PPC_REG_VR14,
++    UC_PPC_REG_VR15,
++    UC_PPC_REG_VR16,
++    UC_PPC_REG_VR17,
++    UC_PPC_REG_VR18,
++    UC_PPC_REG_VR19,
++    UC_PPC_REG_VR20,
++    UC_PPC_REG_VR21,
++    UC_PPC_REG_VR22,
++    UC_PPC_REG_VR23,
++    UC_PPC_REG_VR24,
++    UC_PPC_REG_VR25,
++    UC_PPC_REG_VR26,
++    UC_PPC_REG_VR27,
++    UC_PPC_REG_VR28,
++    UC_PPC_REG_VR29,
++    UC_PPC_REG_VR30,
++    UC_PPC_REG_VR31,
++    UC_PPC_REG_VSCR,
++    UC_PPC_REG_VRSAVE,
++
+     UC_PPC_REG_ENDING, // <-- mark the end of the list or registers
+ } uc_ppc_reg;
+ 
+diff --git a/qemu/ppc.h b/qemu/ppc.h
+index 9648fd2f..a69e31f3 100644
+--- a/qemu/ppc.h
++++ b/qemu/ppc.h
+@@ -1993,4 +1993,5 @@
+ #define helper_xssqrtqp helper_xssqrtqp_ppc
+ #define helper_xssubqp helper_xssubqp_ppc
+ #define do_store_fpscr do_store_fpscr_ppc
++#define tb_page_has_code tb_page_has_code_ppc
+ #endif
+diff --git a/qemu/ppc64.h b/qemu/ppc64.h
+index 2d995d5e..c13582d3 100644
+--- a/qemu/ppc64.h
++++ b/qemu/ppc64.h
+@@ -1993,4 +1993,5 @@
+ #define helper_xssqrtqp helper_xssqrtqp_ppc64
+ #define helper_xssubqp helper_xssubqp_ppc64
+ #define do_store_fpscr do_store_fpscr_ppc64
++#define tb_page_has_code tb_page_has_code_ppc64
+ #endif
+diff --git a/qemu/target/ppc/timebase_helper.c b/qemu/target/ppc/timebase_helper.c
+index 8dc0a419..1b43c854 100644
+--- a/qemu/target/ppc/timebase_helper.c
++++ b/qemu/target/ppc/timebase_helper.c
+@@ -21,17 +21,26 @@
+ #include "exec/helper-proto.h"
+ #include "exec/exec-all.h"
+ 
++/* B32_PPC: Unicorn has no virtual clock and never sets up tb_env, so the time
++ * base counts the host's monotonic clock at 25 MHz, a G4 Mac's rate. */
++static uint64_t b32_timebase(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ((uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec) / 40;
++}
++
+ /*****************************************************************************/
+ /* SPR accesses */
+ 
+ target_ulong helper_load_tbl(CPUPPCState *env)
+ {
+-    return (target_ulong)cpu_ppc_load_tbl(env);
++    return (target_ulong)b32_timebase();
+ }
+ 
+ target_ulong helper_load_tbu(CPUPPCState *env)
+ {
+-    return cpu_ppc_load_tbu(env);
++    return (target_ulong)(b32_timebase() >> 32);
+ }
+ 
+ target_ulong helper_load_atbl(CPUPPCState *env)
+diff --git a/qemu/target/ppc/translate_init.inc.c b/qemu/target/ppc/translate_init.inc.c
+index d2fb1974..8e002515 100644
+--- a/qemu/target/ppc/translate_init.inc.c
++++ b/qemu/target/ppc/translate_init.inc.c
+@@ -205,7 +205,7 @@ static void spr_write_decr(DisasContext *ctx, int sprn, int gprn)
+ 
+ /* SPR common to all non-embedded PowerPC, except 601 */
+ /* Time base */
+-#if 0
++#if 1  /* B32_PPC: the time base follows the host clock */
+ static void spr_read_tbl(DisasContext *ctx, int gprn, int sprn)
+ {
+     TCGContext *tcg_ctx = ctx->uc->tcg_ctx;
+@@ -222,7 +222,7 @@ static void spr_read_tbl(DisasContext *ctx, int gprn, int sprn)
+ #define spr_read_tbl spr_read_generic
+ #endif
+ 
+-#if 0
++#if 1  /* B32_PPC */
+ static void spr_read_tbu(DisasContext *ctx, int gprn, int sprn)
+ {
+     TCGContext *tcg_ctx = ctx->uc->tcg_ctx;
+diff --git a/qemu/target/ppc/unicorn.c b/qemu/target/ppc/unicorn.c
+index 2d615006..db1bb1ac 100644
+--- a/qemu/target/ppc/unicorn.c
++++ b/qemu/target/ppc/unicorn.c
+@@ -10,6 +10,11 @@
+ #include "uc_priv.h"
+ #include "unicorn.h"
+ #include "helper_regs.h"
++#include "qemu/bswap.h"
++
++/* B32_PPC: defined in int_helper.c, which this file doesn't include */
++uint32_t helper_mfvscr(CPUPPCState *env);
++void helper_mtvscr(CPUPPCState *env, uint32_t vscr);
+ #include "cpu.h"
+ 
+ #ifdef TARGET_PPC64
+@@ -162,6 +167,11 @@ uc_err reg_read(void *_env, int mode, unsigned int regid, void *value,
+     } else if (regid >= UC_PPC_REG_CR0 && regid <= UC_PPC_REG_CR7) {
+         CHECK_REG_TYPE(uint32_t);
+         *(uint32_t *)value = env->crf[regid - UC_PPC_REG_CR0];
++    } else if (regid >= UC_PPC_REG_VR0 && regid <= UC_PPC_REG_VR31) {
++        ppc_avr_t *avr = cpu_avr_ptr(env, regid - UC_PPC_REG_VR0);
++        CHECK_REG_TYPE(ppc_avr_t);
++        stq_be_p((uint8_t *)value, avr->VsrD(0));
++        stq_be_p((uint8_t *)value + 8, avr->VsrD(1));
+     } else {
+         switch (regid) {
+         default:
+@@ -195,12 +205,20 @@ uc_err reg_read(void *_env, int mode, unsigned int regid, void *value,
+             break;
+         case UC_PPC_REG_XER:
+             CHECK_REG_TYPE(uint32_t);
+-            *(uint32_t *)value = env->xer;
++            *(uint32_t *)value = (uint32_t)cpu_read_xer(env);
+             break;
+         case UC_PPC_REG_FPSCR:
+             CHECK_REG_TYPE(uint32_t);
+             *(uint32_t *)value = env->fpscr;
+             break;
++        case UC_PPC_REG_VSCR:
++            CHECK_REG_TYPE(uint32_t);
++            *(uint32_t *)value = helper_mfvscr(env);
++            break;
++        case UC_PPC_REG_VRSAVE:
++            CHECK_REG_TYPE(uint32_t);
++            *(uint32_t *)value = (uint32_t)env->spr[SPR_VRSAVE];
++            break;
+         }
+     }
+ 
+@@ -224,6 +242,11 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
+     } else if (regid >= UC_PPC_REG_CR0 && regid <= UC_PPC_REG_CR7) {
+         CHECK_REG_TYPE(uint32_t);
+         env->crf[regid - UC_PPC_REG_CR0] = (*(uint32_t *)value) & 0b1111;
++    } else if (regid >= UC_PPC_REG_VR0 && regid <= UC_PPC_REG_VR31) {
++        ppc_avr_t *avr = cpu_avr_ptr(env, regid - UC_PPC_REG_VR0);
++        CHECK_REG_TYPE(ppc_avr_t);
++        avr->VsrD(0) = ldq_be_p((const uint8_t *)value);
++        avr->VsrD(1) = ldq_be_p((const uint8_t *)value + 8);
+     } else {
+         switch (regid) {
+         default:
+@@ -257,12 +280,20 @@ uc_err reg_write(void *_env, int mode, unsigned int regid, const void *value,
+             break;
+         case UC_PPC_REG_XER:
+             CHECK_REG_TYPE(uint32_t);
+-            env->xer = *(uint32_t *)value;
++            cpu_write_xer(env, *(uint32_t *)value);
+             break;
+         case UC_PPC_REG_FPSCR:
+             CHECK_REG_TYPE(uint32_t);
+             do_store_fpscr(env, *(uint32_t *)value, 0xffffffff);
+             break;
++        case UC_PPC_REG_VSCR:
++            CHECK_REG_TYPE(uint32_t);
++            helper_mtvscr(env, *(uint32_t *)value);
++            break;
++        case UC_PPC_REG_VRSAVE:
++            CHECK_REG_TYPE(uint32_t);
++            env->spr[SPR_VRSAVE] = *(uint32_t *)value;
++            break;
+         }
+     }
+ 
