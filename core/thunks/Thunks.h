@@ -17,10 +17,13 @@ namespace b32 {
 
 class Runtime;
 
-// Arguments of a thunked call, as a stream of 32-bit words: both guests pass
+// Arguments of a thunked call, as a stream of 32-bit words: every guest passes
 // every argument in 4-byte words (iOS's APCS variant in r0-r3 then the
-// stack, i386's cdecl on the stack), and 64-bit values take the next two
-// words with no alignment.
+// stack, i386's cdecl on the stack, PowerPC's r3-r10 then the stack), and
+// 64-bit values take the next two words with no alignment. PowerPC's floats
+// and doubles also use up their words but come in f1-f13 when the function's
+// prototype is fixed; a variadic call shadows them in the words (see
+// beginVarArgs).
 class Args {
 public:
     Args(Cpu &cpu) : cpu_(cpu) {}
@@ -45,11 +48,33 @@ public:
     int32_t i32() { return int32_t(u32()); }
     GuestAddr ptr() { return u32(); }
     uint64_t u64() {
-        uint64_t lo = u32();
-        return lo | (uint64_t(u32()) << 32);
+        uint64_t first = u32();
+        uint64_t second = u32();
+        return arch::kHighWordFirst ? first << 32 | second : first | second << 32;
     }
-    float f32() { uint32_t b = u32(); float f; std::memcpy(&f, &b, 4); return f; }
-    double f64() { uint64_t b = u64(); double d; std::memcpy(&d, &b, 8); return d; }
+    float f32() {
+        if (inFloatRegister()) {
+            next_++;
+            return float(cpu_.floatArg(floatRegisters_++));
+        }
+        uint32_t b = u32();
+        float f;
+        std::memcpy(&f, &b, 4);
+        return f;
+    }
+    double f64() {
+        if (inFloatRegister()) {
+            next_ += 2;
+            return cpu_.floatArg(floatRegisters_++);
+        }
+        uint64_t b = u64();
+        double d;
+        std::memcpy(&d, &b, 8);
+        return d;
+    }
+    // The rest of the arguments are variadic: a caller shadows a float or
+    // double in the words that follow, and that is where the callee reads it.
+    void beginVarArgs() { variadic_ = true; }
     double longDouble() {
         uint32_t words[arch::kLongDoubleWords];
         for (uint32_t &w : words) w = u32();
@@ -60,8 +85,17 @@ public:
     int position() const { return next_; }
 
 private:
+    // Whether the next float or double is in a floating-point register: the
+    // ABI has them, the call isn't variadic, and there's one left.
+    bool inFloatRegister() const {
+        constexpr int kFloatRegisters = 13;
+        return !vaList_ && !variadic_ && floatRegisters_ < kFloatRegisters && cpu_.floatArgsInRegisters();
+    }
+
     Cpu &cpu_;
     int next_ = 0;
+    int floatRegisters_ = 0;
+    bool variadic_ = false;
     GuestAddr vaList_ = 0;
 };
 
