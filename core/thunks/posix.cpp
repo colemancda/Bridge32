@@ -974,7 +974,8 @@ B32_THUNK(_geteuid) { c.ret(::geteuid()); }
 // struct passwd *getpwuid(uid_t): the guest's is ten words { pw_name, pw_passwd,
 // pw_uid, pw_gid, pw_change, pw_class, pw_gecos, pw_dir, pw_shell, pw_expire },
 // built once from the host's entry, with the app's own home directory.
-B32_THUNK(_getpwuid) {
+namespace {
+GuestAddr currentUserEntry(Call &c) {
     static GuestAddr entry = 0;
     if (!entry) {
         const struct passwd *pw = ::getpwuid(::getuid());
@@ -985,8 +986,27 @@ B32_THUNK(_getpwuid) {
                               c.rt.internString(getenv("HOME") ? getenv("HOME") : "/"), c.rt.internString("/bin/sh"), 0};
         c.mem.copyIn(entry, words, sizeof words);
     }
+    return entry;
+}
+}  // namespace
+
+B32_THUNK(_getpwuid) {
     c.args.u32();
-    c.ret(entry);
+    c.ret(currentUserEntry(c));
+}
+// Only the current user exists as far as the guest can tell.
+B32_THUNK(_getpwnam) {
+    const char *name = c.mem.cstr(c.args.ptr());
+    const struct passwd *pw = ::getpwuid(::getuid());
+    c.ret(pw && std::strcmp(name, pw->pw_name) == 0 ? currentUserEntry(c) : 0);
+}
+// A guest is the user it runs as; dropping privileges has nothing to do.
+B32_THUNK(_setuid) { c.ret(0); }
+B32_THUNK(_setgid) { c.ret(0); }
+B32_THUNK(_mktemp) {
+    GuestAddr path = c.args.ptr();
+    ::mktemp(c.mem.ptr<char>(path));
+    c.ret(path);
 }
 
 // A guest can't start other programs.
