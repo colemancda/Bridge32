@@ -254,9 +254,10 @@ both. A wrapped app has one architecture, and this keeps the hot paths
   EIP, add 4 to ESP, plus 4 more when the thunk declared a hidden struct
   result. One stub shape covers both `ret` and `ret $4`. The thunk index is
   recovered from the stub address, not an immediate.
-- `Call` gains `retStruct(const void *, size)` applying the i386 rules:
-  1/2/4/8 bytes to EAX:EDX, one float to ST(0), otherwise copied to the
-  hidden pointer at argument word 0 with the callee pop flagged.
+- Thunks return structs through `StructResult(c, size)`, applying the i386
+  rules: 1/2/4/8 bytes to EAX:EDX, otherwise copied to the hidden pointer at
+  argument word 0 and popped. The ObjC return paths add the lone `float` or
+  `double` case, which goes to ST(0); no libSystem thunk returns one.
 
 ### Memory
 
@@ -560,14 +561,48 @@ Findings that changed the code or the plan:
   ld64 build (cctools-port, or `ld-classic` from Xcode 15/16) is needed
   before Phase 2.
 
-Left for Phase 1 from its list: `__IMPORT,__jump_table` patching and the
-scattered relocations of 10.4-era binaries, fault delivery to guest signal
-handlers (`X86Cpu::deliverFault` is fatal), wiring `X86Cpu::retStruct` into
-the struct-returning thunks and `floatingResult()` into the host-to-guest
-trampolines (both compile but the ObjC paths still assume ARM's
-integer-register float returns), and the 32-bit-inode `stat` layout for
-imports without `$INODE64` (today they alias to the 64-bit-inode thunks,
-which is wrong for pre-10.6 binaries).
+## Phase 1 results (2026-11-09)
+
+Phase 1's exit test holds: `hello`, `cxx` (no throw) and `rbtree` pass under
+`ctest` built for i386, along with `threads` and three new guests. All eight
+`ctest` entries pass in the `-DB32_GUEST_ARCH=i386` build.
+
+| Guest | What it proves |
+| --- | --- |
+| `abi` | `long double` arguments (16 bytes of argument words, 4-aligned) through varargs and `strtold`; structs in EAX:EDX and through a callee-popped hidden pointer, with the stack pointer checked around the call; both `stat`, `dirent` and `statfs` layouts agreeing on the same files; `setjmp`; a SIGSEGV handler seeing the exact faulting EIP and address, and resuming from registers it rewrote in the `ucontext` |
+| `objcabi` | `objc_msgSend_fpret` and `_stret` against host classes, in C so no ObjC metadata is involved; nil receivers leaving 0.0 on the x87 stack and popping the hidden pointer; guest methods called from the host (through key-value coding) returning `double`, `float` and a struct |
+| `classic` | An `LC_UNIXTHREAD` executable entered at a crt1-style `start`, imports through a self-modifying `__IMPORT,__jump_table`, `__dyld_func_lookup` through `__DATA,__dyld`, and a dylib slid by plain, scattered and `R_ABS` local relocations |
+
+`tools/i386-link.py` gained `--classic --entry` and `--dylib`, since no current
+tool writes those formats. Real i386 images also load: TowerFall's executable
+is reported by `b32-inspect` with only Mono's two imports unresolved, and two
+Solarus dylibs (`LC_DYLD_INFO`) slide and bind through `dlopen`.
+
+What landed:
+
+- A hidden-pointer struct result is `StructResult` in a thunk, and
+  `Bridge::returnToGuest` / `resultFromGuest` in the message and block paths.
+  Both follow `arch::structReturnedInMemory` and `guestReturnClass`, so a
+  result can go to memory, EAX:EDX or ST(0) (a lone `float` or `double` in a
+  struct included) without the callers knowing the ABI.
+- Variant symbols try the exact name, then the name with only `$INODE64` kept,
+  then the base name, so `_opendir$INODE64$UNIX2003` works and layouts that
+  differ get their own thunks.
+
+Limits to carry forward:
+
+- The floating-point part of the `ucontext` holds only default control words.
+  A handler runs with the faulting code's FP state, which is restored when it
+  returns, so it can't change FP registers through the context.
+- `_signal` still records nothing; only `sigaction` handlers run.
+- `objc_allocateClassPair` has no thunk, so guests can't create classes at run
+  time yet. That belongs with the legacy runtime in Phase 2.
+- `tools/i386-link.py` links C and exception-free C++ from one object. The
+  ObjC tests of Phase 2 still need a real ld64.
+- The armv7 guest tests were not rerun, because the iOS SDK they build against
+  is on an unmounted volume. ARM host tools build, and the Catalyst-only files
+  type-check. On ARM the struct, float and stat paths go through the same
+  rules as before by construction, but that is not a test result.
 
 ## Cross-cutting items already missing on the iOS side
 
