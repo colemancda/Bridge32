@@ -6,6 +6,7 @@
 #include "core/arch/Arch.h"
 
 #include <cstdio>
+#include <string>
 
 int main(int argc, char **argv) {
     if (argc != 2) {
@@ -13,6 +14,15 @@ int main(int argc, char **argv) {
         return 2;
     }
     b32::Runtime rt([](b32::GuestMemory &, b32::Cpu::SvcHandler) { return std::unique_ptr<b32::Cpu>(); });
+    if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
+    std::string path = argv[1];
+    if (path.size() > 6 && path.compare(path.size() - 6, 6, ".dylib") == 0) {
+        rt.inspectLibrary(path);
+        auto missing = rt.thunks().missing();
+        std::printf("unimplemented imports: %zu\n", missing.size());
+        for (const auto &m : missing) std::printf("  %s\n", m.c_str());
+        return 0;
+    }
     rt.load(argv[1]);
     const b32::Image &image = rt.image();
 
