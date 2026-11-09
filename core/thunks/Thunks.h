@@ -3,6 +3,7 @@
 // and the trap lands here.
 #pragma once
 
+#include "core/arch/Arch.h"
 #include "core/cpu/Cpu.h"
 #include "core/mem/GuestHeap.h"
 
@@ -49,6 +50,11 @@ public:
     }
     float f32() { uint32_t b = u32(); float f; std::memcpy(&f, &b, 4); return f; }
     double f64() { uint64_t b = u64(); double d; std::memcpy(&d, &b, 8); return d; }
+    double longDouble() {
+        uint32_t words[arch::kLongDoubleWords];
+        for (uint32_t &w : words) w = u32();
+        return arch::longDouble(words);
+    }
 
     // Index of the next word; varargs start where the fixed arguments end.
     int position() const { return next_; }
@@ -73,6 +79,25 @@ struct Call {
     void retF64(double d) { cpu.setDoubleResult(d); }
 };
 
+// The result of a thunk standing in for a function that returns a struct of
+// `size` bytes: a guest address to write it to. Declare it before reading any
+// other argument, since a hidden result pointer comes first where the ABI
+// uses one; when the object goes out of scope the struct is returned the way
+// the ABI says, which pops that pointer or loads the result registers.
+class StructResult {
+public:
+    StructResult(Call &c, uint32_t size);
+    ~StructResult();
+    StructResult(const StructResult &) = delete;
+    StructResult &operator=(const StructResult &) = delete;
+    operator GuestAddr() const { return addr_; }
+
+private:
+    Call &c_;
+    bool inMemory_;
+    GuestAddr addr_;
+};
+
 using ThunkFn = void (*)(Call &);
 
 // Static registry filled by B32_THUNK definitions across the thunk files.
@@ -85,10 +110,12 @@ struct ThunkRegistry {
 };
 
 // i386 Mac binaries import libSystem's variant symbols: _fputs$UNIX2003,
-// _stat$INODE64, _open$NOCANCEL, _realpath$DARWIN_EXTSN, _nanosleep$1050...
-// Unless a thunk exists under the variant's own name, it is served by the
-// base name's: the iOS thunks already implement the UNIX2003 semantics and
-// the 64-bit-inode stat layout. Returns `symbol` itself when it has no suffix.
+// _stat$INODE64, _open$NOCANCEL, _opendir$INODE64$UNIX2003, _nanosleep$1050...
+// A symbol is served by a thunk under its own name, then under its name with
+// only $INODE64 kept (where the guest struct's layout differs: see posix.cpp),
+// then by the base name's, since the iOS thunks already implement the UNIX2003
+// semantics. baseSymbol strips every variant suffix; it returns `symbol` itself
+// when there are none.
 std::string baseSymbol(const std::string &symbol);
 
 // Defines the host side of a guest import. `symbol` is the Mach-O symbol name
