@@ -157,6 +157,9 @@ public:
     GuestAddr allocateClassPair(ClassInfo *super, const std::string &name);
     bool addIvar(ClassInfo *cls, const std::string &name, uint32_t size, uint32_t log2Align, const std::string &types);
     ClassInfo *classOf(GuestAddr object);  // via the object's isa
+    // Whether the host has moved an instance of guest class `cls` off its
+    // shadow class (KVO's NSKVONotifying_ subclass, object_setClass).
+    bool hostClassChanged(GuestAddr object, ClassInfo *cls);
     ClassInfo *stubFor(Class hostClass);
 
     // The objc_msgSend family. `stret` variants take the result pointer in r0;
