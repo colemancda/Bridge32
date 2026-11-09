@@ -1,0 +1,19 @@
+Unicorn is a single-CPU engine, so QEMU's curr_cflags() never includes
+CF_PARALLEL and lock-prefixed x86 instructions compile to plain loads and
+stores (tcg-op.c's do_nonatomic_op). Bridge32 runs one engine per guest
+thread over shared memory, so they must be real atomics: with CF_PARALLEL
+the host-atomic helpers in atomic_template.h are used instead, and memory
+barriers are emitted. Applied by CMakeLists.txt at configure time.
+
+--- a/qemu/include/exec/exec-all.h
++++ b/qemu/include/exec/exec-all.h
+@@ -377,7 +377,8 @@ static inline uint32_t tb_cflags(const TranslationBlock *tb)
+ /* current cflags for hashing/comparison */
+ static inline uint32_t curr_cflags(void)
+ {
+-    return 0;
++    /* B32_CF_PARALLEL: guest threads share memory, so atomics must be real. */
++    return CF_PARALLEL;
+ }
+ 
+ /* TranslationBlock invalidate API */
