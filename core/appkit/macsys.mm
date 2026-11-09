@@ -88,6 +88,7 @@ B32_THUNK(_CGDisplayMoveCursorToPoint) {
 
 // The screen stays the user's.
 #define B32_SUCCEEDS(symbol) B32_THUNK(symbol) { c.ret(0); }
+B32_THUNK(_CGDisplayIsCaptured) { c.ret(0); }
 B32_SUCCEEDS(_CGCaptureAllDisplays)
 B32_SUCCEEDS(_CGReleaseAllDisplays)
 B32_SUCCEEDS(_CGDisplayCapture)
