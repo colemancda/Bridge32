@@ -6,7 +6,9 @@
 
 #include <map>
 #include <mutex>
+#include <set>
 #include <unordered_map>
+#include <utility>
 
 namespace b32 {
 
@@ -31,6 +33,7 @@ private:
     GuestAddr top_;       // first never-allocated address
     GuestAddr committed_; // memory below this is mapped
     std::map<GuestAddr, uint32_t> free_;          // start -> size, coalesced
+    std::set<std::pair<uint32_t, GuestAddr>> freeBySize_;  // the same blocks, smallest first
     std::unordered_map<GuestAddr, uint32_t> live_;  // start -> size
 
     // B32_HEAP_REDZONE=1: 16 bytes of 0xfd after each block (past its 16-byte
