@@ -99,11 +99,22 @@ void cThunk(Call &c) {
     uint32_t firstArg = c.cpu.arg(0);
     for (size_t k = 0; k < p.args.size(); k++) {
         Value &v = values[k];
+        // Floating-point arguments go through Args, which knows where the
+        // guest's ABI puts them (PowerPC's are in registers of their own).
+        if (p.args[k] == 'f') {
+            v.f = c.args.f32();
+            slots[k] = &v;
+            continue;
+        }
+        if (p.args[k] == 'd') {
+            v.d = c.args.f64();
+            slots[k] = &v;
+            continue;
+        }
         uint32_t word = c.args.u32();
         switch (p.args[k]) {
         case 'i': v.i = int32_t(word); break;
         case 'u': v.u = word; break;
-        case 'f': std::memcpy(&v.f, &word, 4); break;
         case 'z': v.z = int32_t(word); break;
         case 'p': v.ptr = word ? c.mem.ptr<void>(word) : nullptr; break;
         case 'a': case 'e': v.ptr = pointerOrOffset(c, word, p.args[k]); break;
@@ -121,11 +132,6 @@ void cThunk(Call &c) {
             }
             break;
         case 'o': v.ptr = (void *)c.rt.bridge().toHost(word); break;
-        case 'd': {
-            uint64_t bits = word | (uint64_t(c.args.u32()) << 32);
-            std::memcpy(&v.d, &bits, 8);
-            break;
-        }
         case 'S': {
             uint32_t count = k ? values[k - 1].u : 0;
             strings.resize(count);
@@ -169,12 +175,12 @@ void cThunk(Call &c) {
     switch (p.ret) {
     case 'v': break;
     case 'i': case 'u': c.ret(*reinterpret_cast<uint32_t *>(result)); break;
-    case 'f': c.ret(*reinterpret_cast<uint32_t *>(result)); break;
+    case 'f': c.retF32(*reinterpret_cast<float *>(result)); break;
     case 'B': c.ret(result[0]); break;
     case 'h': c.ret(hostHandle(*reinterpret_cast<void **>(result))); break;
     case 'o': c.ret(c.rt.bridge().toGuest(*reinterpret_cast<id *>(result))); break;
     case 'z': c.ret(uint32_t(*reinterpret_cast<int64_t *>(result))); break;
-    case 'd': c.ret64(*reinterpret_cast<uint64_t *>(result)); break;
+    case 'd': c.retF64(*reinterpret_cast<double *>(result)); break;
     case 's': {
         static std::unordered_map<std::string, GuestAddr> strings;
         const char *s = *reinterpret_cast<const char **>(result);
