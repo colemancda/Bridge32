@@ -167,7 +167,8 @@ B32_THUNK(_getmntinfo) {
         c.mem.write<int32_t>(e + 8, int32_t(m.f_iosize));
         const uint64_t counts[] = {m.f_blocks, m.f_bfree, m.f_bavail, m.f_files, m.f_ffree};
         for (int k = 0; k < 5; k++) c.mem.write<int32_t>(e + 12 + uint32_t(k) * 4, int32_t(std::min<uint64_t>(counts[k], INT32_MAX)));
-        c.mem.copyIn(e + 32, &m.f_fsid, 8);
+        c.mem.write<int32_t>(e + 32, m.f_fsid.val[0]);
+        c.mem.write<int32_t>(e + 36, m.f_fsid.val[1]);
         c.mem.write<uint32_t>(e + 40, m.f_owner);
         c.mem.write<int16_t>(e + 46, int16_t(m.f_type));
         c.mem.write<int32_t>(e + 48, int32_t(m.f_flags));
@@ -219,7 +220,7 @@ int writePasswd(Call &c, GuestAddr out, GuestAddr buffer, uint32_t left, const s
               dir = bufferString(c, buffer, left, pw->pw_dir), shell = bufferString(c, buffer, left, pw->pw_shell);
     if (!name || !pass || !cls || !gecos || !dir || !shell) return ERANGE;
     const uint32_t words[10] = {name, pass, pw->pw_uid, pw->pw_gid, 0, cls, gecos, dir, shell, 0};
-    c.mem.copyIn(out, words, sizeof words);
+    c.mem.writeWords(out, words, sizeof words);
     return 0;
 }
 
@@ -233,7 +234,7 @@ int writeGroup(Call &c, GuestAddr out, GuestAddr buffer, uint32_t left, const st
     GuestAddr name = bufferString(c, buffer, left, gr->gr_name), pass = bufferString(c, buffer, left, "*");
     if (!name || !pass) return ERANGE;
     const uint32_t words[4] = {name, pass, uint32_t(gr->gr_gid), members};
-    c.mem.copyIn(out, words, sizeof words);
+    c.mem.writeWords(out, words, sizeof words);
     return 0;
 }
 
