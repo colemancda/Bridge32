@@ -8,6 +8,7 @@
 #include "core/mem/GuestMemory.h"
 
 #include <cstdint>
+#include <string>
 
 #if !defined(B32_GUEST_ARM) && !defined(B32_GUEST_I386)
 #error "Define B32_GUEST_ARM or B32_GUEST_I386 (CMake's B32_GUEST_ARCH)"
@@ -39,6 +40,11 @@ GuestAddr thisReturningShim(GuestMemory &mem, GuestHeap &heap, GuestAddr target)
 // Cpu::stubContext() reads it and jumps to `target`.
 constexpr uint32_t kMethodStubSize = 16;
 void writeMethodStub(GuestMemory &mem, GuestAddr stub, uint32_t context, GuestAddr target);
+
+// A few imports are better as real guest code than as a trap, for speed or
+// because guest code reads their instructions: the guest address of such
+// code for `symbol`, or 0.
+GuestAddr nativeFunction(GuestMemory &mem, GuestHeap &heap, const std::string &symbol);
 
 // How a function returns a value, where the two guests differ.
 #if defined(B32_GUEST_I386)
