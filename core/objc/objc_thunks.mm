@@ -245,11 +245,13 @@ B32_THUNK(_sel_getName) { c.ret(c.args.ptr()); }  // a guest SEL is its name str
 
 B32_THUNK(_objc_enumerationMutation) { fatal("collection mutated during fast enumeration (from 0x%08x)", c.cpu.returnAddress()); }
 
+#if !defined(B32_GUEST_I386)  // i386's are in legacy_thunks.mm
 B32_THUNK(_objc_exception_throw) {
     id exception = bridge(c).toHost(c.args.ptr());
     fatal("guest threw %s: %s (exceptions are not supported yet)", [[exception description] UTF8String],
           [exception respondsToSelector:@selector(reason)] ? [[exception reason] UTF8String] : "");
 }
+#endif
 
 // --- Foundation functions ---------------------------------------------------------
 
