@@ -56,6 +56,10 @@ public:
         value = swapped(value);
         std::memcpy(base_ + addr, &value, sizeof(T));
     }
+    // A scalar as the guest stores it, for host code that builds bytes in the
+    // guest's order itself (a reply copied out with copyIn).
+    template <typename T> static T inGuestOrder(T value) { return swapped(value); }
+
     // Arrays of scalars, converted element by element: what a host call that
     // wants a native array (UTF-16 text, glyphs, floats) gets, and what it
     // returns goes back through writeArray.
