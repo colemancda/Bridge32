@@ -13,6 +13,10 @@
 
 #include <string>
 
+namespace b32::appkit {
+void startControllerMapping();  // core/appkit/controller.mm
+}
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         NSBundle *bundle = [NSBundle mainBundle];
@@ -41,6 +45,8 @@ int main(int argc, char **argv) {
         // change how their windows behave.
         [NSUserDefaults.standardUserDefaults registerDefaults:@{@"ApplePersistenceIgnoreState" : @YES}];
         NSWindow.allowsAutomaticWindowTabbing = NO;
+
+        b32::appkit::startControllerMapping();
 
         // Never destroyed: quitting runs exit()'s static destructors while the
         // guest's threads are still running.
