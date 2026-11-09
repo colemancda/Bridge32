@@ -177,6 +177,23 @@ B32_THUNK(_FSGetForkPosition) {
 }
 #endif
 
+// OSErr FSCreateDirectoryUnicode(parent, UniCharCount, name, whichInfo, const FSCatalogInfo *, FSRef *,
+//                                FSSpec *, UInt32 *newDirID): the catalog info isn't converted.
+B32_THUNK(_FSCreateDirectoryUnicode) {
+    GuestAddr parent = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    c.args.u32();
+    c.args.ptr();
+    GuestAddr out = c.args.ptr();
+    c.args.ptr();
+    GuestAddr directoryID = c.args.ptr();
+    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
+    UInt32 id = 0;
+    OSErr error = FSCreateDirectoryUnicode(fsRef(c, parent), length, text.data(), 0, nullptr, out ? fsRef(c, out) : nullptr, nullptr, &id);
+    if (directoryID) c.mem.write<uint32_t>(directoryID, id);
+    c.ret(uint32_t(int32_t(error)));
+}
 // OSErr FSOpenFork(ref, nameLength, name, permissions, FSIORefNum *): the
 // reference number is 16 bits in the guest and 32 on the host.
 B32_THUNK(_FSOpenFork) {
