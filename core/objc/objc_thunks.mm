@@ -20,10 +20,10 @@ namespace {
 
 Bridge &bridge(Call &c) { return c.rt.bridge(); }
 
-// Turns the current call into a send of `sel` to the object in r0, keeping
-// any further arguments in place (objc_alloc(cls) -> [cls alloc]).
+// Turns the current call into a send of `sel` to the object in the first
+// argument, keeping any further arguments in place (objc_alloc(cls) -> [cls alloc]).
 void sendFromR0(Call &c, const char *sel) {
-    c.cpu.setReg(1, bridge(c).guestSel(sel));
+    c.cpu.setArg(1, bridge(c).guestSel(sel));
     bridge(c).msgSend(c, false);
 }
 
@@ -238,7 +238,7 @@ B32_THUNK(_sel_registerName) { c.ret(bridge(c).guestSel(c.mem.cstr(c.args.ptr())
 B32_THUNK(_sel_getUid) { c.ret(bridge(c).guestSel(c.mem.cstr(c.args.ptr()))); }
 B32_THUNK(_sel_getName) { c.ret(c.args.ptr()); }  // a guest SEL is its name string
 
-B32_THUNK(_objc_enumerationMutation) { fatal("collection mutated during fast enumeration (from 0x%08x)", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(_objc_enumerationMutation) { fatal("collection mutated during fast enumeration (from 0x%08x)", c.cpu.returnAddress()); }
 
 B32_THUNK(_objc_exception_throw) {
     id exception = bridge(c).toHost(c.args.ptr());
