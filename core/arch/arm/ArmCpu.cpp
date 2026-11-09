@@ -171,6 +171,12 @@ constexpr uint32_t kArmBxLr = 0xE12FFF1E;
 
 const char *name() { return "armv7"; }
 
+double longDouble(const uint32_t *words) {
+    double value;
+    std::memcpy(&value, words, sizeof value);
+    return value;
+}
+
 // `svc #index; bx lr`
 void writeThunkStub(GuestMemory &mem, GuestAddr stub, uint32_t index) {
     mem.write<uint32_t>(stub, kArmSvc | index);
