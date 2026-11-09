@@ -71,6 +71,16 @@ public:
     template <typename T> void writeArray(GuestAddr addr, const T *values, size_t count) {
         for (size_t i = 0; i < count; i++) write<T>(addr + GuestAddr(i * sizeof(T)), values[i]);
     }
+    // A host struct or array that is nothing but 32-bit words (a Mach info
+    // structure, a tm's ints), to and from the guest's byte order.
+    void writeWords(GuestAddr addr, const void *words, size_t bytes) {
+        const uint32_t *w = static_cast<const uint32_t *>(words);
+        for (size_t i = 0; i < bytes / 4; i++) write<uint32_t>(addr + GuestAddr(i * 4), w[i]);
+    }
+    void readWords(GuestAddr addr, void *words, size_t bytes) const {
+        uint32_t *w = static_cast<uint32_t *>(words);
+        for (size_t i = 0; i < bytes / 4; i++) w[i] = read<uint32_t>(addr + GuestAddr(i * 4));
+    }
     // A NUL-terminated string of the guest's wchar_t (4 bytes on the Mac), as
     // the host's, and the reverse, terminator included.
     std::wstring readWide(GuestAddr addr) const {
