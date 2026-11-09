@@ -277,7 +277,7 @@ B32_THUNK(_thread_info) {
     basic.run_state = basic.suspend_count ? TH_STATE_STOPPED : TH_STATE_RUNNING;
     basic.policy = POLICY_TIMESHARE;
     static_assert(sizeof basic == THREAD_BASIC_INFO_COUNT * 4);
-    c.mem.copyIn(info, &basic, sizeof basic);
+    c.mem.writeWords(info, &basic, sizeof basic);
     c.mem.write<uint32_t>(countOut, THREAD_BASIC_INFO_COUNT);
     c.ret(KERN_SUCCESS);
 }
@@ -300,7 +300,7 @@ B32_THUNK(_host_statistics) {
     stats.active_count = pages / 4;
     stats.inactive_count = pages / 8;
     stats.wire_count = pages - stats.free_count - stats.active_count - stats.inactive_count;
-    c.mem.copyIn(info, &stats, sizeof stats);
+    c.mem.writeWords(info, &stats, sizeof stats);
     c.mem.write<uint32_t>(countOut, HOST_VM_INFO_COUNT);
     c.ret(KERN_SUCCESS);
 }
@@ -499,12 +499,12 @@ B32_THUNK(_mktime) {
     GuestAddr p = c.args.ptr();
     struct tm t{};
     int32_t ints[9];
-    std::memcpy(ints, c.mem.ptr<void>(p), sizeof ints);
+    c.mem.readWords(p, ints, sizeof ints);
     t.tm_sec = ints[0], t.tm_min = ints[1], t.tm_hour = ints[2], t.tm_mday = ints[3], t.tm_mon = ints[4];
     t.tm_year = ints[5], t.tm_wday = ints[6], t.tm_yday = ints[7], t.tm_isdst = ints[8];
     time_t result = mktime(&t);
     const int32_t normalized[9] = {t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday, t.tm_isdst};
-    c.mem.copyIn(p, normalized, sizeof normalized);
+    c.mem.writeWords(p, normalized, sizeof normalized);
     c.mem.write<int32_t>(p + 36, int32_t(t.tm_gmtoff));
     c.ret(uint32_t(int32_t(result)));
 }
