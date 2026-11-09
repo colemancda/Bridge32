@@ -491,8 +491,8 @@ B32_THUNK(__b32_stringbuf_overflow) {
         c.mem.write<uint32_t>(self + kOutEnd, data + capacity);
         cur = data + used;
         if (old != c.rt.dataSymbol("__ZNSs4_Rep20_S_empty_rep_storageE") + 12) {
-            auto *refcount = c.mem.ptr<int32_t>(old - 4);
-            if (__atomic_fetch_sub(refcount, 1, __ATOMIC_ACQ_REL) <= 0) c.heap.free(old - 12);
+            int32_t before = int32_t(c.mem.atomicUpdate<uint32_t>(old - 4, [](uint32_t v) { return v - 1; }));
+            if (before <= 0) c.heap.free(old - 12);
         }
     }
     c.mem.write<uint8_t>(cur, uint8_t(ch));
