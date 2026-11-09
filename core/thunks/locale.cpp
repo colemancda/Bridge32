@@ -28,8 +28,9 @@ char *hostPtr(Call &c, GuestAddr p) { return p ? c.mem.ptr<char>(p) : nullptr; }
 // A big-endian guest's wide strings can't be read in place by the host's wcs
 // functions, and converting each of the thunks below is work no PowerPC app has
 // asked for yet: they stop the guest, saying why, rather than misread it.
-[[noreturn]] wchar_t *hostWide(Call &, GuestAddr) {
-    fatal("a wide-character libc function was called; they aren't converted for big-endian guests yet");
+[[noreturn]] wchar_t *hostWide(Call &c, GuestAddr) {
+    fatal("%s was called (from 0x%08x); the wide-character libc functions aren't converted for big-endian guests yet", c.name,
+          c.cpu.returnAddress());
 }
 #else
 wchar_t *hostWide(Call &c, GuestAddr p) { return p ? c.mem.ptr<wchar_t>(p) : nullptr; }
