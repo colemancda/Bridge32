@@ -656,6 +656,8 @@ B32_THUNK(_CFUUIDCreateFromUUIDBytes) {
     CFUUIDBytes bytes;
     for (int i = 0; i < 4; i++) {
         uint32_t w = c.args.u32();
+        // The struct is 16 bytes passed as four words; put each back in the order its bytes had.
+        w = GuestMemory::inGuestOrder(w);
         std::memcpy(reinterpret_cast<uint8_t *>(&bytes) + i * 4, &w, 4);
     }
     c.ret(bridge(c).toGuest((id)CFUUIDCreateFromUUIDBytes(nullptr, bytes)));
