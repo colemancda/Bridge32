@@ -19,6 +19,11 @@
 #
 # The guest's files go in Out.app/Contents/Resources, so the game's
 # NSBundle mainBundle, nibs and resources resolve as on the device.
+#
+# Given an i386 Mac app (Foo.app/Contents/...) instead, it wraps that into the
+# AppKit shell (build/i386/Bridge32.app, from -DB32_MAC=ON; the options above
+# don't apply): the app's Resources become the shell's, and its executable and
+# Frameworks go to Contents/B32Guest with their relative layout intact.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -40,6 +45,26 @@ while :; do
     esac
 done
 input=$1
+
+if [ -d "$input/Contents" ]; then
+    guest=${input%/}
+    shell_app="${B32_MAC_SHELL_APP:-$root/build/i386/Bridge32.app}"
+    [ -d "$shell_app" ] || { echo "build the AppKit shell first: cmake -S . -B build/i386 -DB32_GUEST_ARCH=i386 -DB32_MAC=ON" >&2; exit 1; }
+    executable=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$guest/Contents/Info.plist")
+    name=$(basename "$guest" .app)
+    out=${2:-$root/build/apps/$name.app}
+    mkdir -p "$(dirname "$out")"
+    rm -rf "$out"
+    cp -R "$shell_app" "$out"
+    mkdir -p "$out/Contents/B32Guest/MacOS" "$out/Contents/Resources"
+    cp "$guest/Contents/MacOS/$executable" "$out/Contents/B32Guest/MacOS/$executable"
+    [ -d "$guest/Contents/Resources" ] && cp -R "$guest/Contents/Resources/." "$out/Contents/Resources/"
+    [ -d "$guest/Contents/Frameworks" ] && cp -R "$guest/Contents/Frameworks" "$out/Contents/B32Guest/Frameworks"
+    python3 -I "$here/merge-mac-plist.py" "$guest/Contents/Info.plist" "$root/app/mac/Info.plist" "$out/Contents/Info.plist"
+    codesign --force --sign - "$out"
+    echo "$out"
+    exit 0
+fi
 
 [ -d "$shell_app" ] || { echo "build the Catalyst shell first: cmake --build build/catalyst" >&2; exit 1; }
 
