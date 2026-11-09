@@ -14,7 +14,10 @@
 #import <Foundation/Foundation.h>
 #include <simd/simd.h>
 #import <QuartzCore/QuartzCore.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_MACCATALYST
 #import <UIKit/UIKit.h>
+#endif
 
 #include <cstring>
 
@@ -45,8 +48,13 @@ B32_THUNK(_NSGetUncaughtExceptionHandler) { c.ret(exceptionHandler); }
 
 B32_THUNK(_NSHomeDirectory) { c.ret(bridge(c).toGuest(NSHomeDirectory())); }
 B32_THUNK(_NSTemporaryDirectory) { c.ret(bridge(c).toGuest(NSTemporaryDirectory())); }
+#if TARGET_OS_MACCATALYST
 B32_THUNK(_NSUserName) { c.ret(bridge(c).toGuest(@"mobile")); }  // the iOS user
 B32_THUNK(_NSFullUserName) { c.ret(bridge(c).toGuest(@"Mobile User")); }
+#else
+B32_THUNK(_NSUserName) { c.ret(bridge(c).toGuest(NSUserName())); }
+B32_THUNK(_NSFullUserName) { c.ret(bridge(c).toGuest(NSFullUserName())); }
+#endif
 B32_THUNK(_NSOpenStepRootDirectory) { c.ret(bridge(c).toGuest(NSOpenStepRootDirectory())); }
 
 B32_THUNK(_NSLogv) {
@@ -56,6 +64,7 @@ B32_THUNK(_NSLogv) {
     NSLog(@"%s", s.c_str());
 }
 
+#if TARGET_OS_MACCATALYST  // UIKit's string functions
 B32_THUNK(_NSStringFromCGRect) { c.ret(bridge(c).toGuest(NSStringFromCGRect(guestRect(c)))); }
 B32_THUNK(_NSStringFromCGSize) {
     float w = c.args.f32();
@@ -84,6 +93,8 @@ B32_THUNK(_CGPointFromString) {
     c.mem.write<float>(out, float(point.x));
     c.mem.write<float>(out + 4, float(point.y));
 }
+
+#endif
 
 // NSRange NSIntersectionRange(NSRange, NSRange): each NSRange is two words; the
 // 8-byte result goes through r0.
@@ -132,6 +143,7 @@ B32_THUNK(_NSVersionOfLinkTimeLibrary) { c.ret(uint32_t(-1)); }
 
 B32_THUNK(_CACurrentMediaTime) { c.retF64(CACurrentMediaTime()); }
 
+#if TARGET_OS_MACCATALYST
 B32_THUNK(_UIRectFill) { UIRectFill(guestRect(c)); }
 B32_THUNK(_UIRectFillUsingBlendMode) {
     CGRect r = guestRect(c);
@@ -140,15 +152,24 @@ B32_THUNK(_UIRectFillUsingBlendMode) {
 B32_THUNK(_UIRectFrame) { UIRectFrame(guestRect(c)); }
 B32_THUNK(_UIGraphicsPushContext) { UIGraphicsPushContext((CGContextRef)bridge(c).toHost(c.args.ptr())); }
 B32_THUNK(_UIGraphicsPopContext) { UIGraphicsPopContext(); }
+#endif
 
 // --- value constants ------------------------------------------------------------------------------
 
 // iOS 6.1's.
+#if TARGET_OS_MACCATALYST
 B32_DATA(_NSFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 993.0); }
 B32_DATA(_kCFCoreFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 793.0); }
+#else
+// Mac OS X 10.14's, the newest a 32-bit app ever saw.
+B32_DATA(_NSFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 1575.0); }
+B32_DATA(_kCFCoreFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 1575.0); }
+#endif
 B32_DATA(_kCFAbsoluteTimeIntervalSince1970, 8) { rt.mem().write<double>(addr, kCFAbsoluteTimeIntervalSince1970); }
 
+#if TARGET_OS_MACCATALYST
 B32_DATA(_UIBackgroundTaskInvalid, 4) {}
+#endif
 B32_DATA(_CGRectNull, 16) {
     const float null[4] = {INFINITY, INFINITY, 0, 0};
     rt.mem().copyIn(addr, null, sizeof null);
@@ -174,12 +195,15 @@ B32_DATA(_kCFTypeDictionaryKeyCallBacks, 24) {}
 B32_DATA(_kCFTypeDictionaryValueCallBacks, 20) {}
 B32_DATA(_kCFCopyStringDictionaryKeyCallBacks, 24) {}
 
+#if TARGET_OS_MACCATALYST
 // CGFloat constants: floats in the guest.
 B32_DATA(_UIScrollViewDecelerationRateFast, 4) { rt.mem().write<float>(addr, float(UIScrollViewDecelerationRateFast)); }
 B32_DATA(_UIScrollViewDecelerationRateNormal, 4) { rt.mem().write<float>(addr, float(UIScrollViewDecelerationRateNormal)); }
 B32_DATA(_UIWindowLevelStatusBar, 4) { rt.mem().write<float>(addr, float(UIWindowLevelStatusBar)); }
 B32_DATA(_UIWindowLevelAlert, 4) { rt.mem().write<float>(addr, float(UIWindowLevelAlert)); }
 B32_DATA(_UIWindowLevelNormal, 4) { rt.mem().write<float>(addr, float(UIWindowLevelNormal)); }
+
+#endif
 
 // CATransform3D CATransform3DMakeTranslation(CGFloat tx, CGFloat ty, CGFloat tz):
 // sixteen CGFloats, returned through r0.
