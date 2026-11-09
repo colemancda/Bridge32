@@ -52,12 +52,14 @@ GuestAddr GuestHeap::allocLocked(uint32_t size, uint32_t align) {
     size = roundUp(std::max(size, 1u), kGrain);
     align = std::max(align, kGrain);
 
-    // First fit from the free list.
-    for (auto it = free_.begin(); it != free_.end(); ++it) {
-        auto [start, freeSize] = *it;
+    // The smallest free block that fits: games make millions of small blocks,
+    // and walking the fragments in address order takes most of their time.
+    for (auto it = freeBySize_.lower_bound({size, 0}); it != freeBySize_.end(); ++it) {
+        auto [freeSize, start] = *it;
         GuestAddr aligned = roundUp(start, align);
         if (aligned - start + uint64_t(size) > freeSize) continue;
-        free_.erase(it);
+        freeBySize_.erase(it);
+        free_.erase(start);
         if (aligned > start) insertFree(start, aligned - start);
         uint32_t tail = start + freeSize - (aligned + size);
         if (tail) insertFree(aligned + size, tail);
@@ -66,7 +68,10 @@ GuestAddr GuestHeap::allocLocked(uint32_t size, uint32_t align) {
     }
 
     GuestAddr aligned = roundUp(top_, align);
-    if (uint64_t(aligned) + size > layout::kHeapEnd) fatal("guest heap exhausted (%u bytes)", size);
+    if (uint64_t(aligned) + size > layout::kHeapEnd) {
+        Cpu *cpu = Runtime::currentCpu();
+        fatal("guest heap exhausted (%u bytes, from 0x%08x)", size, cpu ? cpu->returnAddress() : 0);
+    }
     if (aligned > top_) insertFree(top_, aligned - top_);
     top_ = aligned + size;
     if (top_ > committed_) {
@@ -153,16 +158,20 @@ void GuestHeap::insertFree(GuestAddr addr, uint32_t size) {
     auto next = free_.lower_bound(addr);
     if (next != free_.end() && addr + size == next->first) {
         size += next->second;
+        freeBySize_.erase({next->second, next->first});
         next = free_.erase(next);
     }
     if (next != free_.begin()) {
         auto prev = std::prev(next);
         if (prev->first + prev->second == addr) {
+            freeBySize_.erase({prev->second, prev->first});
             prev->second += size;
+            freeBySize_.insert({prev->second, prev->first});
             return;
         }
     }
     free_.emplace(addr, size);
+    freeBySize_.insert({size, addr});
 }
 
 uint32_t GuestHeap::sizeOf(GuestAddr addr) const {
