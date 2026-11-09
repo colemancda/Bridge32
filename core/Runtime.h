@@ -64,6 +64,10 @@ public:
     // Loads the executable and binds every import. Doesn't run anything.
     void load(const std::string &path);
 
+    // Loads a dylib and binds its imports without running anything, for
+    // b32-inspect (thunks().missing() then lists what it needs).
+    void inspectLibrary(const std::string &path) { loadGuestLibrary(path); }
+
     // Runs initializers and the entry point; returns the exit status.
     int run(const std::vector<std::string> &argv, const std::vector<std::string> &envp);
 
@@ -93,6 +97,7 @@ private:
     GuestAddr resolve(const std::string &symbol);
     GuestAddr thisReturning(GuestAddr target);
     MachOLoader makeLoader();
+    std::unordered_map<std::string, GuestAddr> nativeFunctions_;  // see arch::nativeFunction
     void loadLinkedLibraries(const std::vector<std::string> &dylibs);
     // Loads the guest library at `path` into the next window; its index in libraries_.
     size_t loadGuestLibrary(const std::string &path);
