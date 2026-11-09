@@ -127,7 +127,7 @@ void GuestHeap::freeLocked(GuestAddr addr) {
     if (redzones) checkRedzone(addr);
     auto it = live_.find(addr);
     if (it == live_.end()) {
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
         // The Mac's malloc complains about a bad free and carries on, and
         // shipped games have got away with them ever since.
         Cpu *cpu = Runtime::currentCpu();
