@@ -298,6 +298,16 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind, bool fpret) {
         if (!start->initialized && start->isGuest) ensureInitialized(start);
     }
 
+#if defined(B32_GUEST_I386)
+    // Cocoa bindings depend on a setter passing through the NSKVONotifying_
+    // subclass the host made for an observed object, and a guest-to-guest
+    // send would skip it: such objects go by way of the host, which ends up
+    // at the guest method through its trampoline.
+    if (kind == SuperKind::None && start->isGuest && !start->isMeta && start->host && hostClassChanged(receiver, start)) {
+        hostDispatch(c, receiver, sel, nullptr, stret);
+        return;
+    }
+#endif
     ClassInfo *info = start;
     for (; info && info->isGuest; info = info->super) {
         auto it = info->methods.find(sel);
