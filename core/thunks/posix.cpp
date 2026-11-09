@@ -210,7 +210,7 @@ B32_THUNK(_statvfs) {
         uint32_t fields[] = {uint32_t(st.f_bsize), uint32_t(st.f_frsize), uint32_t(st.f_blocks), uint32_t(st.f_bfree),
                              uint32_t(st.f_bavail), uint32_t(st.f_files), uint32_t(st.f_ffree), uint32_t(st.f_favail),
                              uint32_t(st.f_fsid), uint32_t(st.f_flag), uint32_t(st.f_namemax)};
-        c.mem.copyIn(out, fields, sizeof fields);
+        c.mem.writeWords(out, fields, sizeof fields);
     }
     c.ret(uint32_t(rc));
 }
@@ -271,7 +271,7 @@ void readDirectory(Call &c, bool inode64) {
 }  // namespace
 
 B32_THUNK(_readdir) { readDirectory(c, kPlainInode64); }
-#if defined(B32_GUEST_MAC)
+#if defined(B32_GUEST_MAC) && !defined(B32_GUEST_BIG_ENDIAN)  // its entry is the host's struct, copied as it is
 B32_THUNK(_readdir$INODE64) { readDirectory(c, true); }
 #endif
 
@@ -325,7 +325,7 @@ thread_local GuestAddr tmBuffer = 0;
 GuestAddr guestTm(Call &c, const struct tm &t) {
     if (!tmBuffer) tmBuffer = c.heap.calloc(1, 44);
     int32_t ints[] = {t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday, t.tm_isdst};
-    c.mem.copyIn(tmBuffer, ints, sizeof ints);
+    c.mem.writeWords(tmBuffer, ints, sizeof ints);
     c.mem.write<int32_t>(tmBuffer + 36, int32_t(t.tm_gmtoff));
     c.mem.write<uint32_t>(tmBuffer + 40, t.tm_zone ? c.rt.internString(t.tm_zone) : 0);
     return tmBuffer;
@@ -336,7 +336,7 @@ namespace {
 struct tm hostTm(Call &c, GuestAddr p) {
     struct tm t{};
     int32_t ints[9];
-    std::memcpy(ints, c.mem.ptr<void>(p), sizeof ints);
+    c.mem.readWords(p, ints, sizeof ints);
     t.tm_sec = ints[0], t.tm_min = ints[1], t.tm_hour = ints[2], t.tm_mday = ints[3], t.tm_mon = ints[4];
     t.tm_year = ints[5], t.tm_wday = ints[6], t.tm_yday = ints[7], t.tm_isdst = ints[8];
     t.tm_gmtoff = c.mem.read<int32_t>(p + 36);
@@ -375,7 +375,7 @@ B32_THUNK(_strptime) {
     const char *end = ::strptime(in, format, &t);
     if (!end) return c.ret(0);
     int32_t ints[] = {t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday, t.tm_isdst};
-    c.mem.copyIn(p, ints, sizeof ints);
+    c.mem.writeWords(p, ints, sizeof ints);
     c.mem.write<int32_t>(p + 36, int32_t(t.tm_gmtoff));
     c.ret(buf + uint32_t(end - in));
 }
@@ -1024,7 +1024,7 @@ GuestAddr currentUserEntry(Call &c) {
         uint32_t words[10] = {c.rt.internString(pw ? pw->pw_name : "mobile"), empty, ::getuid(), ::getgid(), 0,
                               empty, c.rt.internString(pw ? pw->pw_gecos : "Mobile User"),
                               c.rt.internString(getenv("HOME") ? getenv("HOME") : "/"), c.rt.internString("/bin/sh"), 0};
-        c.mem.copyIn(entry, words, sizeof words);
+        c.mem.writeWords(entry, words, sizeof words);
     }
     return entry;
 }
