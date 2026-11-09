@@ -110,10 +110,42 @@ B32_THUNK(_access) {
     c.ret(uint32_t(::access(path, c.args.i32())));
 }
 
-// The guest's struct stat (64-bit inode variant, 32-bit time_t and long):
+// The guest's struct stat comes in two layouts, each with 32-bit time_t and long.
+//
+// 64-bit inode (iOS always; i386 Mac as _stat$INODE64 and _stat64), 108 bytes:
 //   dev 0, mode 4, nlink 6, ino 8, uid 16, gid 20, rdev 24, atime 28, mtime 36,
 //   ctime 44, birthtime 52, size 60, blocks 68, blksize 76, flags 80, gen 84
+// 32-bit inode (i386 Mac's plain _stat, all that existed before 10.5), 96 bytes:
+//   dev 0, ino 4, mode 8, nlink 10, uid 12, gid 16, rdev 20, atime 24, mtime 32,
+//   ctime 40, size 48, blocks 56, blksize 64, flags 68, gen 72
 namespace {
+#if defined(B32_GUEST_I386)
+constexpr bool kPlainInode64 = false;
+#else
+constexpr bool kPlainInode64 = true;
+#endif
+
+void writeStat32(GuestMemory &mem, GuestAddr out, const struct stat &st) {
+    std::memset(mem.ptr<uint8_t>(out), 0, 96);
+    mem.write<int32_t>(out, int32_t(st.st_dev));
+    mem.write<uint32_t>(out + 4, uint32_t(st.st_ino));
+    mem.write<uint16_t>(out + 8, st.st_mode);
+    mem.write<uint16_t>(out + 10, st.st_nlink);
+    mem.write<uint32_t>(out + 12, st.st_uid);
+    mem.write<uint32_t>(out + 16, st.st_gid);
+    mem.write<int32_t>(out + 20, int32_t(st.st_rdev));
+    const struct timespec *times[] = {&st.st_atimespec, &st.st_mtimespec, &st.st_ctimespec};
+    for (int i = 0; i < 3; i++) {
+        mem.write<int32_t>(out + 24 + i * 8, int32_t(times[i]->tv_sec));
+        mem.write<int32_t>(out + 28 + i * 8, int32_t(times[i]->tv_nsec));
+    }
+    mem.write<int64_t>(out + 48, st.st_size);
+    mem.write<int64_t>(out + 56, st.st_blocks);
+    mem.write<int32_t>(out + 64, st.st_blksize);
+    mem.write<uint32_t>(out + 68, st.st_flags);
+    mem.write<uint32_t>(out + 72, st.st_gen);
+}
+
 void writeStat(GuestMemory &mem, GuestAddr out, const struct stat &st) {
     std::memset(mem.ptr<uint8_t>(out), 0, 108);
     mem.write<int32_t>(out, int32_t(st.st_dev));
@@ -136,31 +168,37 @@ void writeStat(GuestMemory &mem, GuestAddr out, const struct stat &st) {
 }
 }  // namespace
 
-B32_THUNK(_stat) {
+namespace {
+void statPath(Call &c, int (*host)(const char *, struct stat *), bool inode64) {
     const char *path = c.mem.cstr(c.args.ptr());
     GuestAddr out = c.args.ptr();
     struct stat st;
-    int rc = ::stat(path, &st);
-    if (rc == 0) writeStat(c.mem, out, st);
+    int rc = host(path, &st);
+    if (rc == 0) (inode64 ? writeStat : writeStat32)(c.mem, out, st);
     B32_FILE_LOG("stat(%s) = %d", path, rc);
     c.ret(uint32_t(rc));
 }
-B32_THUNK(_lstat) {
-    const char *path = c.mem.cstr(c.args.ptr());
-    GuestAddr out = c.args.ptr();
-    struct stat st;
-    int rc = ::lstat(path, &st);
-    if (rc == 0) writeStat(c.mem, out, st);
-    c.ret(uint32_t(rc));
-}
-B32_THUNK(_fstat) {
+void statDescriptor(Call &c, bool inode64) {
     int fd = c.args.i32();
     GuestAddr out = c.args.ptr();
     struct stat st;
     int rc = ::fstat(fd, &st);
-    if (rc == 0) writeStat(c.mem, out, st);
+    if (rc == 0) (inode64 ? writeStat : writeStat32)(c.mem, out, st);
     c.ret(uint32_t(rc));
 }
+}  // namespace
+
+B32_THUNK(_stat) { statPath(c, ::stat, kPlainInode64); }
+B32_THUNK(_lstat) { statPath(c, ::lstat, kPlainInode64); }
+B32_THUNK(_fstat) { statDescriptor(c, kPlainInode64); }
+#if defined(B32_GUEST_I386)
+B32_THUNK(_stat$INODE64) { statPath(c, ::stat, true); }
+B32_THUNK(_lstat$INODE64) { statPath(c, ::lstat, true); }
+B32_THUNK(_fstat$INODE64) { statDescriptor(c, true); }
+B32_THUNK(_stat64) { statPath(c, ::stat, true); }
+B32_THUNK(_lstat64) { statPath(c, ::lstat, true); }
+B32_THUNK(_fstat64) { statDescriptor(c, true); }
+#endif
 
 // struct statvfs is eleven 32-bit fields in the guest.
 B32_THUNK(_statvfs) {
@@ -177,7 +215,8 @@ B32_THUNK(_statvfs) {
     c.ret(uint32_t(rc));
 }
 
-// --- directories: DIR * is a guest block; struct dirent matches the host's ----------------
+// --- directories: DIR * is a guest block; the 64-bit-inode struct dirent matches the host's,
+// and i386 Mac's plain one (d_ino 0, d_reclen 4, d_type 6, d_namlen 7, d_name 8) is older ----
 
 namespace {
 std::mutex dirsLock;
@@ -202,7 +241,8 @@ B32_THUNK(_opendir) {
     c.ret(handle);
 }
 
-B32_THUNK(_readdir) {
+namespace {
+void readDirectory(Call &c, bool inode64) {
     GuestAddr handle = c.args.ptr();
     GuestDir d;
     {
@@ -214,9 +254,26 @@ B32_THUNK(_readdir) {
         c.ret(0);
         return;
     }
-    c.mem.copyIn(d.entry, e, sizeof *e);
+    if (inode64) {
+        c.mem.copyIn(d.entry, e, sizeof *e);
+    } else {
+        constexpr uint32_t kOldNameMax = 255;
+        uint32_t length = std::min<uint32_t>(e->d_namlen, kOldNameMax);
+        c.mem.write<uint32_t>(d.entry, uint32_t(e->d_ino));
+        c.mem.write<uint16_t>(d.entry + 4, uint16_t(((8 + length + 1) + 3) & ~3u));
+        c.mem.write<uint8_t>(d.entry + 6, e->d_type);
+        c.mem.write<uint8_t>(d.entry + 7, uint8_t(length));
+        c.mem.copyIn(d.entry + 8, e->d_name, length);
+        c.mem.write<uint8_t>(d.entry + 8 + length, 0);
+    }
     c.ret(d.entry);
 }
+}  // namespace
+
+B32_THUNK(_readdir) { readDirectory(c, kPlainInode64); }
+#if defined(B32_GUEST_I386)
+B32_THUNK(_readdir$INODE64) { readDirectory(c, true); }
+#endif
 
 B32_THUNK(_closedir) {
     GuestAddr handle = c.args.ptr();
