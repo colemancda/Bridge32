@@ -349,10 +349,10 @@ B32_THUNK(__ZNSt8ios_base4InitD1Ev) { c.ret(c.args.ptr()); }
 
 // --- errors that would throw -------------------------------------------------------------
 
-B32_THUNK(__ZSt17__throw_bad_allocv) { fatal("guest threw std::bad_alloc (from 0x%08x)", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(__ZSt17__throw_bad_allocv) { fatal("guest threw std::bad_alloc (from 0x%08x)", c.cpu.returnAddress()); }
 B32_THUNK(__ZSt20__throw_length_errorPKc) { fatal("guest threw std::length_error: %s", c.mem.cstr(c.args.ptr())); }
 B32_THUNK(__ZSt20__throw_out_of_rangePKc) { fatal("guest threw std::out_of_range: %s", c.mem.cstr(c.args.ptr())); }
-B32_THUNK(__ZSt9terminatev) { fatal("guest called std::terminate (from 0x%08x)", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(__ZSt9terminatev) { fatal("guest called std::terminate (from 0x%08x)", c.cpu.returnAddress()); }
 B32_THUNK(___cxa_rethrow) { fatal("guest rethrew a C++ exception; exceptions are not supported yet"); }
 
 // --- __dynamic_cast ----------------------------------------------------------------------

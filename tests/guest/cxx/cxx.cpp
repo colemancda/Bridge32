@@ -1,8 +1,9 @@
 // C++ runtime guest: operator new/delete, guarded statics, SjLj frame
-// registration (a try block that never throws), virtual dispatch, and the
-// armv6 integer/VFP helpers called directly.
+// registration (a try block that never throws), virtual dispatch, and, on
+// ARM, the armv6 integer/VFP helpers called directly.
 #include <stdio.h>
 
+#if defined(__arm__)
 extern "C" {
 int __divsi3(int, int);
 int __modsi3(int, int);
@@ -14,6 +15,7 @@ int __ltsf2vfp(float, float);
 int __fixsfsivfp(float);
 double __muldf3vfp(double, double);
 }
+#endif
 
 struct Shape {
     virtual ~Shape() {}
@@ -58,9 +60,11 @@ int main() {
     volatile int input = 21;
     printf("try=%d\n", mayThrow(input));
 
+#if defined(__arm__)
     printf("div=%d mod=%d udiv=%u ldiv=%lld\n", __divsi3(-17, 5), __modsi3(-17, 5), __udivsi3(17, 5),
            __divdi3(-10000000000LL, 3));
     printf("fadd=%.2f fdiv=%.2f flt=%d fix=%d dmul=%.1f\n", __addsf3vfp(1.5f, 2.25f), __divsf3vfp(1.0f, 4.0f),
            __ltsf2vfp(1.0f, 2.0f), __fixsfsivfp(-3.75f), __muldf3vfp(1.5, -4.0));
+#endif
     return 0;
 }

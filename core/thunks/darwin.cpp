@@ -172,16 +172,24 @@ B32_THUNK(_NXGetLocalArchInfo) {
     B32_THUNK(symbol) { c.ret(KERN_FAILURE); }
 B32_MACH_FAILS(_task_swap_exception_ports)
 B32_MACH_FAILS(_task_get_exception_ports)
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_task_set_exception_ports)
+#endif
 B32_MACH_FAILS(_thread_swap_exception_ports)
 B32_MACH_FAILS(_thread_get_exception_ports)
 B32_MACH_FAILS(_thread_set_exception_ports)
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_port_allocate)
+#endif
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_port_insert_right)
+#endif
 B32_MACH_FAILS(_mach_port_mod_refs)
 B32_MACH_FAILS(_mach_port_move_member)
 B32_MACH_FAILS(_mach_port_request_notification)
+#if !defined(B32_GUEST_I386)  // the Mac's are in macos.cpp
 B32_MACH_FAILS(_mach_msg)
+#endif
 B32_MACH_FAILS(_exception_raise)
 B32_MACH_FAILS(_exception_raise_state)
 B32_MACH_FAILS(_exception_raise_state_identity)
@@ -240,19 +248,15 @@ B32_THUNK(_thread_resume) {
 }
 
 // kern_return_t thread_get_state(thread_act_t, thread_state_flavor_t, thread_state_t, mach_msg_type_number_t *count):
-// ARM_THREAD_STATE (1) only, the 32-bit arm_thread_state_t { r[13], sp, lr, pc, cpsr }.
+// the guest's native flavor only (ARM_THREAD_STATE or x86_THREAD_STATE32).
 B32_THUNK(_thread_get_state) {
     Cpu *cpu = guestThread(c.args.u32());
     int flavor = c.args.i32();
     GuestAddr state = c.args.ptr(), countOut = c.args.ptr();
-    constexpr uint32_t kArmThreadState = 1, kArmThreadStateCount = 17;
-    if (!cpu || flavor != kArmThreadState || c.mem.read<uint32_t>(countOut) < kArmThreadStateCount) {
+    if (!cpu || !cpu->threadState(flavor, state, countOut)) {
         c.ret(KERN_INVALID_ARGUMENT);
         return;
     }
-    for (int r = 0; r < 16; r++) c.mem.write<uint32_t>(state + r * 4, cpu->reg(r));
-    c.mem.write<uint32_t>(state + 64, cpu->cpsr());
-    c.mem.write<uint32_t>(countOut, kArmThreadStateCount);
     c.ret(KERN_SUCCESS);
 }
 
@@ -518,8 +522,8 @@ B32_THUNK(_localeconv) {
     c.ret(lconv);
 }
 
-// long long llroundl(long double): long double is double here.
-B32_THUNK(_llroundl) { c.ret64(uint64_t(std::llround(c.args.f64()))); }
+// long long llroundl(long double)
+B32_THUNK(_llroundl) { c.ret64(uint64_t(std::llround(c.args.longDouble()))); }
 
 // --- compiler helpers ----------------------------------------------------------------------------
 
@@ -544,13 +548,13 @@ B32_THUNK(___exp10) { c.retF64(std::pow(10.0, c.args.f64())); }
 B32_THUNK(___exp10f) { c.retF32(std::pow(10.0f, c.args.f32())); }
 // struct { float sin, cos; } __sincosf_stret(float): 8 bytes, returned through r0.
 B32_THUNK(___sincosf_stret) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     float x = c.args.f32();
     c.mem.write<float>(out, std::sin(x));
     c.mem.write<float>(out + 4, std::cos(x));
 }
 B32_THUNK(___sincos_stret) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     double x = c.args.f64();
     c.mem.write<double>(out, std::sin(x));
     c.mem.write<double>(out + 8, std::cos(x));

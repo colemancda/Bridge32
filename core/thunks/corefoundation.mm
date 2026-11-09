@@ -657,7 +657,7 @@ B32_THUNK(_CFUUIDCreateFromUUIDBytes) {
     c.ret(bridge(c).toGuest((id)CFUUIDCreateFromUUIDBytes(nullptr, bytes)));
 }
 B32_THUNK(_CFUUIDGetUUIDBytes) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     CFUUIDBytes bytes = CFUUIDGetUUIDBytes((CFUUIDRef)bridge(c).toHost(c.args.ptr()));
     c.mem.copyIn(out, &bytes, sizeof bytes);
 }

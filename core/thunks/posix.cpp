@@ -1,5 +1,5 @@
 // POSIX and Mach odds and ends: files and directories, time, Mach timing and
-// semaphores, setjmp/longjmp, zlib and sscanf. Structures whose 32-bit
+// semaphores, zlib and sscanf (setjmp/longjmp are in core/arch). Structures whose 32-bit
 // layout differs from the host's (stat, statvfs, tm, z_stream) are converted
 // field by field.
 
@@ -110,10 +110,42 @@ B32_THUNK(_access) {
     c.ret(uint32_t(::access(path, c.args.i32())));
 }
 
-// The guest's struct stat (64-bit inode variant, 32-bit time_t and long):
+// The guest's struct stat comes in two layouts, each with 32-bit time_t and long.
+//
+// 64-bit inode (iOS always; i386 Mac as _stat$INODE64 and _stat64), 108 bytes:
 //   dev 0, mode 4, nlink 6, ino 8, uid 16, gid 20, rdev 24, atime 28, mtime 36,
 //   ctime 44, birthtime 52, size 60, blocks 68, blksize 76, flags 80, gen 84
+// 32-bit inode (i386 Mac's plain _stat, all that existed before 10.5), 96 bytes:
+//   dev 0, ino 4, mode 8, nlink 10, uid 12, gid 16, rdev 20, atime 24, mtime 32,
+//   ctime 40, size 48, blocks 56, blksize 64, flags 68, gen 72
 namespace {
+#if defined(B32_GUEST_I386)
+constexpr bool kPlainInode64 = false;
+#else
+constexpr bool kPlainInode64 = true;
+#endif
+
+void writeStat32(GuestMemory &mem, GuestAddr out, const struct stat &st) {
+    std::memset(mem.ptr<uint8_t>(out), 0, 96);
+    mem.write<int32_t>(out, int32_t(st.st_dev));
+    mem.write<uint32_t>(out + 4, uint32_t(st.st_ino));
+    mem.write<uint16_t>(out + 8, st.st_mode);
+    mem.write<uint16_t>(out + 10, st.st_nlink);
+    mem.write<uint32_t>(out + 12, st.st_uid);
+    mem.write<uint32_t>(out + 16, st.st_gid);
+    mem.write<int32_t>(out + 20, int32_t(st.st_rdev));
+    const struct timespec *times[] = {&st.st_atimespec, &st.st_mtimespec, &st.st_ctimespec};
+    for (int i = 0; i < 3; i++) {
+        mem.write<int32_t>(out + 24 + i * 8, int32_t(times[i]->tv_sec));
+        mem.write<int32_t>(out + 28 + i * 8, int32_t(times[i]->tv_nsec));
+    }
+    mem.write<int64_t>(out + 48, st.st_size);
+    mem.write<int64_t>(out + 56, st.st_blocks);
+    mem.write<int32_t>(out + 64, st.st_blksize);
+    mem.write<uint32_t>(out + 68, st.st_flags);
+    mem.write<uint32_t>(out + 72, st.st_gen);
+}
+
 void writeStat(GuestMemory &mem, GuestAddr out, const struct stat &st) {
     std::memset(mem.ptr<uint8_t>(out), 0, 108);
     mem.write<int32_t>(out, int32_t(st.st_dev));
@@ -136,31 +168,37 @@ void writeStat(GuestMemory &mem, GuestAddr out, const struct stat &st) {
 }
 }  // namespace
 
-B32_THUNK(_stat) {
+namespace {
+void statPath(Call &c, int (*host)(const char *, struct stat *), bool inode64) {
     const char *path = c.mem.cstr(c.args.ptr());
     GuestAddr out = c.args.ptr();
     struct stat st;
-    int rc = ::stat(path, &st);
-    if (rc == 0) writeStat(c.mem, out, st);
+    int rc = host(path, &st);
+    if (rc == 0) (inode64 ? writeStat : writeStat32)(c.mem, out, st);
     B32_FILE_LOG("stat(%s) = %d", path, rc);
     c.ret(uint32_t(rc));
 }
-B32_THUNK(_lstat) {
-    const char *path = c.mem.cstr(c.args.ptr());
-    GuestAddr out = c.args.ptr();
-    struct stat st;
-    int rc = ::lstat(path, &st);
-    if (rc == 0) writeStat(c.mem, out, st);
-    c.ret(uint32_t(rc));
-}
-B32_THUNK(_fstat) {
+void statDescriptor(Call &c, bool inode64) {
     int fd = c.args.i32();
     GuestAddr out = c.args.ptr();
     struct stat st;
     int rc = ::fstat(fd, &st);
-    if (rc == 0) writeStat(c.mem, out, st);
+    if (rc == 0) (inode64 ? writeStat : writeStat32)(c.mem, out, st);
     c.ret(uint32_t(rc));
 }
+}  // namespace
+
+B32_THUNK(_stat) { statPath(c, ::stat, kPlainInode64); }
+B32_THUNK(_lstat) { statPath(c, ::lstat, kPlainInode64); }
+B32_THUNK(_fstat) { statDescriptor(c, kPlainInode64); }
+#if defined(B32_GUEST_I386)
+B32_THUNK(_stat$INODE64) { statPath(c, ::stat, true); }
+B32_THUNK(_lstat$INODE64) { statPath(c, ::lstat, true); }
+B32_THUNK(_fstat$INODE64) { statDescriptor(c, true); }
+B32_THUNK(_stat64) { statPath(c, ::stat, true); }
+B32_THUNK(_lstat64) { statPath(c, ::lstat, true); }
+B32_THUNK(_fstat64) { statDescriptor(c, true); }
+#endif
 
 // struct statvfs is eleven 32-bit fields in the guest.
 B32_THUNK(_statvfs) {
@@ -177,7 +215,8 @@ B32_THUNK(_statvfs) {
     c.ret(uint32_t(rc));
 }
 
-// --- directories: DIR * is a guest block; struct dirent matches the host's ----------------
+// --- directories: DIR * is a guest block; the 64-bit-inode struct dirent matches the host's,
+// and i386 Mac's plain one (d_ino 0, d_reclen 4, d_type 6, d_namlen 7, d_name 8) is older ----
 
 namespace {
 std::mutex dirsLock;
@@ -202,7 +241,8 @@ B32_THUNK(_opendir) {
     c.ret(handle);
 }
 
-B32_THUNK(_readdir) {
+namespace {
+void readDirectory(Call &c, bool inode64) {
     GuestAddr handle = c.args.ptr();
     GuestDir d;
     {
@@ -214,9 +254,26 @@ B32_THUNK(_readdir) {
         c.ret(0);
         return;
     }
-    c.mem.copyIn(d.entry, e, sizeof *e);
+    if (inode64) {
+        c.mem.copyIn(d.entry, e, sizeof *e);
+    } else {
+        constexpr uint32_t kOldNameMax = 255;
+        uint32_t length = std::min<uint32_t>(e->d_namlen, kOldNameMax);
+        c.mem.write<uint32_t>(d.entry, uint32_t(e->d_ino));
+        c.mem.write<uint16_t>(d.entry + 4, uint16_t(((8 + length + 1) + 3) & ~3u));
+        c.mem.write<uint8_t>(d.entry + 6, e->d_type);
+        c.mem.write<uint8_t>(d.entry + 7, uint8_t(length));
+        c.mem.copyIn(d.entry + 8, e->d_name, length);
+        c.mem.write<uint8_t>(d.entry + 8 + length, 0);
+    }
     c.ret(d.entry);
 }
+}  // namespace
+
+B32_THUNK(_readdir) { readDirectory(c, kPlainInode64); }
+#if defined(B32_GUEST_I386)
+B32_THUNK(_readdir$INODE64) { readDirectory(c, true); }
+#endif
 
 B32_THUNK(_closedir) {
     GuestAddr handle = c.args.ptr();
@@ -382,52 +439,6 @@ B32_THUNK(_semaphore_destroy) {
 }
 B32_THUNK(_semaphore_signal) { c.ret(uint32_t(semaphore_signal(c.args.u32()))); }
 B32_THUNK(_semaphore_wait) { c.ret(uint32_t(semaphore_wait(c.args.u32()))); }
-
-// --- setjmp / longjmp -------------------------------------------------------------------------
-// The guest jmp_buf holds what we choose: r4-r11, sp, lr and d8-d15 (26
-// words; the buffer has room for 27). setjmp returns through the caller's lr
-// as usual; longjmp resumes at the saved lr with r0 = value.
-
-namespace {
-void saveContext(Call &c, GuestAddr buf) {
-    for (int r = 4; r <= 11; r++) c.mem.write<uint32_t>(buf + (r - 4) * 4, c.cpu.reg(r));
-    c.mem.write<uint32_t>(buf + 32, c.cpu.reg(Cpu::SP));
-    c.mem.write<uint32_t>(buf + 36, c.cpu.reg(Cpu::LR));
-    for (int s = 16; s < 32; s++) c.mem.write<uint32_t>(buf + 40 + (s - 16) * 4, c.cpu.extReg(s));
-}
-void restoreContext(Call &c, GuestAddr buf, uint32_t value) {
-    for (int r = 4; r <= 11; r++) c.cpu.setReg(r, c.mem.read<uint32_t>(buf + (r - 4) * 4));
-    c.cpu.setReg(Cpu::SP, c.mem.read<uint32_t>(buf + 32));
-    for (int s = 16; s < 32; s++) c.cpu.setExtReg(s, c.mem.read<uint32_t>(buf + 40 + (s - 16) * 4));
-    c.cpu.setReg(0, value ? value : 1);
-    c.cpu.jump(c.mem.read<uint32_t>(buf + 36));
-}
-}  // namespace
-
-B32_THUNK(_setjmp) {
-    saveContext(c, c.args.ptr());
-    c.ret(0);
-}
-B32_THUNK(__setjmp) {
-    saveContext(c, c.args.ptr());
-    c.ret(0);
-}
-B32_THUNK(_sigsetjmp) {
-    saveContext(c, c.args.ptr());
-    c.ret(0);
-}
-B32_THUNK(_longjmp) {
-    GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
-}
-B32_THUNK(__longjmp) {
-    GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
-}
-B32_THUNK(_siglongjmp) {
-    GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
-}
 
 // --- zlib ------------------------------------------------------------------------------------
 // Guest z_stream (32-bit): next_in 0, avail_in 4, total_in 8, next_out 12,
@@ -963,7 +974,8 @@ B32_THUNK(_geteuid) { c.ret(::geteuid()); }
 // struct passwd *getpwuid(uid_t): the guest's is ten words { pw_name, pw_passwd,
 // pw_uid, pw_gid, pw_change, pw_class, pw_gecos, pw_dir, pw_shell, pw_expire },
 // built once from the host's entry, with the app's own home directory.
-B32_THUNK(_getpwuid) {
+namespace {
+GuestAddr currentUserEntry(Call &c) {
     static GuestAddr entry = 0;
     if (!entry) {
         const struct passwd *pw = ::getpwuid(::getuid());
@@ -974,8 +986,27 @@ B32_THUNK(_getpwuid) {
                               c.rt.internString(getenv("HOME") ? getenv("HOME") : "/"), c.rt.internString("/bin/sh"), 0};
         c.mem.copyIn(entry, words, sizeof words);
     }
+    return entry;
+}
+}  // namespace
+
+B32_THUNK(_getpwuid) {
     c.args.u32();
-    c.ret(entry);
+    c.ret(currentUserEntry(c));
+}
+// Only the current user exists as far as the guest can tell.
+B32_THUNK(_getpwnam) {
+    const char *name = c.mem.cstr(c.args.ptr());
+    const struct passwd *pw = ::getpwuid(::getuid());
+    c.ret(pw && std::strcmp(name, pw->pw_name) == 0 ? currentUserEntry(c) : 0);
+}
+// A guest is the user it runs as; dropping privileges has nothing to do.
+B32_THUNK(_setuid) { c.ret(0); }
+B32_THUNK(_setgid) { c.ret(0); }
+B32_THUNK(_mktemp) {
+    GuestAddr path = c.args.ptr();
+    ::mktemp(c.mem.ptr<char>(path));
+    c.ret(path);
 }
 
 // A guest can't start other programs.

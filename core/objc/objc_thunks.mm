@@ -20,10 +20,10 @@ namespace {
 
 Bridge &bridge(Call &c) { return c.rt.bridge(); }
 
-// Turns the current call into a send of `sel` to the object in r0, keeping
-// any further arguments in place (objc_alloc(cls) -> [cls alloc]).
+// Turns the current call into a send of `sel` to the object in the first
+// argument, keeping any further arguments in place (objc_alloc(cls) -> [cls alloc]).
 void sendFromR0(Call &c, const char *sel) {
-    c.cpu.setReg(1, bridge(c).guestSel(sel));
+    c.cpu.setArg(1, bridge(c).guestSel(sel));
     bridge(c).msgSend(c, false);
 }
 
@@ -40,6 +40,11 @@ std::string b32::objc::describeObject(Call &c, GuestAddr object) {
 
 B32_THUNK(_objc_msgSend) { bridge(c).msgSend(c, false); }
 B32_THUNK(_objc_msgSend_stret) { bridge(c).msgSend(c, true); }
+#if defined(B32_GUEST_I386)
+// Methods returning float, double or long double: a nil receiver has to leave
+// 0.0 on the x87 stack, which is what makes this a separate entry point.
+B32_THUNK(_objc_msgSend_fpret) { bridge(c).msgSend(c, false, Bridge::SuperKind::None, true); }
+#endif
 B32_THUNK(_objc_msgSendSuper) { bridge(c).msgSend(c, false, Bridge::SuperKind::Super); }
 B32_THUNK(_objc_msgSendSuper_stret) { bridge(c).msgSend(c, true, Bridge::SuperKind::Super); }
 B32_THUNK(_objc_msgSendSuper2) { bridge(c).msgSend(c, false, Bridge::SuperKind::Super2); }
@@ -238,13 +243,15 @@ B32_THUNK(_sel_registerName) { c.ret(bridge(c).guestSel(c.mem.cstr(c.args.ptr())
 B32_THUNK(_sel_getUid) { c.ret(bridge(c).guestSel(c.mem.cstr(c.args.ptr()))); }
 B32_THUNK(_sel_getName) { c.ret(c.args.ptr()); }  // a guest SEL is its name string
 
-B32_THUNK(_objc_enumerationMutation) { fatal("collection mutated during fast enumeration (from 0x%08x)", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(_objc_enumerationMutation) { fatal("collection mutated during fast enumeration (from 0x%08x)", c.cpu.returnAddress()); }
 
+#if !defined(B32_GUEST_I386)  // i386's are in legacy_thunks.mm
 B32_THUNK(_objc_exception_throw) {
     id exception = bridge(c).toHost(c.args.ptr());
     fatal("guest threw %s: %s (exceptions are not supported yet)", [[exception description] UTF8String],
           [exception respondsToSelector:@selector(reason)] ? [[exception reason] UTF8String] : "");
 }
+#endif
 
 // --- Foundation functions ---------------------------------------------------------
 

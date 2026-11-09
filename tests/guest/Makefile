@@ -1,9 +1,68 @@
-# Builds the armv7 guest test binaries with the current Xcode's clang and the
-# patched iOS 9.3 SDK (see make-sdk.sh in HalfLife-iOS9 for the tbd fixes).
+# Builds the guest test binaries with the current Xcode's clang.
+#   make            armv7, against the patched iOS 9.3 SDK (see make-sdk.sh in
+#                   HalfLife-iOS9 for the tbd fixes)
+#   make ARCH=i386  i386, compiled by clang (which still targets i386) and
+#                   linked by tools/i386-link.py, since Apple's ld no longer
+#                   links i386; no SDK needed, Bridge32 binds imports by name
 
+ARCH    ?= arm
 SDK     ?= /Volumes/Crucial-2TB/Developer/HalfLife-iOS9/sdk/iPhoneOS9.3.sdk
-OUT     ?= ../../build/guest
 CC      := xcrun clang
+
+ifeq ($(ARCH),i386)
+OUT     ?= ../../build/guest-i386
+CFLAGS  := -arch i386 -target i386-apple-macos10.13 -mdynamic-no-pic -fno-asynchronous-unwind-tables \
+           -fno-unwind-tables -O1 -Wall -Wno-unused-command-line-argument
+LINK    := python3 ../../tools/i386-link.py
+TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib objc objclegacy AppKitTest.app
+
+.PHONY: all clean
+all: $(addprefix $(OUT)/,$(TESTS))
+
+# clang++ warns that libc++ no longer supports the target; the test uses none of it.
+$(OUT)/cxx: cxx/cxx.cpp ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -std=c++17 -Wno-\#warnings -x c++ -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+# Manual retain/release and the legacy runtime, which clang uses for i386.
+$(OUT)/objc: objc/objc.m ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fno-objc-arc -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+$(OUT)/objclegacy: objclegacy/objclegacy.m ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fno-objc-arc -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+# A Mac app bundle, for tools/make-app.sh to wrap into the AppKit shell.
+$(OUT)/AppKitTest.app: appkit/main.m appkit/prefix.h appkit/MainMenu.xib appkit/Info.plist ../../tools/i386-link.py
+	@mkdir -p $@/Contents/MacOS $@/Contents/Resources
+	$(CC) $(CFLAGS) -fno-objc-arc -Wno-deprecated-declarations -include appkit/prefix.h -c -o $(OUT)/AppKitTest.o $<
+	$(LINK) -o $@/Contents/MacOS/AppKitTest $(OUT)/AppKitTest.o
+	xcrun ibtool --compile $@/Contents/Resources/MainMenu.nib appkit/MainMenu.xib
+	cp appkit/Info.plist $@/Contents/Info.plist
+
+# Linked the way Mac OS X 10.4's ld did it.
+$(OUT)/classic: classic/classic.c ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c -o $@.o $<
+	$(LINK) --classic --entry start -o $@ $@.o
+
+$(OUT)/libclassic.dylib: classic/libclassic.c ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(filter-out -mdynamic-no-pic,$(CFLAGS)) -fPIC -c -o $@.o $<
+	$(LINK) --dylib -o $@ $@.o
+
+.SECONDEXPANSION:
+$(OUT)/%: $$*/$$*.c ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+else
+OUT     ?= ../../build/guest
 # -marm: Xcode 27's linker writes an even LC_MAIN entry offset for Thumb code.
 CFLAGS  := -arch armv7 -isysroot $(SDK) -miphoneos-version-min=9.0 -marm -O1 -Wall
 
@@ -46,6 +105,8 @@ $(OUT)/GLES1Test.app: gles1/main.m gles1/Info.plist
 	$(CC) $(CFLAGS) -fno-objc-arc -o $@/GLES1Test gles1/main.m -framework UIKit -framework Foundation \
 		-framework OpenGLES -framework QuartzCore
 	cp gles1/Info.plist $@/Info.plist
+
+endif
 
 clean:
 	rm -rf $(OUT)

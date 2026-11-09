@@ -123,7 +123,7 @@ namespace {
 void checkQueueAndBlock(Call &c, const char *fn, id queue, id block) {
     if (!queue || !block)
         fatal("%s with %s (queue 0x%08x, block 0x%08x, from 0x%08x)", fn, queue ? "no block" : "no queue",
-              c.cpu.reg(0), c.cpu.reg(1), c.cpu.reg(Cpu::LR));
+              c.cpu.arg(0), c.cpu.arg(1), c.cpu.returnAddress());
 }
 }  // namespace
 

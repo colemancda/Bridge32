@@ -5,19 +5,17 @@
 //
 // A Method is a guest method_t { SEL name, const char *types, IMP imp }. A
 // guest class's methods are its own method_t entries. A host method gets one
-// made up the first time it's asked for, whose IMP is a small ARM stub:
-//     ldr r12, [pc]     ; this method_t
-//     .word method_t
-//     ldr pc, [pc]      ; the thunk (out of branch range)
-//     .word thunk
-// so calling it runs the host implementation the method had at that moment,
-// as swizzling code expects when it calls "the original".
+// made up the first time it's asked for, whose IMP is a small stub
+// (arch::writeMethodStub) that passes the method_t to the __b32_call_host_imp
+// thunk, so calling it runs the host implementation the method had at that
+// moment, as swizzling code expects when it calls "the original".
 
 #include "Blocks.h"
 #include "Bridge.h"
 
 #include "core/Log.h"
 #include "core/Runtime.h"
+#include "core/arch/Arch.h"
 
 #import <Foundation/Foundation.h>
 #include <objc/runtime.h>
@@ -32,7 +30,7 @@ using namespace b32::objc;
 
 namespace {
 constexpr uint32_t kMethodSel = 0, kMethodTypes = 4, kMethodImp = 8, kMethodSize = 12;
-constexpr uint32_t kStubSize = 16;
+constexpr uint32_t kStubSize = arch::kMethodStubSize;
 }  // namespace
 
 GuestAddr Bridge::findMethod(ClassInfo *cls, GuestAddr sel) {
@@ -54,10 +52,7 @@ GuestAddr Bridge::findMethod(ClassInfo *cls, GuestAddr sel) {
     mem.write<uint32_t>(m + kMethodSel, sel);
     mem.write<uint32_t>(m + kMethodTypes, rt_.internString(method_getTypeEncoding(hostMethod)));
     mem.write<uint32_t>(m + kMethodImp, stub);
-    mem.write<uint32_t>(stub, 0xe59fc000);      // ldr r12, [pc]   (the word at +8)
-    mem.write<uint32_t>(stub + 4, 0xe59ff000);  // ldr pc, [pc]    (the word at +12)
-    mem.write<uint32_t>(stub + 8, m);
-    mem.write<uint32_t>(stub + 12, thunk);
+    arch::writeMethodStub(mem, stub, m, thunk);
     hostMethods_[m] = {method_getImplementation(hostMethod), hostSel(sel)};
     methodOwners_[m] = {c, sel};
     guestMethodForHost_[static_cast<void *>(hostMethod)] = m;
@@ -123,21 +118,23 @@ GuestAddr Bridge::addMethod(ClassInfo *cls, GuestAddr sel, GuestAddr imp, const 
 }
 
 void Bridge::callHostImp(Call &c, IMP imp, SEL sel) {
-    // A struct result too big for registers comes back through r0, with self in r1.
-    GuestAddr method = c.cpu.reg(12);
+    // A struct result too big for registers comes back through the first
+    // argument, with self second.
+    GuestAddr method = c.cpu.stubContext();
     const char *types = rt_.mem().cstr(rt_.mem().read<uint32_t>(method + kMethodTypes));
     const char *p = types;
     Type ret = parseType(p);
-    bool stret = ret.isStruct() && ret.guestSize() > 4;
-    GuestAddr receiver = c.cpu.reg(stret ? 1 : 0);
+    bool stret = guestReturnClass(ret) == ReturnClass::Memory;
+    GuestAddr receiver = c.cpu.arg(stret ? 1 : 0);
     hostDispatch(c, receiver, guestSel(sel), nullptr, stret, imp);
 }
 
-// The made-up IMP of a host method (see the top of this file): r12 holds its method_t.
+// The made-up IMP of a host method (see the top of this file): the stub left
+// its method_t in the stub context register.
 B32_THUNK(__b32_call_host_imp) {
     IMP imp;
     SEL sel;
-    if (!c.rt.bridge().hostMethodFor(c.cpu.reg(12), imp, sel)) fatal("host method stub called without its method");
+    if (!c.rt.bridge().hostMethodFor(c.cpu.stubContext(), imp, sel)) fatal("host method stub called without its method");
     c.rt.bridge().callHostImp(c, imp, sel);
 }
 
@@ -305,6 +302,14 @@ B32_THUNK(_object_getInstanceVariable) {
     if (out) c.mem.write<uint32_t>(out, ivar ? c.mem.read<uint32_t>(object + c.mem.read<uint32_t>(ivar->offsetVar)) : 0);
     c.ret(ivar ? ivar->entry : 0);
 }
+// Ivar object_setInstanceVariable(id, const char *name, void *value)
+B32_THUNK(_object_setInstanceVariable) {
+    GuestAddr object = c.args.ptr(), name = c.args.ptr(), value = c.args.ptr();
+    ClassInfo *cls = object ? bridge(c).classOf(object) : nullptr;
+    const GuestIvar *ivar = cls ? findIvar(cls, c.mem.cstr(name)) : nullptr;
+    if (ivar) c.mem.write<uint32_t>(object + c.mem.read<uint32_t>(ivar->offsetVar), value);
+    c.ret(ivar ? ivar->entry : 0);
+}
 B32_THUNK(_object_getIndexedIvars) {
     GuestAddr object = c.args.ptr();
     ClassInfo *cls = bridge(c).classOf(object);
@@ -331,6 +336,19 @@ B32_THUNK(_objc_copyClassNamesForImage) {
 
 // Protocols and properties the guest adds at run time only matter to code
 // that asks about them again; they're accepted.
+// Class objc_allocateClassPair(Class superclass, const char *name, size_t extraBytes)
+B32_THUNK(_objc_allocateClassPair) {
+    ClassInfo *super = classArg(c);
+    c.ret(bridge(c).allocateClassPair(super, c.mem.cstr(c.args.ptr())));
+}
+B32_THUNK(_objc_registerClassPair) {}
+// BOOL class_addIvar(Class, const char *name, size_t size, uint8_t alignment, const char *types)
+B32_THUNK(_class_addIvar) {
+    ClassInfo *cls = classArg(c);
+    std::string name = c.mem.cstr(c.args.ptr());
+    uint32_t size = c.args.u32(), align = c.args.u32() & 0xFF;
+    c.ret(cls && bridge(c).addIvar(cls, name, size, align, c.mem.cstr(c.args.ptr())) ? 1 : 0);
+}
 B32_THUNK(_class_addProtocol) { c.ret(1); }
 B32_THUNK(_class_addProperty) { c.ret(1); }
 // objc_property_t class_getProperty(Class, const char *name): a guest class's
@@ -360,7 +378,7 @@ B32_THUNK(_class_getProperty) {
             c.ret(p);
             return;
         }
-        GuestAddr ro = c.mem.read<uint32_t>(k->addr + 16) & ~3u;
+        GuestAddr ro = k->ro;
         if (GuestAddr list = c.mem.read<uint32_t>(ro + 36)) {
             uint32_t entsize = c.mem.read<uint32_t>(list) & ~3u, count = c.mem.read<uint32_t>(list + 4);
             for (uint32_t i = 0; i < count; i++) {
@@ -505,7 +523,7 @@ B32_THUNK(_class_copyPropertyList) {
     GuestAddr outCount = c.args.ptr();
     std::vector<GuestAddr> properties;
     if (cls && cls->isGuest) {
-        GuestAddr ro = c.mem.read<uint32_t>(cls->addr + 16) & ~3u;
+        GuestAddr ro = cls->ro;
         if (GuestAddr list = c.mem.read<uint32_t>(ro + 36)) {
             uint32_t entsize = c.mem.read<uint32_t>(list), count = c.mem.read<uint32_t>(list + 4);
             for (uint32_t i = 0; i < count; i++) properties.push_back(list + 8 + i * entsize);
@@ -540,7 +558,7 @@ uint32_t methodListOffset(bool required, bool instance) {
 // The protocol's own list of adopted protocols: { count, protocol_t *... }.
 std::vector<GuestAddr> adopted(Call &c, GuestAddr p) {
     std::vector<GuestAddr> result;
-    if (GuestAddr list = c.mem.read<uint32_t>(p + kProtoProtocols)) {
+    if (GuestAddr list = c.mem.read<uint32_t>(bridge(c).protocolData(p) + kProtoProtocols)) {
         uint32_t count = c.mem.read<uint32_t>(list);
         for (uint32_t i = 0; i < count; i++) result.push_back(c.mem.read<uint32_t>(list + 4 + i * 4));
     } else if (Protocol *host = objc_getProtocol(protocolName(c, p).c_str())) {
@@ -558,12 +576,13 @@ B32_THUNK(_objc_getProtocol) { c.ret(bridge(c).protocolNamed(c.mem.cstr(c.args.p
 // struct objc_method_description protocol_getMethodDescription(Protocol *, SEL, BOOL required,
 //     BOOL instance): { SEL name; char *types }, 8 bytes, returned through r0.
 B32_THUNK(_protocol_getMethodDescription) {
-    GuestAddr out = c.args.ptr(), p = c.args.ptr(), sel = c.args.u32();
+    StructResult out(c, 8);
+    GuestAddr p = c.args.ptr(), sel = c.args.u32();
     bool required = c.args.u32() != 0, instance = c.args.u32() != 0;
     c.mem.write<uint32_t>(out, 0);
     c.mem.write<uint32_t>(out + 4, 0);
     if (!p) return;
-    if (GuestAddr list = c.mem.read<uint32_t>(p + methodListOffset(required, instance))) {
+    if (GuestAddr list = c.mem.read<uint32_t>(bridge(c).protocolData(p) + methodListOffset(required, instance))) {
         uint32_t entsize = c.mem.read<uint32_t>(list) & ~3u, count = c.mem.read<uint32_t>(list + 4);
         for (uint32_t i = 0; i < count; i++) {
             GuestAddr m = list + 8 + i * entsize;
@@ -591,7 +610,7 @@ B32_THUNK(_protocol_copyMethodDescriptionList) {
     GuestAddr outCount = c.args.ptr();
     std::vector<std::pair<GuestAddr, GuestAddr>> descriptions;  // SEL, types
     if (p) {
-        if (GuestAddr list = c.mem.read<uint32_t>(p + methodListOffset(required, instance))) {
+        if (GuestAddr list = c.mem.read<uint32_t>(bridge(c).protocolData(p) + methodListOffset(required, instance))) {
             uint32_t entsize = c.mem.read<uint32_t>(list) & ~3u, count = c.mem.read<uint32_t>(list + 4);
             for (uint32_t i = 0; i < count; i++) {
                 GuestAddr m = list + 8 + i * entsize;

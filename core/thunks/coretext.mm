@@ -75,7 +75,7 @@ B32_THUNK(_CTFontGetDescent) { c.retF32(float(CTFontGetDescent(ref<CTFontRef>(c)
 // CGRect CTFontGetBoundingRectsForGlyphs(CTFontRef, CTFontOrientation, const CGGlyph *,
 //     CGRect *boundingRects, CFIndex count): the overall rect through r0.
 B32_THUNK(_CTFontGetBoundingRectsForGlyphs) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     auto font = ref<CTFontRef>(c);
     auto orientation = CTFontOrientation(c.args.u32());
     GuestAddr glyphs = c.args.ptr(), rects = c.args.ptr();
@@ -221,7 +221,7 @@ B32_THUNK(_CTFramesetterCreateFrame) {
 // CGSize CTFramesetterSuggestFrameSizeWithConstraints(CTFramesetterRef, CFRange,
 //     CFDictionaryRef, CGSize constraints, CFRange *fitRange): the size through r0.
 B32_THUNK(_CTFramesetterSuggestFrameSizeWithConstraints) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     auto framesetter = ref<CTFramesetterRef>(c);
     CFRange r = range(c);
     auto attributes = ref<CFDictionaryRef>(c);
@@ -271,7 +271,7 @@ B32_THUNK(_CTLineGetGlyphCount) { c.ret(uint32_t(CTLineGetGlyphCount(ref<CTLineR
 B32_THUNK(_CTLineGetGlyphRuns) { c.ret(guest(c, CTLineGetGlyphRuns(ref<CTLineRef>(c)))); }
 // CFRange CTLineGetStringRange(CTLineRef): through r0.
 B32_THUNK(_CTLineGetStringRange) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     writeRange(c, out, CTLineGetStringRange(ref<CTLineRef>(c)));
 }
 // double CTLineGetTypographicBounds(CTLineRef, CGFloat *ascent, CGFloat *descent, CGFloat *leading)
@@ -329,7 +329,7 @@ B32_THUNK(_CTRunGetPositions) {
     writePoints(c, out, points.data(), points.size());
 }
 B32_THUNK(_CTRunGetStringRange) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     writeRange(c, out, CTRunGetStringRange(ref<CTRunRef>(c)));
 }
 // double CTRunGetTypographicBounds(CTRunRef, CFRange, CGFloat *ascent, CGFloat *descent, CGFloat *leading)

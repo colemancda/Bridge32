@@ -19,6 +19,11 @@
 #
 # The guest's files go in Out.app/Contents/Resources, so the game's
 # NSBundle mainBundle, nibs and resources resolve as on the device.
+#
+# Given an i386 Mac app (Foo.app/Contents/...) instead, it wraps that into the
+# AppKit shell (build/i386/Bridge32.app, from -DB32_MAC=ON; the options above
+# don't apply): the app's Resources become the shell's, and its executable and
+# Frameworks go to Contents/B32Guest with their relative layout intact.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -40,6 +45,42 @@ while :; do
     esac
 done
 input=$1
+
+if [ -d "$input/Contents" ]; then
+    guest=${input%/}
+    shell_app="${B32_MAC_SHELL_APP:-$root/build/i386/Bridge32.app}"
+    [ -d "$shell_app" ] || { echo "build the AppKit shell first: cmake -S . -B build/i386 -DB32_GUEST_ARCH=i386 -DB32_MAC=ON" >&2; exit 1; }
+    executable=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$guest/Contents/Info.plist")
+    # A launcher script (TowerFall's starts a Mono kickstart binary) isn't what
+    # runs: its i386 Mach-O beside it is, from the same folder.
+    chdir_flag=""
+    if ! lipo -archs "$guest/Contents/MacOS/$executable" 2>/dev/null | grep -qw i386; then
+        for candidate in "$guest"/Contents/MacOS/*; do
+            [ -f "$candidate" ] && lipo -archs "$candidate" 2>/dev/null | grep -qw i386 || continue
+            executable=$(basename "$candidate")
+            chdir_flag=1
+            break
+        done
+    fi
+    name=$(basename "$guest" .app)
+    out=${2:-$root/build/apps/$name.app}
+    mkdir -p "$(dirname "$out")"
+    rm -rf "$out"
+    cp -R "$shell_app" "$out"
+    mkdir -p "$out/Contents/B32Guest/MacOS" "$out/Contents/Resources"
+    cp -R "$guest/Contents/MacOS/." "$out/Contents/B32Guest/MacOS/"
+    [ -d "$guest/Contents/Resources" ] && cp -R "$guest/Contents/Resources/." "$out/Contents/Resources/"
+    [ -d "$guest/Contents/Frameworks" ] && cp -R "$guest/Contents/Frameworks" "$out/Contents/B32Guest/Frameworks"
+    python3 -I "$here/merge-mac-plist.py" "$guest/Contents/Info.plist" "$root/app/mac/Info.plist" "$out/Contents/Info.plist" "$executable"
+    [ -n "$chdir_flag" ] && /usr/libexec/PlistBuddy -c "Add :B32GuestChdir bool true" "$out/Contents/Info.plist"
+    # codesign refuses a bundle with extended attributes, which old apps have.
+    xattr -cr "$out"
+    codesign --force --sign - "$out"
+    # Re-wrapping leaves LaunchServices remembering the old signature.
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$out"
+    echo "$out"
+    exit 0
+fi
 
 [ -d "$shell_app" ] || { echo "build the Catalyst shell first: cmake --build build/catalyst" >&2; exit 1; }
 

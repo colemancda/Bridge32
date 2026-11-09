@@ -96,7 +96,7 @@ void cThunk(Call &c) {
     Value values[16];
     void *slots[16];
     std::vector<const char *> strings;  // for 'S'
-    uint32_t firstArg = c.cpu.reg(0);
+    uint32_t firstArg = c.cpu.arg(0);
     for (size_t k = 0; k < p.args.size(); k++) {
         Value &v = values[k];
         uint32_t word = c.args.u32();

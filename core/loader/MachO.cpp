@@ -1,6 +1,7 @@
 #include "MachO.h"
 
 #include "core/Log.h"
+#include "core/arch/Arch.h"
 
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
@@ -32,7 +33,16 @@ std::vector<uint8_t> readFile(const std::string &path) {
 
 std::string fixedName(const char *name, size_t len) { return std::string(name, strnlen(name, len)); }
 
-// Picks the armv7 slice of a fat binary, falling back to armv6.
+#if defined(B32_GUEST_ARM)
+constexpr cpu_type_t kGuestCpuType = CPU_TYPE_ARM;
+// armv7 over armv6.
+int sliceRank(uint32_t subtype) { return subtype == CPU_SUBTYPE_ARM_V7 ? 2 : subtype == CPU_SUBTYPE_ARM_V6 ? 1 : 0; }
+#else
+constexpr cpu_type_t kGuestCpuType = CPU_TYPE_I386;
+int sliceRank(uint32_t) { return 1; }
+#endif
+
+// Picks the guest architecture's slice of a fat binary.
 std::pair<size_t, size_t> pickSlice(const std::vector<uint8_t> &file) {
     uint32_t magic;
     std::memcpy(&magic, file.data(), 4);
@@ -45,15 +55,14 @@ std::pair<size_t, size_t> pickSlice(const std::vector<uint8_t> &file) {
     for (uint32_t i = 0; i < count; i++) {
         fat_arch arch;
         std::memcpy(&arch, file.data() + sizeof header + i * sizeof arch, sizeof arch);
-        if (cpu_type_t(OSSwapBigToHostInt32(arch.cputype)) != CPU_TYPE_ARM) continue;
-        uint32_t subtype = OSSwapBigToHostInt32(arch.cpusubtype);
-        int rank = subtype == CPU_SUBTYPE_ARM_V7 ? 2 : subtype == CPU_SUBTYPE_ARM_V6 ? 1 : 0;
+        if (cpu_type_t(OSSwapBigToHostInt32(arch.cputype)) != kGuestCpuType) continue;
+        int rank = sliceRank(OSSwapBigToHostInt32(arch.cpusubtype));
         if (rank > bestRank) {
             bestRank = rank;
             best = {OSSwapBigToHostInt32(arch.offset), OSSwapBigToHostInt32(arch.size)};
         }
     }
-    if (bestRank < 0) fatal("fat binary has no 32-bit ARM slice");
+    if (bestRank < 0) fatal("fat binary has no %s slice", arch::name());
     return best;
 }
 
@@ -116,7 +125,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
 
     mach_header header;
     std::memcpy(&header, slice, sizeof header);
-    if (header.magic != MH_MAGIC || header.cputype != CPU_TYPE_ARM) fatal("%s is not a 32-bit ARM Mach-O", path.c_str());
+    if (header.magic != MH_MAGIC || header.cputype != kGuestCpuType) fatal("%s is not a %s Mach-O", path.c_str(), arch::name());
     if (header.filetype != MH_EXECUTE && header.filetype != MH_DYLIB)
         fatal("%s is not an executable or a dylib", path.c_str());
 
@@ -187,11 +196,18 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             break;
         }
         case LC_UNIXTHREAD: {
-            // thread_command, flavor, count, then arm_thread_state (r0-r12, sp, lr, pc, cpsr).
+            // thread_command, flavor, count, then the thread state.
+            const uint8_t *state = cmd + sizeof(thread_command) + 8;
+#if defined(B32_GUEST_ARM)
+            // arm_thread_state: r0-r12, sp, lr, pc, cpsr.
             uint32_t pc, cpsr;
-            std::memcpy(&pc, cmd + sizeof(thread_command) + 8 + 15 * 4, 4);
-            std::memcpy(&cpsr, cmd + sizeof(thread_command) + 8 + 16 * 4, 4);
+            std::memcpy(&pc, state + 15 * 4, 4);
+            std::memcpy(&cpsr, state + 16 * 4, 4);
             image.entry = pc | ((cpsr & (1u << 5)) ? 1 : 0);
+#else
+            // x86_thread_state32: eax ebx ecx edx edi esi ebp esp ss eflags eip ...
+            std::memcpy(&image.entry, state + 10 * 4, 4);
+#endif
             break;
         }
         case LC_ID_DYLIB: {
@@ -240,7 +256,10 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
         struct nlist sym;
         std::memcpy(&sym, slice + symtab.symoff + i * sizeof sym, sizeof sym);
         if ((sym.n_type & N_STAB) || (sym.n_type & N_TYPE) != N_SECT || !(sym.n_type & N_EXT)) continue;
-        GuestAddr addr = (sym.n_value + slide) | ((sym.n_desc & N_ARM_THUMB_DEF) ? 1 : 0);
+        GuestAddr addr = sym.n_value + slide;
+#if defined(B32_GUEST_ARM)
+        if (sym.n_desc & N_ARM_THUMB_DEF) addr |= 1;
+#endif
         defined.emplace(reinterpret_cast<const char *>(slice + symtab.stroff + sym.n_un.n_strx), addr);
     }
 
@@ -258,7 +277,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                 uint8_t imm = byte & REBASE_IMMEDIATE_MASK;
                 switch (byte & REBASE_OPCODE_MASK) {
                 case REBASE_OPCODE_DONE: p = end; break;
-                case REBASE_OPCODE_SET_TYPE_IMM: break;  // always pointers on arm
+                case REBASE_OPCODE_SET_TYPE_IMM: break;  // always pointers in 32-bit images
                 case REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
                     segIndex = imm;
                     segOffset = readUleb(p, end);
@@ -288,21 +307,25 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             for (uint32_t i = 0; i < dysymtab.nlocrel; i++) {
                 relocation_info rel;
                 std::memcpy(&rel, slice + dysymtab.locreloff + i * sizeof rel, sizeof rel);
+                // As dyld does: only 4-byte vanilla relocations move a pointer;
+                // absolute ones don't, and a prebound lazy pointer is bound below.
                 if (uint32_t(rel.r_address) & R_SCATTERED) {
                     scattered_relocation_info srel;
                     std::memcpy(&srel, &rel, sizeof srel);
-                    rebase(base + srel.r_address);
-                } else if (rel.r_length == 2) {
+                    if (srel.r_length == 2 && srel.r_type == GENERIC_RELOC_VANILLA) rebase(base + srel.r_address);
+                } else if (rel.r_length == 2 && rel.r_type == GENERIC_RELOC_VANILLA && rel.r_symbolnum != R_ABS) {
                     rebase(base + uint32_t(rel.r_address));
                 }
             }
         }
     }
 
-    auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
+    auto targetOf = [&](const std::string &symbol) {
         auto own = defined.find(symbol);
-        GuestAddr target = own != defined.end() ? own->second : resolve_(symbol);
-        mem_.write<uint32_t>(where, uint32_t(target + addend));
+        return own != defined.end() ? own->second : resolve_(symbol);
+    };
+    auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
+        mem_.write<uint32_t>(where, uint32_t(targetOf(symbol) + addend));
         image.bindCount++;
     };
 
@@ -318,6 +341,24 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                 section sect;
                 std::memcpy(&sect, sectCmd + sizeof seg + s * sizeof sect, sizeof sect);
                 uint32_t type = sect.flags & SECTION_TYPE;
+#if defined(B32_GUEST_I386)
+                // Mac OS X 10.4-era __IMPORT,__jump_table: five-byte entries of
+                // hlt that dyld overwrites with `jmp target`.
+                constexpr uint32_t kJumpTableEntry = 5;
+                if (type == S_SYMBOL_STUBS && (sect.flags & S_ATTR_SELF_MODIFYING_CODE) &&
+                    sect.reserved2 == kJumpTableEntry) {
+                    for (uint32_t k = 0; k < sect.size / kJumpTableEntry; k++) {
+                        uint32_t indirect;
+                        std::memcpy(&indirect, slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4, 4);
+                        if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
+                        GuestAddr entry = sect.addr + slide + k * kJumpTableEntry;
+                        mem_.write<uint8_t>(entry, 0xE9);
+                        mem_.write<uint32_t>(entry + 1, targetOf(symbolName(indirect)) - (entry + kJumpTableEntry));
+                        image.bindCount++;
+                    }
+                    continue;
+                }
+#endif
                 if (type != S_NON_LAZY_SYMBOL_POINTERS && type != S_LAZY_SYMBOL_POINTERS) continue;
                 for (uint32_t k = 0; k < sect.size / 4; k++) {
                     uint32_t indirect;
@@ -371,7 +412,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                 symbol = reinterpret_cast<const char *>(p);
                 p += symbol.size() + 1;
                 break;
-            case BIND_OPCODE_SET_TYPE_IMM: break;  // always BIND_TYPE_POINTER on arm
+            case BIND_OPCODE_SET_TYPE_IMM: break;  // always BIND_TYPE_POINTER in 32-bit images
             case BIND_OPCODE_SET_ADDEND_SLEB: addend = readSleb(p, end); break;
             case BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB:
                 segIndex = imm;

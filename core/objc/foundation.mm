@@ -14,7 +14,10 @@
 #import <Foundation/Foundation.h>
 #include <simd/simd.h>
 #import <QuartzCore/QuartzCore.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_MACCATALYST
 #import <UIKit/UIKit.h>
+#endif
 
 #include <cstring>
 
@@ -45,8 +48,13 @@ B32_THUNK(_NSGetUncaughtExceptionHandler) { c.ret(exceptionHandler); }
 
 B32_THUNK(_NSHomeDirectory) { c.ret(bridge(c).toGuest(NSHomeDirectory())); }
 B32_THUNK(_NSTemporaryDirectory) { c.ret(bridge(c).toGuest(NSTemporaryDirectory())); }
+#if TARGET_OS_MACCATALYST
 B32_THUNK(_NSUserName) { c.ret(bridge(c).toGuest(@"mobile")); }  // the iOS user
 B32_THUNK(_NSFullUserName) { c.ret(bridge(c).toGuest(@"Mobile User")); }
+#else
+B32_THUNK(_NSUserName) { c.ret(bridge(c).toGuest(NSUserName())); }
+B32_THUNK(_NSFullUserName) { c.ret(bridge(c).toGuest(NSFullUserName())); }
+#endif
 B32_THUNK(_NSOpenStepRootDirectory) { c.ret(bridge(c).toGuest(NSOpenStepRootDirectory())); }
 
 B32_THUNK(_NSLogv) {
@@ -56,6 +64,7 @@ B32_THUNK(_NSLogv) {
     NSLog(@"%s", s.c_str());
 }
 
+#if TARGET_OS_MACCATALYST  // UIKit's string functions
 B32_THUNK(_NSStringFromCGRect) { c.ret(bridge(c).toGuest(NSStringFromCGRect(guestRect(c)))); }
 B32_THUNK(_NSStringFromCGSize) {
     float w = c.args.f32();
@@ -67,35 +76,37 @@ B32_THUNK(_NSStringFromCGPoint) {
 }
 // CGRect CGRectFromString(NSString *): 16 bytes, returned through r0.
 B32_THUNK(_CGRectFromString) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     writeRect(c, out, CGRectFromString(bridge(c).toHost(c.args.ptr())));
 }
 // CGSize CGSizeFromString(NSString *): 8 bytes, returned through r0.
 B32_THUNK(_CGSizeFromString) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     CGSize size = CGSizeFromString(bridge(c).toHost(c.args.ptr()));
     c.mem.write<float>(out, float(size.width));
     c.mem.write<float>(out + 4, float(size.height));
 }
 // CGPoint CGPointFromString(NSString *): 8 bytes, returned through r0.
 B32_THUNK(_CGPointFromString) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     CGPoint point = CGPointFromString(bridge(c).toHost(c.args.ptr()));
     c.mem.write<float>(out, float(point.x));
     c.mem.write<float>(out + 4, float(point.y));
 }
 
+#endif
+
 // NSRange NSIntersectionRange(NSRange, NSRange): each NSRange is two words; the
 // 8-byte result goes through r0.
 B32_THUNK(_NSIntersectionRange) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     NSUInteger l1 = c.args.u32(), n1 = c.args.u32(), l2 = c.args.u32(), n2 = c.args.u32();
     NSRange r = NSIntersectionRange(NSMakeRange(l1, n1), NSMakeRange(l2, n2));
     c.mem.write<uint32_t>(out, uint32_t(r.location));
     c.mem.write<uint32_t>(out + 4, uint32_t(r.length));
 }
 B32_THUNK(_NSUnionRange) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     NSUInteger l1 = c.args.u32(), n1 = c.args.u32(), l2 = c.args.u32(), n2 = c.args.u32();
     NSRange r = NSUnionRange(NSMakeRange(l1, n1), NSMakeRange(l2, n2));
     c.mem.write<uint32_t>(out, uint32_t(r.location));
@@ -132,6 +143,7 @@ B32_THUNK(_NSVersionOfLinkTimeLibrary) { c.ret(uint32_t(-1)); }
 
 B32_THUNK(_CACurrentMediaTime) { c.retF64(CACurrentMediaTime()); }
 
+#if TARGET_OS_MACCATALYST
 B32_THUNK(_UIRectFill) { UIRectFill(guestRect(c)); }
 B32_THUNK(_UIRectFillUsingBlendMode) {
     CGRect r = guestRect(c);
@@ -140,15 +152,24 @@ B32_THUNK(_UIRectFillUsingBlendMode) {
 B32_THUNK(_UIRectFrame) { UIRectFrame(guestRect(c)); }
 B32_THUNK(_UIGraphicsPushContext) { UIGraphicsPushContext((CGContextRef)bridge(c).toHost(c.args.ptr())); }
 B32_THUNK(_UIGraphicsPopContext) { UIGraphicsPopContext(); }
+#endif
 
 // --- value constants ------------------------------------------------------------------------------
 
 // iOS 6.1's.
+#if TARGET_OS_MACCATALYST
 B32_DATA(_NSFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 993.0); }
 B32_DATA(_kCFCoreFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 793.0); }
+#else
+// Mac OS X 10.14's, the newest a 32-bit app ever saw.
+B32_DATA(_NSFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 1575.0); }
+B32_DATA(_kCFCoreFoundationVersionNumber, 8) { rt.mem().write<double>(addr, 1575.0); }
+#endif
 B32_DATA(_kCFAbsoluteTimeIntervalSince1970, 8) { rt.mem().write<double>(addr, kCFAbsoluteTimeIntervalSince1970); }
 
+#if TARGET_OS_MACCATALYST
 B32_DATA(_UIBackgroundTaskInvalid, 4) {}
+#endif
 B32_DATA(_CGRectNull, 16) {
     const float null[4] = {INFINITY, INFINITY, 0, 0};
     rt.mem().copyIn(addr, null, sizeof null);
@@ -174,6 +195,7 @@ B32_DATA(_kCFTypeDictionaryKeyCallBacks, 24) {}
 B32_DATA(_kCFTypeDictionaryValueCallBacks, 20) {}
 B32_DATA(_kCFCopyStringDictionaryKeyCallBacks, 24) {}
 
+#if TARGET_OS_MACCATALYST
 // CGFloat constants: floats in the guest.
 B32_DATA(_UIScrollViewDecelerationRateFast, 4) { rt.mem().write<float>(addr, float(UIScrollViewDecelerationRateFast)); }
 B32_DATA(_UIScrollViewDecelerationRateNormal, 4) { rt.mem().write<float>(addr, float(UIScrollViewDecelerationRateNormal)); }
@@ -181,10 +203,12 @@ B32_DATA(_UIWindowLevelStatusBar, 4) { rt.mem().write<float>(addr, float(UIWindo
 B32_DATA(_UIWindowLevelAlert, 4) { rt.mem().write<float>(addr, float(UIWindowLevelAlert)); }
 B32_DATA(_UIWindowLevelNormal, 4) { rt.mem().write<float>(addr, float(UIWindowLevelNormal)); }
 
+#endif
+
 // CATransform3D CATransform3DMakeTranslation(CGFloat tx, CGFloat ty, CGFloat tz):
 // sixteen CGFloats, returned through r0.
 B32_THUNK(_CATransform3DMakeTranslation) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     float tx = c.args.f32(), ty = c.args.f32(), tz = c.args.f32();
     CATransform3D t = CATransform3DMakeTranslation(tx, ty, tz);
     const CGFloat *v = &t.m11;
@@ -214,7 +238,7 @@ B32_DATA(_GLKMatrix3Identity, 36) {
 // column-major floats by value in argument words, the result through r0. A
 // matrix that can't be inverted gives the identity, as GLKit's does.
 B32_THUNK(_GLKMatrix4Invert) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     simd_float4x4 m;
     float *f = reinterpret_cast<float *>(&m);
     for (int i = 0; i < 16; i++) f[i] = c.args.f32();
@@ -225,7 +249,7 @@ B32_THUNK(_GLKMatrix4Invert) {
     c.mem.copyIn(out, &result, 64);
 }
 B32_THUNK(_GLKMatrix3Invert) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 36);
     float in[9];
     for (float &v : in) v = c.args.f32();
     GuestAddr invertibleOut = c.args.ptr();
@@ -240,7 +264,7 @@ B32_THUNK(_GLKMatrix3Invert) {
 
 // CATransform3D CATransform3DMakeScale(CGFloat sx, CGFloat sy, CGFloat sz): through r0.
 B32_THUNK(_CATransform3DMakeScale) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     float sx = c.args.f32(), sy = c.args.f32(), sz = c.args.f32();
     CATransform3D t = CATransform3DMakeScale(sx, sy, sz);
     const CGFloat *v = &t.m11;
@@ -268,13 +292,13 @@ B32_DATA(_CATransform3DIdentity, 64) {
 }
 // CATransform3D CATransform3DMakeRotation(CGFloat angle, CGFloat x, CGFloat y, CGFloat z)
 B32_THUNK(_CATransform3DMakeRotation) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     float angle = c.args.f32(), x = c.args.f32(), y = c.args.f32();
     returnTransform(c, out, CATransform3DMakeRotation(angle, x, y, c.args.f32()));
 }
 // CATransform3D CATransform3DMakeAffineTransform(CGAffineTransform): six floats by value.
 B32_THUNK(_CATransform3DMakeAffineTransform) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     CGAffineTransform m;
     m.a = c.args.f32(), m.b = c.args.f32(), m.c = c.args.f32(), m.d = c.args.f32();
     m.tx = c.args.f32(), m.ty = c.args.f32();
@@ -282,31 +306,31 @@ B32_THUNK(_CATransform3DMakeAffineTransform) {
 }
 // CATransform3D CATransform3DScale/Translate(CATransform3D, CGFloat, CGFloat, CGFloat)
 B32_THUNK(_CATransform3DScale) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     CATransform3D t = transformArg(c);
     float sx = c.args.f32(), sy = c.args.f32();
     returnTransform(c, out, CATransform3DScale(t, sx, sy, c.args.f32()));
 }
 B32_THUNK(_CATransform3DTranslate) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     CATransform3D t = transformArg(c);
     float tx = c.args.f32(), ty = c.args.f32();
     returnTransform(c, out, CATransform3DTranslate(t, tx, ty, c.args.f32()));
 }
 // CATransform3D CATransform3DRotate(CATransform3D, CGFloat angle, CGFloat x, CGFloat y, CGFloat z)
 B32_THUNK(_CATransform3DRotate) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     CATransform3D t = transformArg(c);
     float angle = c.args.f32(), x = c.args.f32(), y = c.args.f32();
     returnTransform(c, out, CATransform3DRotate(t, angle, x, y, c.args.f32()));
 }
 B32_THUNK(_CATransform3DConcat) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     CATransform3D a = transformArg(c);
     returnTransform(c, out, CATransform3DConcat(a, transformArg(c)));
 }
 B32_THUNK(_CATransform3DInvert) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 64);
     returnTransform(c, out, CATransform3DInvert(transformArg(c)));
 }
 B32_THUNK(_CATransform3DIsIdentity) { c.ret(CATransform3DIsIdentity(transformArg(c))); }
@@ -318,7 +342,7 @@ B32_THUNK(_CATransform3DEqualToTransform) {
 // CLLocationCoordinate2D { double latitude, longitude }: the same 16 bytes on
 // both sides, by value in four words and returned through r0.
 B32_THUNK(_CLLocationCoordinate2DMake) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     double latitude = c.args.f64();
     CLLocationCoordinate2D coordinate = CLLocationCoordinate2DMake(latitude, c.args.f64());
     c.mem.copyIn(out, &coordinate, sizeof coordinate);
@@ -348,33 +372,33 @@ void returnTime(Call &c, GuestAddr out, CMTime t) { c.mem.copyIn(out, &t, sizeof
 }  // namespace
 
 B32_THUNK(_CMTimeMake) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     int64_t value = int64_t(c.args.u64());
     returnTime(c, out, CMTimeMake(value, c.args.i32()));
 }
 B32_THUNK(_CMTimeMakeWithSeconds) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     double seconds = c.args.f64();
     returnTime(c, out, CMTimeMakeWithSeconds(seconds, c.args.i32()));
 }
 B32_THUNK(_CMTimeGetSeconds) { c.retF64(CMTimeGetSeconds(cmtime(c))); }
 B32_THUNK(_CMTimeAdd) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CMTime a = cmtime(c);
     returnTime(c, out, CMTimeAdd(a, cmtime(c)));
 }
 B32_THUNK(_CMTimeSubtract) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CMTime a = cmtime(c);
     returnTime(c, out, CMTimeSubtract(a, cmtime(c)));
 }
 B32_THUNK(_CMTimeMaximum) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CMTime a = cmtime(c);
     returnTime(c, out, CMTimeMaximum(a, cmtime(c)));
 }
 B32_THUNK(_CMTimeMultiply) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CMTime a = cmtime(c);
     returnTime(c, out, CMTimeMultiply(a, c.args.i32()));
 }

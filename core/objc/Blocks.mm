@@ -96,7 +96,8 @@ std::string guestSignature(GuestAddr block) {
 }
 
 bool isGeometry(const std::string &name) {
-    return name.rfind("CG", 0) == 0 || name.rfind("UIEdgeInsets", 0) == 0 || name.rfind("UIOffset", 0) == 0;
+    return name.rfind("CG", 0) == 0 || name.rfind("UIEdgeInsets", 0) == 0 || name.rfind("UIOffset", 0) == 0 ||
+           name == "_NSPoint" || name == "_NSSize" || name == "_NSRect";
 }
 
 // Guest encodings describe 32-bit types: a float is CGFloat as often as not
@@ -132,7 +133,7 @@ void invokeGuest(ffi_cif *, void *ret, void **args, void *user) {
 
     std::vector<uint32_t> words;
     uint32_t retSize = sig.ret.guestSize();
-    bool guestStret = sig.ret.isStruct() && retSize > 4;
+    bool guestStret = guestReturnClass(sig.ret) == ReturnClass::Memory;
     GuestAddr retBuf = guestStret ? rt.heap().alloc(retSize) : 0;
     if (guestStret) words.push_back(retBuf);
     words.push_back(block->guest);
@@ -177,7 +178,7 @@ void invokeGuest(ffi_cif *, void *ret, void **args, void *user) {
         std::memcpy(guest, rt.mem().ptr<uint8_t>(retBuf), retSize);
         rt.heap().free(retBuf);
     } else {
-        std::memcpy(guest, &r, 8);
+        b.resultFromGuest(cpu, rt_, r, guest);
     }
     alignas(16) uint8_t host[256] = {};
     b.toHostValue(rt_, guest, host);
@@ -466,8 +467,8 @@ B32_THUNK(__Block_object_dispose) {
 // converts the guest arguments by the host block's own signature and calls it.
 B32_THUNK(__b32_invoke_host_block) {
     Bridge &b = c.rt.bridge();
-    // A block returning a large struct takes the result pointer in r0.
-    bool stret = !hostBlockForWrapper(c.cpu.reg(0));
+    // A block returning a large struct takes the result pointer as its first argument.
+    bool stret = !hostBlockForWrapper(c.cpu.arg(0));
     GuestAddr retPtr = stret ? c.args.ptr() : 0;
     void *host = hostBlockForWrapper(c.args.ptr());
     if (!host) fatal("host block thunk called without its block");
@@ -516,23 +517,5 @@ B32_THUNK(__b32_invoke_host_block) {
     if (r.code == 'v') return;
     alignas(8) uint8_t guest[256] = {};
     b.toGuestValue(r, result, guest);
-    uint32_t size = r.guestSize();
-    if (r.isStruct() && size > 4) {
-        if (retPtr) c.mem.copyIn(retPtr, guest, size);
-        return;
-    }
-    uint32_t lo;
-    switch (r.code) {
-    case 'c': lo = uint32_t(int32_t(int8_t(guest[0]))); break;
-    case 's': lo = uint32_t(int32_t(int16_t(guest[0] | guest[1] << 8))); break;
-    case 'C': case 'B': lo = guest[0]; break;
-    case 'S': lo = uint32_t(guest[0] | guest[1] << 8); break;
-    default: std::memcpy(&lo, guest, 4); break;
-    }
-    c.cpu.setReg(0, lo);
-    if (size > 4) {
-        uint32_t hi;
-        std::memcpy(&hi, guest + 4, 4);
-        c.cpu.setReg(1, hi);
-    }
+    b.returnToGuest(c, r, guest, retPtr);
 }

@@ -135,7 +135,7 @@ B32_THUNK(_objc_retainAutoreleaseReturnValue) {
     c.ret(object);
 }
 
-B32_THUNK(_objc_terminate) { fatal("guest called objc_terminate (uncaught exception) from 0x%08x", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(_objc_terminate) { fatal("guest called objc_terminate (uncaught exception) from 0x%08x", c.cpu.returnAddress()); }
 
 // --- associated objects ------------------------------------------------------------------------
 // Keys are guest addresses. The bridge keeps its own associated object on

@@ -272,7 +272,7 @@ const bool traceLocks = getenv("B32_TRACE_LOCKS") != nullptr;
 
 B32_THUNK(_pthread_mutex_lock) {
     GuestAddr m = c.args.ptr();
-    if (traceLocks) log("lock 0x%08x from 0x%08x (thread %p)", m, c.cpu.reg(Cpu::LR), (void *)pthread_self());
+    if (traceLocks) log("lock 0x%08x from 0x%08x (thread %p)", m, c.cpu.returnAddress(), (void *)pthread_self());
     mutexAt(c, m).lock();
     if (traceLocks) log("locked 0x%08x (thread %p)", m, (void *)pthread_self());
     c.ret(0);
@@ -280,7 +280,7 @@ B32_THUNK(_pthread_mutex_lock) {
 B32_THUNK(_pthread_mutex_trylock) { c.ret(mutexAt(c, c.args.ptr()).try_lock() ? 0 : EBUSY); }
 B32_THUNK(_pthread_mutex_unlock) {
     GuestAddr m = c.args.ptr();
-    if (traceLocks) log("unlock 0x%08x from 0x%08x (thread %p)", m, c.cpu.reg(Cpu::LR), (void *)pthread_self());
+    if (traceLocks) log("unlock 0x%08x from 0x%08x (thread %p)", m, c.cpu.returnAddress(), (void *)pthread_self());
     mutexAt(c, m).unlock();
     c.ret(0);
 }
@@ -349,7 +349,7 @@ B32_THUNK(_pthread_cond_timedwait_relative_np) {
 // guest stack. Every guest stack is one kStackSize slot from kStackBase.
 B32_THUNK(_pthread_get_stackaddr_np) {
     c.args.u32();
-    GuestAddr sp = c.cpu.reg(Cpu::SP);
+    GuestAddr sp = c.cpu.sp();
     GuestAddr slot = (sp - layout::kStackBase) / layout::kStackSize;
     c.ret(layout::kStackBase + (slot + 1) * layout::kStackSize);
 }

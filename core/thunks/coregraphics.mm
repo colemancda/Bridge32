@@ -98,33 +98,33 @@ void retRect(Call &c, GuestAddr out, CGRect r) {
 }  // namespace
 
 B32_THUNK(_CGRectInset) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     CGRect r = rect(c);
     CGFloat dx = cgf(c);
     retRect(c, out, CGRectInset(r, dx, cgf(c)));
 }
 B32_THUNK(_CGRectOffset) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     CGRect r = rect(c);
     CGFloat dx = cgf(c);
     retRect(c, out, CGRectOffset(r, dx, cgf(c)));
 }
 B32_THUNK(_CGRectIntersection) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     CGRect a = rect(c);
     retRect(c, out, CGRectIntersection(a, rect(c)));
 }
 B32_THUNK(_CGRectUnion) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     CGRect a = rect(c);
     retRect(c, out, CGRectUnion(a, rect(c)));
 }
 B32_THUNK(_CGRectStandardize) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     retRect(c, out, CGRectStandardize(rect(c)));
 }
 B32_THUNK(_CGRectIntegral) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     retRect(c, out, CGRectIntegral(rect(c)));
 }
 B32_THUNK(_CGRectContainsPoint) {
@@ -272,43 +272,43 @@ B32_DATA(_CGAffineTransformIdentity, 24) {
 }
 
 B32_THUNK(_CGAffineTransformMakeRotation) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     writeTransform(c, out, CGAffineTransformMakeRotation(cgf(c)));
 }
 B32_THUNK(_CGAffineTransformMakeScale) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CGFloat x = cgf(c);
     writeTransform(c, out, CGAffineTransformMakeScale(x, cgf(c)));
 }
 B32_THUNK(_CGAffineTransformMakeTranslation) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CGFloat x = cgf(c);
     writeTransform(c, out, CGAffineTransformMakeTranslation(x, cgf(c)));
 }
 B32_THUNK(_CGAffineTransformRotate) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CGAffineTransform t = transform(c);
     writeTransform(c, out, CGAffineTransformRotate(t, cgf(c)));
 }
 B32_THUNK(_CGAffineTransformScale) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CGAffineTransform t = transform(c);
     CGFloat x = cgf(c);
     writeTransform(c, out, CGAffineTransformScale(t, x, cgf(c)));
 }
 B32_THUNK(_CGAffineTransformTranslate) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CGAffineTransform t = transform(c);
     CGFloat x = cgf(c);
     writeTransform(c, out, CGAffineTransformTranslate(t, x, cgf(c)));
 }
 B32_THUNK(_CGAffineTransformConcat) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     CGAffineTransform a = transform(c);
     writeTransform(c, out, CGAffineTransformConcat(a, transform(c)));
 }
 B32_THUNK(_CGAffineTransformInvert) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     writeTransform(c, out, CGAffineTransformInvert(transform(c)));
 }
 
@@ -476,7 +476,7 @@ B32_THUNK(_CGContextSetTextPosition) {
 }
 // CGPoint CGContextGetTextPosition(CGContextRef), returned through r0
 B32_THUNK(_CGContextGetTextPosition) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     CGPoint at = CGContextGetTextPosition(ref<CGContextRef>(c));
     c.mem.write<float>(out, float(at.x));
     c.mem.write<float>(out + 4, float(at.y));
@@ -596,7 +596,7 @@ B32_THUNK(_CGImageCreateWithImageInRect) {
 
 // CGRect CGRectApplyAffineTransform(CGRect, CGAffineTransform): through r0.
 B32_THUNK(_CGRectApplyAffineTransform) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     CGRect r = rect(c);
     CGRect result = CGRectApplyAffineTransform(r, transform(c));
     const float v[4] = {float(result.origin.x), float(result.origin.y), float(result.size.width), float(result.size.height)};
@@ -894,7 +894,7 @@ B32_THUNK(_CGImageMaskCreate) {
 
 // CGAffineTransform CATransform3DGetAffineTransform(CATransform3D): sixteen floats in, six out through r0.
 B32_THUNK(_CATransform3DGetAffineTransform) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     float m[16];
     for (float &v : m) v = c.args.f32();
     // m11 m12 . . / m21 m22 . . / . . . . / m41 m42 . .
@@ -948,29 +948,29 @@ void writeRectTo(Call &c, GuestAddr out, CGRect r) {
 
 // CGAffineTransform CGContextGetCTM(CGContextRef) and the bounding boxes: through r0.
 B32_THUNK(_CGContextGetCTM) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 24);
     writeTransform(c, out, CGContextGetCTM(ref<CGContextRef>(c)));
 }
 B32_THUNK(_CGContextGetClipBoundingBox) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     writeRectTo(c, out, CGContextGetClipBoundingBox(ref<CGContextRef>(c)));
 }
 B32_THUNK(_CGContextGetPathBoundingBox) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     writeRectTo(c, out, CGContextGetPathBoundingBox(ref<CGContextRef>(c)));
 }
 // CGRect CGPathGetBoundingBox(CGPathRef), CGPathGetPathBoundingBox(CGPathRef) and
 // CGPDFPageGetBoxRect(CGPDFPageRef, CGPDFBox): through r0.
 B32_THUNK(_CGPathGetBoundingBox) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     writeRectTo(c, out, CGPathGetBoundingBox(ref<CGPathRef>(c)));
 }
 B32_THUNK(_CGPathGetPathBoundingBox) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     writeRectTo(c, out, CGPathGetPathBoundingBox(ref<CGPathRef>(c)));
 }
 B32_THUNK(_CGPDFPageGetBoxRect) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 16);
     auto page = ref<CGPDFPageRef>(c);
     writeRectTo(c, out, CGPDFPageGetBoxRect(page, CGPDFBox(c.args.i32())));
 }
@@ -1015,7 +1015,7 @@ B32_THUNK(_CGPathAddQuadCurveToPoint) {
 }
 // CGPoint CGPathGetCurrentPoint(CGPathRef): through r0.
 B32_THUNK(_CGPathGetCurrentPoint) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     CGPoint at = CGPathGetCurrentPoint(ref<CGPathRef>(c));
     c.mem.write<float>(out, float(at.x));
     c.mem.write<float>(out + 4, float(at.y));
@@ -1048,7 +1048,7 @@ B32_THUNK(_CFStringFindCharacterFromSet) {
 }
 // CFRange CFStringGetRangeOfComposedCharactersAtIndex(CFStringRef, CFIndex): through r0.
 B32_THUNK(_CFStringGetRangeOfComposedCharactersAtIndex) {
-    GuestAddr out = c.args.ptr();
+    StructResult out(c, 8);
     auto string = ref<CFStringRef>(c);
     CFRange r = CFStringGetRangeOfComposedCharactersAtIndex(string, c.args.i32());
     c.mem.write<int32_t>(out, int32_t(r.location));
