@@ -16,6 +16,7 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
+#include <cctype>
 #include <unordered_set>
 
 using namespace b32;
@@ -141,6 +142,25 @@ bool Bridge::isShadowClass(Class c) {
     auto it = byHostClass_.find(c);
     return it != byHostClass_.end() && it->second->isGuest;
 }
+
+#if defined(B32_GUEST_I386)
+namespace {
+// AppKit connects a nib's outlet through a setter or a real ivar, and never
+// asks KVC, so an outlet that's only a guest ivar gets a made-up setter on the
+// shadow class. As on the Mac, it doesn't retain: the nib owns its objects.
+void shadowOutletSetter(id self, SEL _cmd, id value) {
+    Bridge &bridge = *Bridge::shared();
+    std::string name = sel_getName(_cmd);  // "setWindow:"
+    std::string key = name.substr(3, name.size() - 4);
+    key[0] = char(std::tolower(key[0]));
+    GuestAddr guestSelf = bridge.toGuest(self);
+    if (const GuestIvar *ivar = bridge.ivarForKey(bridge.classOf(guestSelf), key)) {
+        GuestMemory &mem = bridge.runtime().mem();
+        mem.write<uint32_t>(guestSelf + mem.read<uint32_t>(ivar->offsetVar), bridge.toGuest(value));
+    }
+}
+}  // namespace
+#endif
 
 const GuestIvar *Bridge::ivarForKey(ClassInfo *cls, const std::string &key) {
     for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
@@ -374,6 +394,14 @@ ClassInfo *Bridge::classOf(GuestAddr object) {
     GuestAddr isa = rt_.mem().read<uint32_t>(object);
     if (isa == cfstringIsa_) return stubForName("NSString");
     return classInfo(isa);
+}
+
+bool Bridge::hostClassChanged(GuestAddr object, ClassInfo *cls) {
+    std::lock_guard guard(lock_);
+    auto it = handleByGuest_.find(object);
+    if (it == handleByGuest_.end()) return false;
+    id host = handleObjects_[it->second];
+    return host && object_getClass(host) != cls->host;
 }
 
 void Bridge::setupImage(const Image &image) {
@@ -667,6 +695,16 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr ro) {
         if (selName(sel) != std::string("initialize")) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
     if (cls->methods.count(guestSel("forwardInvocation:")) && !cls->methods.count(guestSel("methodSignatureForSelector:")))
         class_addMethod(shadow, @selector(methodSignatureForSelector:), reinterpret_cast<IMP>(shadowMethodSignature), "@@::");
+#if defined(B32_GUEST_I386)
+    for (const GuestIvar &ivar : cls->ivars) {
+        if (ivar.type.empty() || ivar.type[0] != '@') continue;
+        std::string key = ivar.name[0] == '_' ? ivar.name.substr(1) : ivar.name;
+        if (key.empty()) continue;
+        key[0] = char(std::toupper(key[0]));
+        SEL setter = sel_registerName(("set" + key + ":").c_str());
+        if (!class_getInstanceMethod(shadow, setter)) class_addMethod(shadow, setter, reinterpret_cast<IMP>(shadowOutletSetter), "v@:@");
+    }
+#endif
     // Subclasses of guest classes inherit this from their guest superclass.
     if ((!super || !super->isGuest) && !cls->methods.count(guestSel("setValue:forUndefinedKey:")))
         class_addMethod(shadow, @selector(setValue:forUndefinedKey:), reinterpret_cast<IMP>(shadowSetValueForUndefinedKey),
@@ -781,7 +819,7 @@ std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const 
             std::string sname = guestTypes.substr(i + 1, end - i - 1);
             bool isGeometry = sname == "CGPoint" || sname == "CGSize" || sname == "CGRect" ||
                               sname == "CGAffineTransform" || sname == "UIEdgeInsets" || sname == "CGVector" ||
-                              sname == "UIOffset";
+                              sname == "UIOffset" || sname == "_NSPoint" || sname == "_NSSize" || sname == "_NSRect";
             geometry.push_back(isGeometry || (!geometry.empty() && geometry.back()));
         } else if (ch == '}') {
             geometry.pop_back();
