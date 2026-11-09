@@ -1,5 +1,5 @@
 // POSIX and Mach odds and ends: files and directories, time, Mach timing and
-// semaphores, setjmp/longjmp, zlib and sscanf. Structures whose 32-bit
+// semaphores, zlib and sscanf (setjmp/longjmp are in core/arch). Structures whose 32-bit
 // layout differs from the host's (stat, statvfs, tm, z_stream) are converted
 // field by field.
 
@@ -382,52 +382,6 @@ B32_THUNK(_semaphore_destroy) {
 }
 B32_THUNK(_semaphore_signal) { c.ret(uint32_t(semaphore_signal(c.args.u32()))); }
 B32_THUNK(_semaphore_wait) { c.ret(uint32_t(semaphore_wait(c.args.u32()))); }
-
-// --- setjmp / longjmp -------------------------------------------------------------------------
-// The guest jmp_buf holds what we choose: r4-r11, sp, lr and d8-d15 (26
-// words; the buffer has room for 27). setjmp returns through the caller's lr
-// as usual; longjmp resumes at the saved lr with r0 = value.
-
-namespace {
-void saveContext(Call &c, GuestAddr buf) {
-    for (int r = 4; r <= 11; r++) c.mem.write<uint32_t>(buf + (r - 4) * 4, c.cpu.reg(r));
-    c.mem.write<uint32_t>(buf + 32, c.cpu.reg(Cpu::SP));
-    c.mem.write<uint32_t>(buf + 36, c.cpu.reg(Cpu::LR));
-    for (int s = 16; s < 32; s++) c.mem.write<uint32_t>(buf + 40 + (s - 16) * 4, c.cpu.extReg(s));
-}
-void restoreContext(Call &c, GuestAddr buf, uint32_t value) {
-    for (int r = 4; r <= 11; r++) c.cpu.setReg(r, c.mem.read<uint32_t>(buf + (r - 4) * 4));
-    c.cpu.setReg(Cpu::SP, c.mem.read<uint32_t>(buf + 32));
-    for (int s = 16; s < 32; s++) c.cpu.setExtReg(s, c.mem.read<uint32_t>(buf + 40 + (s - 16) * 4));
-    c.cpu.setReg(0, value ? value : 1);
-    c.cpu.jump(c.mem.read<uint32_t>(buf + 36));
-}
-}  // namespace
-
-B32_THUNK(_setjmp) {
-    saveContext(c, c.args.ptr());
-    c.ret(0);
-}
-B32_THUNK(__setjmp) {
-    saveContext(c, c.args.ptr());
-    c.ret(0);
-}
-B32_THUNK(_sigsetjmp) {
-    saveContext(c, c.args.ptr());
-    c.ret(0);
-}
-B32_THUNK(_longjmp) {
-    GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
-}
-B32_THUNK(__longjmp) {
-    GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
-}
-B32_THUNK(_siglongjmp) {
-    GuestAddr buf = c.args.ptr();
-    restoreContext(c, buf, c.args.u32());
-}
 
 // --- zlib ------------------------------------------------------------------------------------
 // Guest z_stream (32-bit): next_in 0, avail_in 4, total_in 8, next_out 12,
