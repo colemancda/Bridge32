@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <vector>
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -26,6 +27,9 @@ namespace {
 Bridge &bridge(Call &c) { return c.rt.bridge(); }
 void *process() { return RTLD_DEFAULT; }
 id object(Call &c) { return bridge(c).toHost(c.args.ptr()); }
+// An FSRef is 80 opaque bytes the guest only hands back to these calls, so the
+// host's can sit in guest memory whatever the byte order.
+FSRef *fsRef(Call &c, GuestAddr p) { return static_cast<FSRef *>(c.mem.ptr<void>(p)); }
 
 constexpr int32_t kNoErr = 0, kMemFullErr = -108;
 int32_t lastMemError = kNoErr;
@@ -60,7 +64,10 @@ B32_THUNK(_CFStringCreateMutableWithExternalCharactersNoCopy) {
     GuestAddr chars = c.args.ptr();
     int32_t length = c.args.i32();
     CFMutableStringRef string = CFStringCreateMutable(nullptr, 0);
-    if (chars && length > 0) CFStringAppendCharacters(string, c.mem.ptr<UniChar>(chars), length);
+    if (chars && length > 0) {
+        std::vector<UniChar> text = c.mem.readArray<UniChar>(chars, size_t(length));
+        CFStringAppendCharacters(string, text.data(), length);
+    }
     c.ret(bridge(c).toGuest((id)CFBridgingRelease(string)));
 }
 
@@ -73,11 +80,11 @@ B32_THUNK(_CFStringGetPascalString) {
 }
 B32_THUNK(_CFURLCreateFromFSRef) {
     c.args.ptr();
-    c.ret(bridge(c).toGuest((id)CFBridgingRelease(CFURLCreateFromFSRef(nullptr, c.mem.ptr<FSRef>(c.args.ptr())))));
+    c.ret(bridge(c).toGuest((id)CFBridgingRelease(CFURLCreateFromFSRef(nullptr, fsRef(c, c.args.ptr())))));
 }
 B32_THUNK(_CFURLGetFSRef) {
     NSURL *url = object(c);
-    c.ret(CFURLGetFSRef((CFURLRef)url, c.mem.ptr<FSRef>(c.args.ptr())));
+    c.ret(CFURLGetFSRef((CFURLRef)url, fsRef(c, c.args.ptr())));
 }
 // The allocator argument is a guest value the host can't use; the default is fine.
 B32_THUNK(_CFBundleCreate) {
@@ -97,36 +104,89 @@ B32_THUNK(_CFURLCreateCopyDeletingLastPathComponent) {
 // A bundle's functions are host code, which a guest can't call: 'no such function'.
 B32_THUNK(_CFBundleGetFunctionPointerForName) { c.ret(0); }
 
-// --- File Manager: FSRef and HFSUniStr255 are opaque and the same on both sides -----------
+// --- File Manager: FSRef is opaque and the same on both sides ------------------------------
+// The rest isn't for a big-endian guest: UTF-16 names, 64-bit outputs and the
+// catalog info structure, which have the host's byte order, get thunks of their
+// own below.
 
 namespace {
 const CFunction kFiles[] = {
     {"FSFindFolder", "i:iuup"},
     {"FSPathMakeRef", "i:ppp"},
     {"FSRefMakePath", "i:ppu"},
+    {"FSDeleteObject", "i:p"},
+    {"FSCloseFork", "i:i"},
+#if !defined(B32_GUEST_BIG_ENDIAN)
     {"FSGetCatalogInfo", "i:pupppp"},
     {"FSSetCatalogInfo", "i:pup"},
-    {"FSDeleteObject", "i:p"},
     {"FSGetDataForkName", "i:p"},
     {"FSMakeFSRefUnicode", "i:pzpup"},
     {"FSCreateFileUnicode", "i:pzpuppp"},
-    {"FSCloseFork", "i:i"},
     {"FSGetForkSize", "i:ip"},
     {"FSGetForkPosition", "i:ip"},
+#endif
 };
 }  // namespace
 B32_C_FUNCTIONS(kFiles, process);
 
+#if defined(B32_GUEST_BIG_ENDIAN)
+// OSErr FSGetDataForkName(HFSUniStr255 *): { UInt16 length; UniChar unicode[255] }
+B32_THUNK(_FSGetDataForkName) {
+    GuestAddr out = c.args.ptr();
+    HFSUniStr255 name;
+    OSErr error = FSGetDataForkName(&name);
+    c.mem.write<uint16_t>(out, name.length);
+    c.mem.writeArray<UniChar>(out + 2, name.unicode, name.length);
+    c.ret(uint32_t(int32_t(error)));
+}
+// OSErr FSMakeFSRefUnicode(const FSRef *parent, UniCharCount, const UniChar *, TextEncoding, FSRef *)
+B32_THUNK(_FSMakeFSRefUnicode) {
+    GuestAddr parent = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    TextEncoding hint = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
+    c.ret(uint32_t(int32_t(FSMakeFSRefUnicode(fsRef(c, parent), length, text.data(), hint, fsRef(c, out)))));
+}
+// OSErr FSCreateFileUnicode(parent, UniCharCount, name, whichInfo, const FSCatalogInfo *, FSRef *, FSSpec *):
+// the catalog info (dates, permissions) isn't converted, so the file gets the defaults.
+B32_THUNK(_FSCreateFileUnicode) {
+    GuestAddr parent = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    c.args.u32();
+    c.args.ptr();
+    GuestAddr out = c.args.ptr();
+    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
+    c.ret(uint32_t(int32_t(FSCreateFileUnicode(fsRef(c, parent), length, text.data(), 0, nullptr, out ? fsRef(c, out) : nullptr, nullptr))));
+}
+B32_THUNK(_FSGetForkSize) {
+    FSIORefNum number = c.args.i32();
+    SInt64 size = 0;
+    OSErr error = FSGetForkSize(number, &size);
+    c.mem.write<int64_t>(c.args.ptr(), size);
+    c.ret(uint32_t(int32_t(error)));
+}
+B32_THUNK(_FSGetForkPosition) {
+    FSIORefNum number = c.args.i32();
+    SInt64 position = 0;
+    OSErr error = FSGetForkPosition(number, &position);
+    c.mem.write<int64_t>(c.args.ptr(), position);
+    c.ret(uint32_t(int32_t(error)));
+}
+#endif
+
 // OSErr FSOpenFork(ref, nameLength, name, permissions, FSIORefNum *): the
 // reference number is 16 bits in the guest and 32 on the host.
 B32_THUNK(_FSOpenFork) {
-    const FSRef *ref = c.mem.ptr<FSRef>(c.args.ptr());
+    const FSRef *ref = fsRef(c, c.args.ptr());
     uint32_t nameLength = c.args.u32();
-    const UniChar *name = c.mem.ptr<UniChar>(c.args.ptr());
+    std::vector<UniChar> name = c.mem.readArray<UniChar>(c.args.ptr(), nameLength);
     SInt8 permissions = SInt8(c.args.u32());
     GuestAddr out = c.args.ptr();
     FSIORefNum number = 0;
-    OSErr error = FSOpenFork(ref, nameLength, name, permissions, &number);
+    OSErr error = FSOpenFork(ref, nameLength, name.data(), permissions, &number);
     if (out) c.mem.write<int16_t>(out, int16_t(number));
     c.ret(uint32_t(int32_t(error)));
 }
@@ -244,7 +304,7 @@ B32_THUNK(_GetTime) {
     localtime_r(&now, &t);
     const int16_t fields[7] = {int16_t(t.tm_year + 1900), int16_t(t.tm_mon + 1), int16_t(t.tm_mday), int16_t(t.tm_hour),
                                int16_t(t.tm_min), int16_t(t.tm_sec), int16_t(t.tm_wday + 1)};
-    c.mem.copyIn(out, fields, sizeof fields);
+    c.mem.writeArray<int16_t>(out, fields, 7);
 }
 
 // --- standard alerts: the one piece of Carbon UI games need to say what's wrong ------------
