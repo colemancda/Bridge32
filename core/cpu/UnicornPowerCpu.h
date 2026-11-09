@@ -29,6 +29,7 @@ public:
     // For the engine's hooks.
     bool mapAroundForHook(uint64_t address);
     void interrupted(uint32_t number) { interrupt_ = int(number); }
+    void haltForDump();  // for the SIGUSR1 debug dump (B32_DUMP_ON_SIGUSR1)
 
 protected:
     uint32_t runUntilSvc() override;
