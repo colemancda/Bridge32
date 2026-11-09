@@ -34,10 +34,21 @@ struct Type {
     size_t hostAlign() const;
     bool isStruct() const { return code == '{'; }
     bool isObject() const { return code == '@' || code == '#'; }
+    // The float or double this type is or wraps (a struct or one-element array
+    // around just that), or null.
+    const Type *singleFloatingField() const;
     // True when guest and host bytes are identical, so pointers to it can be
     // passed through without copying.
     bool sameLayout() const;
 };
+
+// Where the guest ABI puts a function's result of a given type.
+enum class ReturnClass {
+    Integer,   // the integer result registers (arm's soft-float values too)
+    Memory,    // through a hidden pointer in the first argument word
+    Floating,  // the FPU (x87's ST(0))
+};
+ReturnClass guestReturnClass(const Type &type);
 
 struct Signature {
     Type ret;
