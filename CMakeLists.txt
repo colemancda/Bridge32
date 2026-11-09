@@ -138,10 +138,11 @@ if(B32_GUEST_ARCH STREQUAL "arm")
     target_sources(b32core PRIVATE core/arch/arm/ArmCpu.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_ARM=1)
 elseif(B32_GUEST_ARCH STREQUAL "ppc")
-    # No guest Objective-C yet (the legacy runtime reader is i386's), and no
-    # wide strings; the Mac's libSystem and libstdc++ thunks are shared with the
-    # i386 guest. B32_GUEST_MAC is what both Mac guests have in common.
-    target_sources(b32core PRIVATE core/arch/ppc/PowerCpu.cpp core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
+    # No guest Objective-C yet (the legacy runtime reader is i386's), and none
+    # of the wide-character C++ (wstring, the locale facets): the Mac's
+    # libSystem and libstdc++ thunks are shared with the i386 guest otherwise.
+    # B32_GUEST_MAC is what both Mac guests have in common.
+    target_sources(b32core PRIVATE core/arch/ppc/PowerCpu.cpp core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_PPC=1 B32_GUEST_BIG_ENDIAN=1 B32_GUEST_MAC=1)
 else()
     target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_wstring.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
