@@ -171,6 +171,8 @@ constexpr uint32_t kArmBxLr = 0xE12FFF1E;
 
 const char *name() { return "armv7"; }
 
+GuestAddr nativeFunction(GuestMemory &, GuestHeap &, const std::string &) { return 0; }
+
 double longDouble(const uint32_t *words) {
     double value;
     std::memcpy(&value, words, sizeof value);
