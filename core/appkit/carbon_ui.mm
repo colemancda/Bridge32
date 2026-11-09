@@ -1254,6 +1254,67 @@ B32_THUNK(_RemoveEventLoopTimer) {
     c.ret(0);
 }
 
+// --- QuickDraw geometry and regions ---------------------------------------------------------
+
+// void SetRect(Rect *, short left, short top, short right, short bottom): a Rect is top, left, bottom, right.
+B32_THUNK(_SetRect) {
+    GuestAddr rect = c.args.ptr();
+    int16_t left = int16_t(c.args.u32()), top = int16_t(c.args.u32()), right = int16_t(c.args.u32()), bottom = int16_t(c.args.u32());
+    const int16_t fields[4] = {top, left, bottom, right};
+    c.mem.writeArray<int16_t>(rect, fields, 4);
+}
+// RgnHandle NewRgn(): a handle to { short rgnSize; Rect rgnBBox }, an empty rectangle.
+B32_THUNK(_NewRgn) {
+    GuestAddr handle = c.heap.calloc(1, 4), region = c.heap.calloc(1, 10);
+    c.mem.write<uint16_t>(region, 10);
+    c.mem.write<uint32_t>(handle, region);
+    c.ret(handle);
+}
+B32_THUNK(_SetRectRgn) {
+    GuestAddr region = c.mem.read<uint32_t>(c.args.ptr());
+    int16_t left = int16_t(c.args.u32()), top = int16_t(c.args.u32()), right = int16_t(c.args.u32()), bottom = int16_t(c.args.u32());
+    const int16_t box[4] = {top, left, bottom, right};
+    c.mem.write<uint16_t>(region, 10);
+    c.mem.writeArray<int16_t>(region + 2, box, 4);
+}
+
+// --- mouse tracking, the event queue, the cursor and the About box -----------------------------
+
+// OSStatus CreateMouseTrackingRegion(window, RgnHandle shape, clip, options, MouseTrackingRegionID id (2 words),
+//                                    MouseTrackingRef *out): the mouse's events reach the window's handlers anyway.
+B32_THUNK(_CreateMouseTrackingRegion) {
+    for (int i = 0; i < 6; i++) c.args.u32();
+    GuestAddr out = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, newHandle(c));
+    c.ret(0);
+}
+B32_THUNK(_ReleaseMouseTrackingRegion) { c.ret(0); }
+// OSStatus SetMouseCoalescingEnabled(Boolean enabled, Boolean *old)
+B32_THUNK(_SetMouseCoalescingEnabled) {
+    c.args.u32();
+    if (GuestAddr old = c.args.ptr()) c.mem.write<uint8_t>(old, 1);
+    c.ret(0);
+}
+B32_THUNK(_SetThemeCursor) { c.ret(0); }
+// EventQueueRef GetMainEventQueue(): the one queue.
+B32_THUNK(_GetMainEventQueue) { c.ret(1); }
+// OSStatus PostEventToQueue(queue, event, priority): delivered to the application's handlers; the
+// queue owns the event afterwards.
+B32_THUNK(_PostEventToQueue) {
+    c.args.u32();
+    GuestAddr event = c.args.ptr();
+    if (events.count(event)) {
+        dispatchTo(event, appTarget(c));
+        freeEvent(c.rt, event);
+    }
+    c.ret(0);
+}
+B32_THUNK(_HIAboutBox) {
+    ensureCarbonApplication();
+    [NSApp orderFrontStandardAboutPanel:nil];
+    c.ret(0);
+}
+
 // void GetKeys(KeyMap): 128 bits, a byte for every 8 key codes.
 B32_THUNK(_GetKeys) { c.mem.copyIn(c.args.ptr(), keyState, sizeof keyState); }
 // void GetMouse(Point *) (local to the current port), GetGlobalMouse.
