@@ -125,9 +125,14 @@ GuestAddr makeEvent(Runtime &rt, uint32_t cls, uint32_t kind) {
     events[handle] = event;
     return handle;
 }
-void setParam(GuestAddr handle, uint32_t name, const void *bytes, size_t size) {
+// Parameters are kept as the guest will read them back, in its byte order.
+void setParamBytes(GuestAddr handle, uint32_t name, const void *bytes, size_t size) {
     auto &slot = events[handle]->params[name];
     slot.assign(static_cast<const uint8_t *>(bytes), static_cast<const uint8_t *>(bytes) + size);
+}
+template <typename T> void setParam(GuestAddr handle, uint32_t name, T value) {
+    T guest = GuestMemory::inGuestOrder(value);
+    setParamBytes(handle, name, &guest, sizeof guest);
 }
 void freeEvent(Runtime &rt, GuestAddr handle) {
     delete events[handle];
@@ -159,10 +164,12 @@ void sendCommand(Runtime &rt, uint32_t command, GuestAddr target, GuestAddr menu
     GuestAddr event = makeEvent(rt, kClassCommand, kCommandProcess);
     // HICommand: attributes, commandID, menu ref, menu item index.
     uint8_t hc[16] = {};
-    std::memcpy(hc + 4, &command, 4);
-    std::memcpy(hc + 8, &menu, 4);
-    std::memcpy(hc + 12, &item, 2);
-    setParam(event, kDirectObject, hc, sizeof hc);
+    const uint32_t commandGuest = GuestMemory::inGuestOrder(command), menuGuest = GuestMemory::inGuestOrder(menu);
+    const uint16_t itemGuest = GuestMemory::inGuestOrder(item);
+    std::memcpy(hc + 4, &commandGuest, 4);
+    std::memcpy(hc + 8, &menuGuest, 4);
+    std::memcpy(hc + 12, &itemGuest, 2);
+    setParamBytes(event, kDirectObject, hc, sizeof hc);
     dispatchTo(event, target);
     freeEvent(rt, event);
 }
@@ -197,7 +204,7 @@ Runtime &runtime() { return Bridge::shared()->runtime(); }
     for (auto &[handle, window] : windows)
         if (window->window == sender) {
             GuestAddr event = makeEvent(runtime(), kClassWindow, kWindowClose);
-            setParam(event, kDirectObject, &handle, 4);
+            setParam<uint32_t>(event, kDirectObject, handle);
             int32_t result = dispatchTo(event, window->target);
             freeEvent(runtime(), event);
             return result == kEventNotHandled;
@@ -441,7 +448,7 @@ CWindow *portWindow(GuestAddr port) { return windowOf(port); }  // a window's po
 
 void writeRect(Call &c, GuestAddr out, NSRect r) {
     const int16_t fields[4] = {int16_t(r.origin.y), int16_t(r.origin.x), int16_t(NSMaxY(r)), int16_t(NSMaxX(r))};
-    c.mem.copyIn(out, fields, sizeof fields);
+    c.mem.writeArray<int16_t>(out, fields, 4);
 }
 NSRect readRect(Call &c, GuestAddr in) {
     int16_t t = c.mem.read<int16_t>(in), l = c.mem.read<int16_t>(in + 2), b = c.mem.read<int16_t>(in + 4), r = c.mem.read<int16_t>(in + 6);
@@ -1084,8 +1091,14 @@ void changeTypes(Call &c, bool add) {
 B32_THUNK(_AddEventTypesToHandler) { changeTypes(c, true); }
 B32_THUNK(_RemoveEventTypesFromHandler) { changeTypes(c, false); }
 
-B32_THUNK(_GetEventClass) { c.ret(events.count(c.mem.read<uint32_t>(c.cpu.sp() + 4)) ? events[c.args.ptr()]->cls : 0); }
-B32_THUNK(_GetEventKind) { c.ret(events.count(c.mem.read<uint32_t>(c.cpu.sp() + 4)) ? events[c.args.ptr()]->kind : 0); }
+B32_THUNK(_GetEventClass) {
+    auto it = events.find(c.args.ptr());
+    c.ret(it != events.end() ? it->second->cls : 0);
+}
+B32_THUNK(_GetEventKind) {
+    auto it = events.find(c.args.ptr());
+    c.ret(it != events.end() ? it->second->kind : 0);
+}
 // OSStatus GetEventParameter(event, name, desired, actualType *, size, actualSize *, void *data)
 B32_THUNK(_GetEventParameter) {
     GuestAddr handle = c.args.ptr();
@@ -1108,7 +1121,7 @@ B32_THUNK(_GetEventParameter) {
 B32_THUNK(_CreateEvent) {
     c.args.ptr();
     uint32_t cls = c.args.u32(), kind = c.args.u32();
-    c.args.u64();  // when
+    c.args.f64();  // when (an EventTime, a double)
     c.args.u32();
     GuestAddr out = c.args.ptr();
     c.mem.write<uint32_t>(out, makeEvent(c.rt, cls, kind));
@@ -1148,15 +1161,15 @@ B32_THUNK(_ReceiveNextEvent) {
     if (cls == kClassKeyboard) {
         uint32_t code = (event.message >> 8) & 0xff;
         uint8_t character = event.message & 0xff;
-        setParam(handle, kKeyCodeParam, &code, 4);
-        setParam(handle, kMacCharParam, &character, 1);
+        setParam(handle, kKeyCodeParam, code);
+        setParam(handle, kMacCharParam, character);
     }
     uint32_t modifiers = event.modifiers;
-    setParam(handle, kModifiersParam, &modifiers, 4);
-    int16_t point[2] = {int16_t(event.where.y), int16_t(event.where.x)};
-    setParam(handle, kMouseLocationParam, point, 4);
-    uint16_t button = 1;
-    setParam(handle, kMouseButtonParam, &button, 2);
+    setParam(handle, kModifiersParam, modifiers);
+    // A QDPoint: vertical, then horizontal.
+    const int16_t point[2] = {GuestMemory::inGuestOrder(int16_t(event.where.y)), GuestMemory::inGuestOrder(int16_t(event.where.x))};
+    setParamBytes(handle, kMouseLocationParam, point, 4);
+    setParam<uint16_t>(handle, kMouseButtonParam, 1);
     if (out) c.mem.write<uint32_t>(out, handle);
     c.ret(0);
 }
@@ -1191,7 +1204,10 @@ B32_THUNK(_ConvertEventRefToEventRecord) {
     int16_t what = event->cls == kClassKeyboard ? (event->kind == kKeyDown ? 3 : event->kind == kKeyUp ? 4 : 5) : event->kind == kMouseDown ? 1 : 2;
     uint32_t code = 0;
     uint8_t character = 0;
-    if (event->params.count(kKeyCodeParam)) std::memcpy(&code, event->params[kKeyCodeParam].data(), 4);
+    if (event->params.count(kKeyCodeParam)) {
+        std::memcpy(&code, event->params[kKeyCodeParam].data(), 4);
+        code = GuestMemory::inGuestOrder(code);  // kept in the guest's byte order
+    }
     if (event->params.count(kMacCharParam)) character = event->params[kMacCharParam][0];
     c.mem.write<int16_t>(record, what);
     c.mem.write<uint32_t>(record + 2, uint32_t(character) | code << 8);
