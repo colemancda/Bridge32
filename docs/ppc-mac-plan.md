@@ -3,6 +3,9 @@
 Status: proposal for review. Nothing here is implemented. The spike results
 below were run on 2026-11-09 against the patched Unicorn in `external/unicorn`.
 
+Target decided 2026-11-09: **World of Goo 1.30** (`ppc_7400` only), which sets
+the phase order below.
+
 ## Verdict
 
 Yes, and the CPU is the easy part. The cost of this port is byte order.
@@ -197,7 +200,9 @@ does, with `UNICORN_ARCH=ppc` and a new `core/arch/ppc/PowerCpu.{h,cpp}`.
 
 ### OpenGL
 
-The hard part, and the one most likely to decide whether games are playable.
+The general design, for games that use vertex arrays. World of Goo is
+immediate mode and needs only the first two bullets and the pointer calls
+listed under "Target"; the rest waits for an app that needs it.
 
 - **Textures:** set `GL_UNPACK_SWAP_BYTES` once and combine it with the guest's
   own setting. Multi-byte pixel types then convert in the driver; `GL_UNSIGNED_BYTE`
@@ -230,9 +235,48 @@ such as `Rect`, `Point` and `EventRecord` move through typed accessors. GWorld
 pixel maps are big-endian ARGB. `#pragma options align=mac68k` layouts apply
 just as on i386.
 
+## Target: World of Goo 1.30
+
+`World of Goo.app` (2D Boy, 2008) is a good first target: a 1.4 MB `ppc_7400`
+executable with no `i386` slice, no copy protection (the bundle isn't even
+signed), and a small import surface. Measured from its Mach-O:
+
+- **Loading:** `MH_EXECUTE`, `LC_UNIXTHREAD` (entry `0x2600`), `__PAGEZERO` at
+  4 KB, text at `0x1000`, flags `0x10085` (no PIE). Imports bind through
+  `__symbol_stub1` (16-byte non-PIC stubs) and `__la_symbol_ptr` (253 of them)
+  plus `__nl_symbol_ptr`; there are 278 symbols and 651 indirect entries.
+- **Libraries:** Carbon, AGL, OpenGL, ApplicationServices, CoreServices,
+  CoreFoundation, IOKit, `libstdc++.6`, `libgcc_s.1`, `libmx`, `libcurl`,
+  `libSystem`, and a bundled `libirrklang.dylib`.
+- **260 imported symbols.** 188 already match an existing thunk by name; the 72
+  that don't are an upper bound (data symbols and renamed functions are counted
+  as misses), and about 30 of them are `libstdc++` string and stream members.
+- **No Objective-C at all.** It is a Carbon app: `RunApplicationEventLoop`,
+  event handlers, one window from a nib, a menu bar from a nib, `HIAboutBox`.
+  The legacy ObjC reader and the AppKit nib path are not needed for it.
+- **OpenGL is immediate mode.** `glBegin`, `glVertex3f`, `glTexCoord2f` and
+  `glColor4f` take their values in registers, and there are no vertex arrays or
+  buffers. The only pointer-taking calls are `glLoadMatrixf`, `glMultMatrixf`,
+  `glGetFloatv`, `glGetBooleanv` and `glTexImage2D`. This replaces the large
+  OpenGL conversion in the original plan with five small cases.
+- **C++:** it catches exceptions (`__cxa_begin_catch`, `_Unwind_Resume`,
+  `__gxx_personality_v0`) but never throws one itself (`__cxa_throw` isn't
+  imported), so DWARF unwinding should rarely run.
+- **Network:** `libcurl` (10 calls) for something optional. The first goal is a
+  clean failure, so `curl_easy_init` returns NULL.
+- **Audio:** irrKlang is a fat `ppc`+`i386` dylib. The game calls one function,
+  `createIrrKlangDevice`; the rest is the dylib's own C++ vtables, mixing in
+  guest code and writing to a CoreAudio HAL IO proc (`AudioDeviceAddIOProc`
+  and six more). It loads as a guest library, its `ppc` slice, and the HAL
+  buffers it fills are big-endian.
+- **Direct hardware paths:** `CGDisplayCapture`, `CGDisplaySwitchToMode` and
+  `CGDisplayFade` for fullscreen, and `IOKit` for something not yet identified
+  (it imports nothing by name from IOKit, so likely only a link dependency).
+
 ## Phases
 
-Each phase ends with a test that fails without it.
+Each phase ends with a test that fails without it. The order follows World of
+Goo: nothing that it doesn't reach is built before the game runs.
 
 ### Phase 0: CPU
 
@@ -245,51 +289,52 @@ and AltiVec register access, add `PowerCpu`.
 
 Swapping `GuestMemory`, compile errors on typed `ptr<>`, the big-endian Mach-O
 reader, `PPC_THREAD_STATE`, stubs, the `Args` rules, `setjmp`.
-**Exit:** a PowerPC Mach-O calls `printf` with mixed int, double and 64-bit
+**Exit:** `b32-inspect` reads World of Goo and reports its imports, and a
+hand-assembled PowerPC Mach-O calls `printf` with mixed int, double and 64-bit
 arguments and prints the right text. ABI table confirmed or corrected against
-real binaries.
+the real binary's call sites.
 
 ### Phase 2: The audit
 
-All 84 typed sites, the `ptr<void>` review, struct field tables, `wchar_t` and
-Unicode arrays, `memcpy`/`reinterpret_cast` review.
-**Exit:** the existing guest tests (`libc`, `cxx`, `pthread`, `fault`, `smc`...)
-pass built for PowerPC, or each exclusion has a written reason.
+All 84 typed `ptr<>` sites, the `ptr<void>` review, struct field tables,
+`wchar_t` and Unicode arrays, `memcpy` and `reinterpret_cast` review.
+**Exit:** every file in `core/` the PowerPC build compiles has been reviewed,
+and the guest tests that can be assembled for PowerPC pass.
 
-### Phase 3: Objective-C and AppKit
+### Phase 3: The runtime World of Goo needs
 
-`LegacyImage.mm` on big-endian images, struct swapping in `Encoding.cpp`, the
-runtime page, constant strings.
-**Exit:** an `AppKitTest` equivalent built for PowerPC opens its window from a
-nib, with target/action and bindings working.
+The `libstdc++` string and stream thunks, the 72 candidate imports, `libmx`
+math, `__keymgr` and `__sF`, and the `curl` stubs.
+**Exit:** World of Goo runs through its static initializers and reaches
+`main` without an unimplemented-import fatal. `b32-inspect` shows
+`unimplemented imports: 0`.
 
-### Phase 4: Carbon
+### Phase 4: Carbon, AGL and OpenGL
 
-Resources passed through raw, typed event and geometry structs, big-endian GWorlds.
-**Exit:** a Carbon test app's window and menus. The *Age of Mythology*
-`InstallerWrapper`, a 29 KB PowerPC Mach-O, is a small real binary to try here
-once its framework imports have been checked.
+The Carbon event loop, window, nib and menu bar for a `ppc` guest, big-endian
+`Rect`/`Point`/`EventRecord`, AGL contexts, and the five pointer-taking GL
+calls with `GL_UNPACK_SWAP_BYTES` for textures.
+**Exit:** the game's window opens and draws its first frame. Compare against the
+same frame from the i386 build of a test scene.
 
-### Phase 5: OpenGL and audio
+### Phase 5: Audio
 
-As above.
-**Exit:** a PowerPC test scene with textures, a client array, an indexed VBO and
-a uniform matches the same scene rendered by i386. Sound plays at the right
-pitch without noise.
+Load `libirrklang.dylib`'s `ppc` slice as a guest library, the CoreAudio HAL
+IO proc with big-endian buffers.
+**Exit:** the game's music plays at the right pitch without noise.
 
-### Phase 6: Real apps
+### Phase 6: Play
 
-Start with a `ppc`-only game, then widen the thunk tail as i386 did.
-`Halo.app` is `ppc`+`i386` universal, so it can be run on both CPUs and compared
-call by call up to its disc check, where it stops on i386 today. Disc checks and
-copy protection stay out of scope.
+World of Goo starts, gets through a level with the mouse, and quits cleanly.
+**Exit:** a recorded run, and the remaining thunk tail as a list.
 
-### Phase 7: CFM/PEF apps (optional)
+### Later: other PowerPC apps
 
-Many Mac OS X 10.0–10.3 Carbon games are PEF rather than Mach-O. This needs a
-PEF loader, transition vectors, the TOC register and cross-fragment glue, plus
-`CarbonLib` import names. It is independent of everything above, so it can wait
-until a specific app needs it.
+The legacy ObjC reader on big-endian images, struct swapping in
+`Encoding.cpp`, the runtime page at `0xFFFEFF00`, AppKit nibs, Carbon beyond
+what the game uses, and a PEF/CFM loader for Mac OS X 10.0-10.3 Carbon games
+(transition vectors, the TOC register and `CarbonLib` imports). Each waits for
+a specific app that needs it.
 
 ## Guest test toolchain
 
@@ -298,11 +343,11 @@ the triple (`powerpc-apple-*`, `-arch ppc`). Clang will still compile `powerpc-u
 which is how the spike was built, but that is the SysV ABI: it passes floats and
 structs differently, and has no Mach-O or legacy ObjC.
 
-1. **Phases 0–1: assembly plus a small linker.** PowerPC assembly through clang's
+1. **Phases 0-2: assembly plus a small linker.** PowerPC assembly through clang's
    ELF output, then `tools/ppc-link.py` to write a Mach-O, as `i386-link.py` does.
    Enough for CPU, loader and ABI tests, and hand-written assembly is the only way
    to assert exact register use anyway.
-2. **Phases 2 onward: a real Darwin PowerPC compiler.** Xcode 2.5–3.x's GCC
+2. **Paths the game doesn't reach: a real Darwin PowerPC compiler.** Xcode 2.5–3.x's GCC
    running in a Mac OS X 10.4 or 10.5 guest on `qemu-system-ppc`, which is already
    installed through Homebrew. The same VM runs the test binaries for reference
    output. Built binaries go in `tests/guest/prebuilt-ppc/`, so `ctest` needs no VM.
@@ -323,14 +368,13 @@ structs differently, and has no Mach-O or legacy ObjC.
   handled as real apps turn them up.
 - **GPLv2.** The same Unicorn dependency already accepted for the Mac shell.
 
-Decisions needed:
+Decision needed:
 
-1. **Which app is the target?** A scan of `/Applications` and `~/Downloads` found
-   no installed PowerPC app. The *Age of Mythology* disc has a PowerPC installer, but its
-   game binary hasn't been examined, and may also use a disc check. A named target
-   would decide how much of Carbon, OpenGL and CFM matters first.
-2. **Can you supply a Mac OS X 10.4 or 10.5 PowerPC install image and Xcode?**
-   Without one, later tests are limited to what assembly can reach.
+- **A Mac OS X 10.4 or 10.5 PowerPC install image and Xcode** would let
+  later phases build PowerPC test programs with a real Darwin compiler under
+  `qemu-system-ppc` (already installed). It isn't needed to reach World of Goo,
+  which is itself a PowerPC binary, but it is the only way to test paths the game
+  doesn't use. Until one exists, tests are hand-written assembly plus the game.
 
 ## Rough size
 
