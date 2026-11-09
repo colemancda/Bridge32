@@ -14,7 +14,7 @@ OUT     ?= ../../build/guest-i386
 CFLAGS  := -arch i386 -target i386-apple-macos10.13 -mdynamic-no-pic -fno-asynchronous-unwind-tables \
            -fno-unwind-tables -O1 -Wall -Wno-unused-command-line-argument
 LINK    := python3 ../../tools/i386-link.py
-TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib objc objclegacy AppKitTest.app
+TESTS   := hello rbtree threads bench smc fault abi objcabi cxx classic libclassic.dylib objc objclegacy AppKitTest.app
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
