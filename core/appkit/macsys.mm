@@ -29,8 +29,10 @@ void *process() { return RTLD_DEFAULT; }
 
 const CFunction kDisplays[] = {
     {"CGMainDisplayID", "u:"},
+#if !defined(B32_GUEST_BIG_ENDIAN)
     {"CGGetOnlineDisplayList", "i:upp"},
     {"CGGetActiveDisplayList", "i:upp"},
+#endif
     {"CGDisplayIsMain", "i:u"},
     {"CGDisplayMirrorsDisplay", "u:u"},
     {"CGDisplayPixelsWide", "z:u"},
@@ -45,8 +47,13 @@ const CFunction kDisplays[] = {
     {"CGDisplayIDToOpenGLDisplayMask", "u:u"},
     {"CGShieldingWindowLevel", "i:"},
     {"CGWindowLevelForKey", "i:i"},
+#if !defined(B32_GUEST_BIG_ENDIAN)
     {"CGGetDisplayTransferByTable", "i:uuppppp"},
+#endif
     {"CGAssociateMouseAndMouseCursorPosition", "i:u"},
+    {"CGDisplayHideCursor", "i:u"},
+    {"CGDisplayShowCursor", "i:u"},
+    {"CGCursorIsVisible", "u:"},
     {"CFRunLoopRunInMode", "i:odu"},
     {"CFUUIDGetConstantUUIDWithBytes", "o:puuuuuuuuuuuuuuuu"},
 };
@@ -86,8 +93,81 @@ B32_THUNK(_CGDisplayMoveCursorToPoint) {
     c.ret(CGDisplayMoveCursorToPoint(display, CGPointMake(x, c.args.structFloat())));
 }
 
+#if defined(B32_GUEST_BIG_ENDIAN)
+// The display lists and the gamma table are arrays of 32-bit integers and floats,
+// written to the guest in its byte order.
+namespace {
+void displayList(Call &c, bool active) {
+    uint32_t maximum = c.args.u32();
+    GuestAddr out = c.args.ptr(), count = c.args.ptr();
+    std::vector<CGDirectDisplayID> ids(maximum);
+    uint32_t n = 0;
+    CGError error = active ? CGGetActiveDisplayList(maximum, ids.data(), &n) : CGGetOnlineDisplayList(maximum, ids.data(), &n);
+    if (out) c.mem.writeArray<uint32_t>(out, ids.data(), std::min(n, maximum));
+    if (count) c.mem.write<uint32_t>(count, n);
+    c.ret(uint32_t(error));
+}
+}  // namespace
+B32_THUNK(_CGGetActiveDisplayList) { displayList(c, true); }
+B32_THUNK(_CGGetOnlineDisplayList) { displayList(c, false); }
+// CGError CGGetDisplayTransferByTable(display, capacity, red[], green[], blue[], uint32_t *sampleCount)
+B32_THUNK(_CGGetDisplayTransferByTable) {
+    uint32_t display = c.args.u32(), capacity = c.args.u32();
+    GuestAddr tables[3] = {c.args.ptr(), c.args.ptr(), c.args.ptr()};
+    GuestAddr countOut = c.args.ptr();
+    std::vector<CGGammaValue> channels[3] = {std::vector<CGGammaValue>(capacity), std::vector<CGGammaValue>(capacity),
+                                             std::vector<CGGammaValue>(capacity)};
+    uint32_t samples = 0;
+    CGError error = CGGetDisplayTransferByTable(display, capacity, channels[0].data(), channels[1].data(), channels[2].data(), &samples);
+    for (int i = 0; i < 3; i++)
+        if (tables[i]) c.mem.writeArray<float>(tables[i], channels[i].data(), std::min(samples, capacity));
+    if (countOut) c.mem.write<uint32_t>(countOut, samples);
+    c.ret(uint32_t(error));
+}
+#endif
+
+// The legacy display modes, CFDictionaries of the main display's width, height,
+// depth and refresh rate. Modes are only described, never switched to: a game
+// asking for another size gets a dictionary saying so, and its picture is
+// scaled to the screen (aglSetFullScreen).
+namespace {
+NSDictionary *modeDictionary(size_t width, size_t height, double refresh) {
+    return @{@"Width" : @(width), @"Height" : @(height), @"BitsPerPixel" : @32, @"BitsPerSample" : @8,
+             @"SamplesPerPixel" : @3, @"RefreshRate" : @(refresh), @"UsableForDesktopGUI" : @YES};
+}
+}  // namespace
+B32_THUNK(_CGDisplayCurrentMode) {
+    CGDirectDisplayID display = c.args.u32();
+    c.ret(bridge(c).toGuest(modeDictionary(CGDisplayPixelsWide(display), CGDisplayPixelsHigh(display), 60)));
+}
+// CFDictionaryRef CGDisplayBestModeForParametersAndRefreshRate(display, bitsPerPixel, width, height, refresh,
+//                                                              boolean_t *exactMatch)
+B32_THUNK(_CGDisplayBestModeForParametersAndRefreshRate) {
+    c.args.u32();
+    c.args.u32();
+    size_t width = c.args.u32(), height = c.args.u32();
+    double refresh = c.args.f64();
+    GuestAddr exact = c.args.ptr();
+    if (exact) c.mem.write<uint32_t>(exact, 1);
+    c.ret(bridge(c).toGuest(modeDictionary(width, height, refresh > 0 ? refresh : 60)));
+}
+// DMGetGDeviceByDisplayID(DisplayIDType, GDHandle *, Boolean failToMain): a handle to a blank GDevice.
+B32_THUNK(_DMGetGDeviceByDisplayID) {
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    static GuestAddr handle = 0;
+    if (!handle) {
+        handle = c.heap.calloc(1, 4);
+        c.mem.write<uint32_t>(handle, c.heap.calloc(1, 64));
+    }
+    if (out) c.mem.write<uint32_t>(out, handle);
+    c.ret(0);
+}
+
 // The screen stays the user's.
 #define B32_SUCCEEDS(symbol) B32_THUNK(symbol) { c.ret(0); }
+B32_SUCCEEDS(_CGDisplaySwitchToMode)
+B32_SUCCEEDS(_CGDisplayCaptureWithOptions)
 B32_THUNK(_CGDisplayIsCaptured) { c.ret(0); }
 B32_SUCCEEDS(_CGCaptureAllDisplays)
 B32_SUCCEEDS(_CGReleaseAllDisplays)
