@@ -273,6 +273,43 @@ B32_THUNK(_RunStandardAlert) {
     c.ret(0);
 }
 
+B32_THUNK(_IntlScript) { c.ret(0); }  // smRoman
+// short IdenticalString(ConstStr255Param, ConstStr255Param, Handle): 0 if equal.
+B32_THUNK(_IdenticalString) {
+    GuestAddr a = c.args.ptr(), b = c.args.ptr();
+    uint32_t la = c.mem.read<uint8_t>(a), lb = c.mem.read<uint8_t>(b);
+    c.ret(la == lb && std::memcmp(c.mem.ptr<char>(a + 1), c.mem.ptr<char>(b + 1), la) == 0 ? 0 : 1);
+}
+B32_THUNK(_GetScriptVariable) { c.ret(0); }
+B32_THUNK(_GetScriptManagerVariable) { c.ret(0); }
+B32_THUNK(_SetQDGlobalsRandomSeed) {}
+B32_THUNK(_RegisterEventHotKey) { c.ret(0); }
+B32_THUNK(__ZSt15set_new_handlerPFvvE) { c.ret(0); }
+B32_THUNK(_GetCurrentProcess) { c.ret(0); }
+B32_THUNK(_SameProcess) {
+    c.args.ptr();
+    c.args.ptr();
+    c.mem.write<uint8_t>(c.args.ptr(), 1);
+    c.ret(0);
+}
+B32_THUNK(_GetFrontProcess) { c.ret(0); }
+B32_THUNK(_SetFrontProcess) { c.ret(0); }
+B32_THUNK(_GetProcessInformation) { c.ret(uint32_t(-600)); }  // procNotFound
+B32_THUNK(_EnterMovies) { c.ret(0); }
+// Sound Manager channels exist but are silent so far.
+B32_THUNK(_SndNewChannel) {
+    GuestAddr out = c.args.ptr();
+    if (!c.mem.read<uint32_t>(out)) c.mem.write<uint32_t>(out, c.heap.calloc(1, 64));
+    c.ret(0);
+}
+B32_THUNK(_SndDisposeChannel) { c.ret(0); }
+B32_THUNK(_SndPlay) { c.ret(0); }
+B32_THUNK(_SndDoCommand) { c.ret(0); }
+B32_THUNK(_SndDoImmediate) { c.ret(0); }
+B32_THUNK(_NewSndCallBackUPP) { c.ret(c.args.ptr()); }
+B32_THUNK(_DisposeSndCallBackUPP) {}
+B32_THUNK(_ExitToShell) { c.rt.exit(0); }
+
 // What crt1 from before 10.5 looks at: hooks it calls when they're set.
 B32_DATA(_mach_init_routine, 4) {}
 B32_DATA(__cthread_init_routine, 4) {}
