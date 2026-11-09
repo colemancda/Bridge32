@@ -173,7 +173,59 @@ const std::string *trampolineGuestTypes(IMP imp);
 GuestAddr trampolineGuestImp(IMP imp);
 }  // namespace
 
-void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
+void Bridge::returnToGuest(Call &c, const Type &r, const uint8_t *guest, GuestAddr retPtr) {
+    uint32_t size = r.guestSize();
+    switch (guestReturnClass(r)) {
+    case ReturnClass::Memory:
+        if (retPtr) c.mem.copyIn(retPtr, guest, size);
+        c.cpu.popStructPointer();
+        return;
+    case ReturnClass::Floating:
+        if (size == 4) {
+            float value;
+            std::memcpy(&value, guest, 4);
+            c.cpu.setFloatResult(value);
+        } else {
+            double value;
+            std::memcpy(&value, guest, 8);
+            c.cpu.setDoubleResult(value);
+        }
+        return;
+    case ReturnClass::Integer: break;
+    }
+    uint32_t lo;
+    switch (r.code) {
+    case 'c': lo = uint32_t(int32_t(int8_t(guest[0]))); break;
+    case 's': lo = uint32_t(int32_t(int16_t(guest[0] | guest[1] << 8))); break;
+    case 'C': case 'B': lo = guest[0]; break;
+    case 'S': lo = uint32_t(guest[0] | guest[1] << 8); break;
+    default: std::memcpy(&lo, guest, 4); break;
+    }
+    if (size > 4) {
+        uint32_t hi;
+        std::memcpy(&hi, guest + 4, 4);
+        c.cpu.setResult64(lo | (uint64_t(hi) << 32));
+    } else {
+        c.cpu.setResult(lo);
+    }
+}
+
+void Bridge::resultFromGuest(Cpu &cpu, const Type &r, uint64_t words, uint8_t *guest) {
+    if (guestReturnClass(r) != ReturnClass::Floating) {
+        std::memcpy(guest, &words, 8);
+        return;
+    }
+    bool isFloat = r.guestSize() == 4;
+    double value = cpu.floatingResult(isFloat);
+    if (isFloat) {
+        float f = float(value);
+        std::memcpy(guest, &f, 4);
+    } else {
+        std::memcpy(guest, &value, 8);
+    }
+}
+
+void Bridge::msgSend(Call &c, bool stret, SuperKind kind, bool fpret) {
     Cpu &cpu = c.cpu;
     GuestMemory &mem = rt_.mem();
     int selfArg = stret ? 1 : 0;  // a struct result pointer comes first
@@ -191,7 +243,11 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind) {
     } else {
         receiver = first;
         if (!receiver) {  // messages to nil return zero
-            cpu.setResult64(0);
+            if (fpret)
+                cpu.setDoubleResult(0);
+            else
+                cpu.setResult64(0);
+            if (stret) cpu.popStructPointer();
             return;
         }
         if (!mem.isMapped(receiver) || !mem.isMapped(receiver + 3)) {
@@ -304,6 +360,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         if (superInfo) fatal("super send of overridden selector %s is not supported yet", name);
         OverrideCall oc{c, *this, recv, receiver, hsel, name, args, retPtr};
         it->second.fn(oc);
+        if (stret) c.cpu.popStructPointer();
         return;
     }
 
@@ -428,26 +485,9 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         }
         log("    returned {%s}", text.c_str());
     }
-    if (r.isStruct() && size > 4) {
-        if (!stret) fatal("%s returns a %u-byte struct but was sent with objc_msgSend", name, size);
-        mem.copyIn(retPtr, guest, size);
-        return;
-    }
-    uint32_t lo;
-    switch (r.code) {
-    case 'c': lo = uint32_t(int32_t(int8_t(guest[0]))); break;
-    case 's': lo = uint32_t(int32_t(int16_t(guest[0] | guest[1] << 8))); break;
-    case 'C': case 'B': lo = guest[0]; break;
-    case 'S': lo = uint32_t(guest[0] | guest[1] << 8); break;
-    default: std::memcpy(&lo, guest, 4); break;
-    }
-    if (size > 4) {
-        uint32_t hi;
-        std::memcpy(&hi, guest + 4, 4);
-        c.cpu.setResult64(lo | (uint64_t(hi) << 32));
-    } else {
-        c.cpu.setResult(lo);
-    }
+    if (guestReturnClass(r) == ReturnClass::Memory && !stret)
+        fatal("%s returns a %u-byte struct but was sent with objc_msgSend", name, size);
+    returnToGuest(c, r, guest, retPtr);
 }
 
 uint64_t Bridge::send(GuestAddr receiver, const char *sel, std::initializer_list<uint32_t> args) {
@@ -599,7 +639,7 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
 
     std::vector<uint32_t> words;
     uint32_t retSize = sig.ret.guestSize();
-    bool guestStret = sig.ret.isStruct() && retSize > 4;
+    bool guestStret = guestReturnClass(sig.ret) == ReturnClass::Memory;
     GuestAddr retBuf = guestStret ? rt.heap().alloc(retSize) : 0;
     if (guestStret) words.push_back(retBuf);
     GuestAddr self = bridge.toGuest(*static_cast<id *>(args[0]));
@@ -637,7 +677,7 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
         std::memcpy(guest, rt.mem().ptr<uint8_t>(retBuf), retSize);
         rt.heap().free(retBuf);
     } else {
-        std::memcpy(guest, &r, 8);
+        bridge.resultFromGuest(*cpu, rt_, r, guest);
     }
     // A method declared to return an object whose implementation returns
     // nothing (a block behind imp_implementationWithBlock, for an id-typed
