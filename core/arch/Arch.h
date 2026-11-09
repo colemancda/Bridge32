@@ -40,4 +40,25 @@ GuestAddr thisReturningShim(GuestMemory &mem, GuestHeap &heap, GuestAddr target)
 constexpr uint32_t kMethodStubSize = 16;
 void writeMethodStub(GuestMemory &mem, GuestAddr stub, uint32_t context, GuestAddr target);
 
+// How a function returns a value, where the two guests differ.
+#if defined(B32_GUEST_I386)
+// Struct results: Darwin's i386 ABI returns 1, 2, 4 and 8-byte structs in
+// EAX:EDX and the rest through a hidden pointer the callee pops.
+inline bool structReturnedInMemory(uint32_t size) { return size != 0 && size != 1 && size != 2 && size != 4 && size != 8; }
+// float and double, and a struct holding just one of them, come back in ST(0).
+constexpr bool kFloatResultsInFpu = true;
+// long double is the x87's 80 bits, in 16 bytes of argument words.
+constexpr uint32_t kLongDoubleWords = 4;
+#else
+// armv7: anything over a word goes through r0.
+inline bool structReturnedInMemory(uint32_t size) { return size > 4; }
+// The soft-float ABI uses the integer registers.
+constexpr bool kFloatResultsInFpu = false;
+// long double is double.
+constexpr uint32_t kLongDoubleWords = 2;
+#endif
+
+// The value of a long double argument, as kLongDoubleWords argument words.
+double longDouble(const uint32_t *words);
+
 }  // namespace b32::arch
