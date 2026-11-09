@@ -1,5 +1,6 @@
 // Host implementations of imported symbols. Every import the loader binds gets
-// an 8-byte guest stub, `svc #index; bx lr`, and the SVC lands here.
+// a guest stub (arch::writeThunkStub) that traps to the host with its index,
+// and the trap lands here.
 #pragma once
 
 #include "core/cpu/Cpu.h"
@@ -15,9 +16,10 @@ namespace b32 {
 
 class Runtime;
 
-// Arguments of a thunked call, read in the iOS armv7 calling convention
-// (APCS: 64-bit values take the next two words with no even-register
-// alignment, and stack words are 4-byte aligned).
+// Arguments of a thunked call, as a stream of 32-bit words: both guests pass
+// every argument in 4-byte words (iOS's APCS variant in r0-r3 then the
+// stack, i386's cdecl on the stack), and 64-bit values take the next two
+// words with no alignment.
 class Args {
 public:
     Args(Cpu &cpu) : cpu_(cpu) {}
@@ -35,7 +37,7 @@ public:
             vaList_ += 4;
             return v;
         }
-        uint32_t v = next_ < 4 ? cpu_.reg(next_) : cpu_.mem().read<uint32_t>(cpu_.reg(Cpu::SP) + (next_ - 4) * 4);
+        uint32_t v = cpu_.arg(next_);
         next_++;
         return v;
     }
@@ -65,10 +67,10 @@ struct Call {
     Args args;
     const char *name;
 
-    void ret(uint32_t v) { cpu.setReg(0, v); }
-    void ret64(uint64_t v) { cpu.setReg(0, uint32_t(v)); cpu.setReg(1, uint32_t(v >> 32)); }
-    void retF32(float f) { uint32_t b; std::memcpy(&b, &f, 4); ret(b); }
-    void retF64(double d) { uint64_t b; std::memcpy(&b, &d, 8); ret64(b); }
+    void ret(uint32_t v) { cpu.setResult(v); }
+    void ret64(uint64_t v) { cpu.setResult64(v); }
+    void retF32(float f) { cpu.setFloatResult(f); }
+    void retF64(double d) { cpu.setDoubleResult(d); }
 };
 
 using ThunkFn = void (*)(Call &);
@@ -77,7 +79,17 @@ using ThunkFn = void (*)(Call &);
 struct ThunkRegistry {
     static std::unordered_map<std::string, ThunkFn> &all();
     ThunkRegistry(const char *symbol, ThunkFn fn) { all().emplace(symbol, fn); }
+    // The host implementation of `symbol`, or of its base name when the symbol
+    // is a libSystem variant (see baseSymbol), or null.
+    static ThunkFn find(const std::string &symbol);
 };
+
+// i386 Mac binaries import libSystem's variant symbols: _fputs$UNIX2003,
+// _stat$INODE64, _open$NOCANCEL, _realpath$DARWIN_EXTSN, _nanosleep$1050...
+// Unless a thunk exists under the variant's own name, it is served by the
+// base name's: the iOS thunks already implement the UNIX2003 semantics and
+// the 64-bit-inode stat layout. Returns `symbol` itself when it has no suffix.
+std::string baseSymbol(const std::string &symbol);
 
 // Defines the host side of a guest import. `symbol` is the Mach-O symbol name
 // with its leading underscore, e.g. B32_THUNK(_strlen).
