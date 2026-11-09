@@ -46,11 +46,9 @@ public:
     using Cpu::call;
     uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args) override;
 
-    // A thunk standing in for a function that returns a struct too big for
-    // EAX:EDX: copies the result to the caller's buffer (argument word 0)
-    // and pops that hidden argument, as the callee's `ret $4` would, by
-    // moving the return address up.
-    void retStruct(const void *value, uint32_t size);
+    // Pops the hidden result pointer as the callee's `ret $4` would, by moving
+    // the return address up a word.
+    void popStructPointer() override;
 
 protected:
     void deliverFault(uint32_t addr, bool write) override;
