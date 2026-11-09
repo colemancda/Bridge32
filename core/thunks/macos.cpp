@@ -28,6 +28,8 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <unordered_map>
 
@@ -372,3 +374,152 @@ B32_THUNK(_shm_open) { unavailable(c); }
 B32_THUNK(_shm_unlink) { unavailable(c); }
 B32_THUNK(_sendmsg) { unavailable(c); }
 B32_THUNK(_recvmsg) { unavailable(c); }
+
+// --- Multiprocessing Services: critical regions and counting semaphores -----------------
+
+namespace {
+constexpr int32_t kDurationImmediate = 0, kDurationForever = 0x7FFFFFFF;
+constexpr uint32_t kMPTimeoutErr = uint32_t(-29296), kMPInvalidIDErr = uint32_t(-29299);
+
+struct Semaphore {
+    std::mutex lock;
+    std::condition_variable changed;
+    uint32_t value, maximum;
+};
+
+std::mutex mpLock;
+std::unordered_map<uint32_t, std::recursive_timed_mutex *> mpRegions;
+std::unordered_map<uint32_t, Semaphore *> mpSemaphores;
+uint32_t nextMpId = 0x4D500001;
+
+// A Duration counts milliseconds, or microseconds when negative.
+std::chrono::microseconds waitFor(int32_t duration) {
+    return duration < 0 ? std::chrono::microseconds(-int64_t(duration)) : std::chrono::milliseconds(duration);
+}
+std::recursive_timed_mutex *region(uint32_t id) {
+    std::lock_guard guard(mpLock);
+    auto it = mpRegions.find(id);
+    return it == mpRegions.end() ? nullptr : it->second;
+}
+Semaphore *semaphore(uint32_t id) {
+    std::lock_guard guard(mpLock);
+    auto it = mpSemaphores.find(id);
+    return it == mpSemaphores.end() ? nullptr : it->second;
+}
+}  // namespace
+
+B32_THUNK(_MPCreateCriticalRegion) {
+    GuestAddr out = c.args.ptr();
+    std::lock_guard guard(mpLock);
+    uint32_t id = nextMpId++;
+    mpRegions[id] = new std::recursive_timed_mutex;
+    c.mem.write<uint32_t>(out, id);
+    c.ret(0);
+}
+B32_THUNK(_MPDeleteCriticalRegion) {
+    uint32_t id = c.args.u32();
+    std::lock_guard guard(mpLock);
+    auto it = mpRegions.find(id);
+    if (it == mpRegions.end()) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    delete it->second;
+    mpRegions.erase(it);
+    c.ret(0);
+}
+B32_THUNK(_MPEnterCriticalRegion) {
+    auto *r = region(c.args.u32());
+    int32_t timeout = c.args.i32();
+    if (!r) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    if (timeout == kDurationForever) {
+        r->lock();
+    } else if (timeout == kDurationImmediate ? !r->try_lock() : !r->try_lock_for(waitFor(timeout))) {
+        c.ret(kMPTimeoutErr);
+        return;
+    }
+    c.ret(0);
+}
+B32_THUNK(_MPExitCriticalRegion) {
+    auto *r = region(c.args.u32());
+    if (!r) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    r->unlock();
+    c.ret(0);
+}
+// OSStatus MPCreateSemaphore(maximum, initial, MPSemaphoreID *out)
+B32_THUNK(_MPCreateSemaphore) {
+    uint32_t maximum = c.args.u32(), initial = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    std::lock_guard guard(mpLock);
+    uint32_t id = nextMpId++;
+    auto *s = new Semaphore;
+    s->value = initial;
+    s->maximum = maximum;
+    mpSemaphores[id] = s;
+    c.mem.write<uint32_t>(out, id);
+    c.ret(0);
+}
+B32_THUNK(_MPDeleteSemaphore) {
+    uint32_t id = c.args.u32();
+    std::lock_guard guard(mpLock);
+    auto it = mpSemaphores.find(id);
+    if (it == mpSemaphores.end()) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    delete it->second;
+    mpSemaphores.erase(it);
+    c.ret(0);
+}
+B32_THUNK(_MPSignalSemaphore) {
+    auto *s = semaphore(c.args.u32());
+    if (!s) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    std::lock_guard guard(s->lock);
+    if (s->value >= s->maximum) {
+        c.ret(uint32_t(-29295));  // kMPInsufficientResourcesErr
+        return;
+    }
+    s->value++;
+    s->changed.notify_one();
+    c.ret(0);
+}
+B32_THUNK(_MPWaitOnSemaphore) {
+    auto *s = semaphore(c.args.u32());
+    int32_t timeout = c.args.i32();
+    if (!s) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    std::unique_lock guard(s->lock);
+    auto ready = [&] { return s->value > 0; };
+    if (timeout == kDurationForever)
+        s->changed.wait(guard, ready);
+    else if (timeout == kDurationImmediate ? !ready() : !s->changed.wait_for(guard, waitFor(timeout), ready)) {
+        c.ret(kMPTimeoutErr);
+        return;
+    }
+    s->value--;
+    c.ret(0);
+}
+
+// --- launchd and the bootstrap server ------------------------------------------------
+// A guest can't reach host services by Mach message, so it finds none of them.
+
+namespace {
+constexpr uint32_t kBootstrapUnknownService = 1102;
+}
+B32_THUNK(_bootstrap_look_up) { c.ret(kBootstrapUnknownService); }
+B32_THUNK(_launch_data_alloc) { c.ret(0); }
+B32_THUNK(_launch_data_new_string) { c.ret(0); }
+B32_THUNK(_launch_data_dict_insert) { c.ret(0); }
+B32_THUNK(_launch_data_free) {}
+B32_THUNK(_launch_msg) { c.ret(0); }
