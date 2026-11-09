@@ -28,6 +28,8 @@ int main(int argc, char **argv) {
 
 #if defined(B32_GUEST_ARM)
     std::printf("cpu subtype: %s\n", image.cpuSubtype == 9 ? "armv7" : image.cpuSubtype == 6 ? "armv6" : "other");
+#elif defined(B32_GUEST_PPC)
+    std::printf("cpu type: ppc (subtype %u)\n", image.cpuSubtype);
 #else
     std::printf("cpu type: i386 (subtype %u)\n", image.cpuSubtype);
 #endif
