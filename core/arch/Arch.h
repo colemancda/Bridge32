@@ -59,6 +59,7 @@ GuestAddr nativeFunction(GuestMemory &mem, GuestHeap &heap, const std::string &s
 inline bool structReturnedInMemory(uint32_t size) { return size != 0 && size != 1 && size != 2 && size != 4 && size != 8; }
 // float and double, and a struct holding just one of them, come back in ST(0).
 constexpr bool kFloatResultsInFpu = true;
+constexpr bool kHighWordFirst = false;
 // long double is the x87's 80 bits, in 16 bytes of argument words.
 constexpr uint32_t kLongDoubleWords = 4;
 #elif defined(B32_GUEST_PPC)
@@ -69,6 +70,8 @@ constexpr uint32_t kLongDoubleWords = 4;
 inline bool structReturnedInMemory(uint32_t size) { return size > 8; }
 // float and double come back in f1 (a float widened to a double).
 constexpr bool kFloatResultsInFpu = true;
+// A 64-bit argument or result is its high word first (r3:r4).
+constexpr bool kHighWordFirst = true;
 // long double from Mac OS X 10.4 (the $LDBL128 symbols) is a pair of doubles
 // in 16 bytes of argument words; older ones are a plain double.
 constexpr uint32_t kLongDoubleWords = 4;
@@ -77,6 +80,7 @@ constexpr uint32_t kLongDoubleWords = 4;
 inline bool structReturnedInMemory(uint32_t size) { return size > 4; }
 // The soft-float ABI uses the integer registers.
 constexpr bool kFloatResultsInFpu = false;
+constexpr bool kHighWordFirst = false;
 // long double is double.
 constexpr uint32_t kLongDoubleWords = 2;
 #endif
