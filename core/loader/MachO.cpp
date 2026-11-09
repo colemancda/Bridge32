@@ -37,10 +37,91 @@ std::string fixedName(const char *name, size_t len) { return std::string(name, s
 constexpr cpu_type_t kGuestCpuType = CPU_TYPE_ARM;
 // armv7 over armv6.
 int sliceRank(uint32_t subtype) { return subtype == CPU_SUBTYPE_ARM_V7 ? 2 : subtype == CPU_SUBTYPE_ARM_V6 ? 1 : 0; }
+#elif defined(B32_GUEST_PPC)
+constexpr cpu_type_t kGuestCpuType = CPU_TYPE_POWERPC;
+// A G4 (7400, 7450) over a G3 (750) over code for any PowerPC; a G5's 970 slice
+// needs 64-bit hardware.
+int sliceRank(uint32_t subtype) {
+    switch (subtype) {
+    case CPU_SUBTYPE_POWERPC_7400:
+    case CPU_SUBTYPE_POWERPC_7450: return 3;
+    case CPU_SUBTYPE_POWERPC_750: return 2;
+    case CPU_SUBTYPE_POWERPC_970: return -1;
+    default: return 1;
+    }
+}
 #else
 constexpr cpu_type_t kGuestCpuType = CPU_TYPE_I386;
 int sliceRank(uint32_t) { return 1; }
 #endif
+
+// Fat headers are always big-endian; so are a PowerPC image's own headers, load
+// commands, symbols and relocations, where every other guest's are the host's.
+// fetch<T> reads one such structure from the file in the host's byte order.
+#if defined(B32_GUEST_BIG_ENDIAN)
+inline uint32_t be32(uint32_t value) { return OSSwapBigToHostInt32(value); }
+void swapWords(void *structure, size_t first, size_t count) {
+    uint32_t *words = static_cast<uint32_t *>(structure) + first;
+    for (size_t i = 0; i < count; i++) words[i] = be32(words[i]);
+}
+inline void fix(uint32_t &value) { value = be32(value); }
+inline void fix(mach_header &h) { swapWords(&h, 0, 7); }
+inline void fix(load_command &c) { swapWords(&c, 0, 2); }
+// cmd and cmdsize, then (past the 16-byte name) vmaddr to flags.
+inline void fix(segment_command &s) { swapWords(&s, 0, 2); swapWords(&s, 6, 8); }
+// Past the two 16-byte names: addr to reserved2.
+inline void fix(section &s) { swapWords(&s, 8, 9); }
+inline void fix(symtab_command &c) { swapWords(&c, 0, 6); }
+inline void fix(dysymtab_command &c) { swapWords(&c, 0, 20); }
+inline void fix(dyld_info_command &c) { swapWords(&c, 0, 12); }
+inline void fix(dylib_command &c) { swapWords(&c, 0, 6); }
+inline void fix(encryption_info_command &c) { swapWords(&c, 0, 5); }
+inline void fix(entry_point_command &c) {
+    swapWords(&c, 0, 2);
+    c.entryoff = OSSwapBigToHostInt64(c.entryoff);
+    c.stacksize = OSSwapBigToHostInt64(c.stacksize);
+}
+inline void fix(struct nlist &n) {
+    n.n_un.n_strx = be32(n.n_un.n_strx);
+    n.n_desc = int16_t(OSSwapBigToHostInt16(uint16_t(n.n_desc)));
+    n.n_value = be32(n.n_value);
+}
+// A relocation's bitfields are laid out from the other end on a big-endian
+// machine, so they're decoded by hand: { address, symbolnum:24 pcrel:1
+// length:2 extern:1 type:4 }, or, when the top bit of the first word is set,
+// { scattered:1 pcrel:1 length:2 type:4 address:24, value }.
+inline void fix(relocation_info &r) {
+    uint32_t words[2];
+    std::memcpy(words, &r, 8);
+    uint32_t w0 = be32(words[0]), w1 = be32(words[1]);
+    if (w0 & R_SCATTERED) {
+        scattered_relocation_info s{};
+        s.r_scattered = 1;
+        s.r_pcrel = (w0 >> 30) & 1;
+        s.r_length = (w0 >> 28) & 3;
+        s.r_type = (w0 >> 24) & 0xF;
+        s.r_address = w0 & 0xFFFFFF;
+        s.r_value = int32_t(w1);
+        std::memcpy(&r, &s, 8);
+    } else {
+        r.r_address = int32_t(w0);
+        r.r_symbolnum = w1 >> 8;
+        r.r_pcrel = (w1 >> 7) & 1;
+        r.r_length = (w1 >> 5) & 3;
+        r.r_extern = (w1 >> 4) & 1;
+        r.r_type = w1 & 0xF;
+    }
+}
+#else
+template <typename T> inline void fix(T &) {}
+#endif
+
+template <typename T> T fetch(const uint8_t *p) {
+    T value;
+    std::memcpy(&value, p, sizeof value);
+    fix(value);
+    return value;
+}
 
 // Picks the guest architecture's slice of a fat binary.
 std::pair<size_t, size_t> pickSlice(const std::vector<uint8_t> &file) {
@@ -99,15 +180,15 @@ uint32_t MachOLoader::span(const std::string &path) {
     auto [sliceOffset, sliceSize] = pickSlice(file);
     const uint8_t *slice = file.data() + sliceOffset;
     mach_header header;
-    std::memcpy(&header, slice, sizeof header);
+    header = fetch<decltype(header)>(slice);
     uint32_t start = UINT32_MAX, end = 0;
     const uint8_t *cmd = slice + sizeof header;
     for (uint32_t i = 0; i < header.ncmds; i++) {
         load_command lc;
-        std::memcpy(&lc, cmd, sizeof lc);
+        lc = fetch<decltype(lc)>(cmd);
         if (lc.cmd == LC_SEGMENT) {
             segment_command seg;
-            std::memcpy(&seg, cmd, sizeof seg);
+            seg = fetch<decltype(seg)>(cmd);
             if (seg.vmsize) {
                 start = std::min(start, seg.vmaddr);
                 end = std::max(end, seg.vmaddr + seg.vmsize);
@@ -124,7 +205,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     const uint8_t *slice = file.data() + sliceOffset;
 
     mach_header header;
-    std::memcpy(&header, slice, sizeof header);
+    header = fetch<decltype(header)>(slice);
     if (header.magic != MH_MAGIC || header.cputype != kGuestCpuType) fatal("%s is not a %s Mach-O", path.c_str(), arch::name());
     if (header.filetype != MH_EXECUTE && header.filetype != MH_DYLIB)
         fatal("%s is not an executable or a dylib", path.c_str());
@@ -138,10 +219,10 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
         const uint8_t *c = slice + sizeof header;
         for (uint32_t i = 0; i < header.ncmds; i++) {
             load_command lc;
-            std::memcpy(&lc, c, sizeof lc);
+            lc = fetch<decltype(lc)>(c);
             if (lc.cmd == LC_SEGMENT) {
                 segment_command seg;
-                std::memcpy(&seg, c, sizeof seg);
+                seg = fetch<decltype(seg)>(c);
                 image.slide = dylibBase - seg.vmaddr;
                 break;
             }
@@ -160,11 +241,11 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     const uint8_t *cmd = slice + sizeof header;
     for (uint32_t i = 0; i < header.ncmds; i++) {
         load_command lc;
-        std::memcpy(&lc, cmd, sizeof lc);
+        lc = fetch<decltype(lc)>(cmd);
         switch (lc.cmd) {
         case LC_SEGMENT: {
             segment_command seg;
-            std::memcpy(&seg, cmd, sizeof seg);
+            seg = fetch<decltype(seg)>(cmd);
             seg.vmaddr += slide;
             segments.push_back(seg);
             image.end = std::max(image.end, seg.vmaddr + seg.vmsize);
@@ -175,22 +256,22 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             }
             for (uint32_t s = 0; s < seg.nsects; s++) {
                 section sect;
-                std::memcpy(&sect, cmd + sizeof seg + s * sizeof sect, sizeof sect);
+                sect = fetch<decltype(sect)>(cmd + sizeof seg + s * sizeof sect);
                 image.sections.push_back(
                     {fixedName(sect.segname, 16), fixedName(sect.sectname, 16), sect.addr + slide, sect.size});
             }
             break;
         }
-        case LC_SYMTAB: std::memcpy(&symtab, cmd, sizeof symtab); break;
-        case LC_DYSYMTAB: std::memcpy(&dysymtab, cmd, sizeof dysymtab); break;
+        case LC_SYMTAB: symtab = fetch<decltype(symtab)>(cmd); break;
+        case LC_DYSYMTAB: dysymtab = fetch<decltype(dysymtab)>(cmd); break;
         case LC_DYLD_INFO:
         case LC_DYLD_INFO_ONLY:
-            std::memcpy(&dyldInfo, cmd, sizeof dyldInfo);
+            dyldInfo = fetch<decltype(dyldInfo)>(cmd);
             haveDyldInfo = true;
             break;
         case LC_MAIN: {
             entry_point_command ep;
-            std::memcpy(&ep, cmd, sizeof ep);
+            ep = fetch<decltype(ep)>(cmd);
             image.hasMain = true;
             image.entry = uint32_t(ep.entryoff);  // made absolute below
             break;
@@ -204,6 +285,9 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             std::memcpy(&pc, state + 15 * 4, 4);
             std::memcpy(&cpsr, state + 16 * 4, 4);
             image.entry = pc | ((cpsr & (1u << 5)) ? 1 : 0);
+#elif defined(B32_GUEST_PPC)
+            // ppc_thread_state: srr0 (the entry point), srr1, r0-r31, cr, xer, lr, ctr, mq, vrsave.
+            image.entry = fetch<uint32_t>(state);
 #else
             // x86_thread_state32: eax ebx ecx edx edi esi ebp esp ss eflags eip ...
             std::memcpy(&image.entry, state + 10 * 4, 4);
@@ -212,7 +296,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
         }
         case LC_ID_DYLIB: {
             dylib_command dc;
-            std::memcpy(&dc, cmd, sizeof dc);
+            dc = fetch<decltype(dc)>(cmd);
             image.installName = reinterpret_cast<const char *>(cmd) + dc.dylib.name.offset;
             break;
         }
@@ -220,13 +304,13 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
         case LC_LOAD_WEAK_DYLIB:
         case LC_REEXPORT_DYLIB: {
             dylib_command dc;
-            std::memcpy(&dc, cmd, sizeof dc);
+            dc = fetch<decltype(dc)>(cmd);
             image.dylibs.push_back(reinterpret_cast<const char *>(cmd) + dc.dylib.name.offset);
             break;
         }
         case LC_ENCRYPTION_INFO: {
             encryption_info_command enc;
-            std::memcpy(&enc, cmd, sizeof enc);
+            enc = fetch<decltype(enc)>(cmd);
             if (enc.cryptid) fatal("%s is FairPlay-encrypted; decrypt it first", path.c_str());
             break;
         }
@@ -245,7 +329,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
 
     auto symbolName = [&](uint32_t index) -> std::string {
         struct nlist sym;
-        std::memcpy(&sym, slice + symtab.symoff + index * sizeof sym, sizeof sym);
+        sym = fetch<decltype(sym)>(slice + symtab.symoff + index * sizeof sym);
         return reinterpret_cast<const char *>(slice + symtab.stroff + sym.n_un.n_strx);
     };
     // The image's own external definitions. Weak and coalesced symbols (C++
@@ -254,7 +338,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     std::unordered_map<std::string, GuestAddr> &defined = image.exports;
     for (uint32_t i = 0; i < symtab.nsyms; i++) {
         struct nlist sym;
-        std::memcpy(&sym, slice + symtab.symoff + i * sizeof sym, sizeof sym);
+        sym = fetch<decltype(sym)>(slice + symtab.symoff + i * sizeof sym);
         if ((sym.n_type & N_STAB) || (sym.n_type & N_TYPE) != N_SECT || !(sym.n_type & N_EXT)) continue;
         GuestAddr addr = sym.n_value + slide;
 #if defined(B32_GUEST_ARM)
@@ -306,12 +390,12 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             GuestAddr base = segments.empty() ? 0 : segments.front().vmaddr;
             for (uint32_t i = 0; i < dysymtab.nlocrel; i++) {
                 relocation_info rel;
-                std::memcpy(&rel, slice + dysymtab.locreloff + i * sizeof rel, sizeof rel);
+                rel = fetch<decltype(rel)>(slice + dysymtab.locreloff + i * sizeof rel);
                 // As dyld does: only 4-byte vanilla relocations move a pointer;
                 // absolute ones don't, and a prebound lazy pointer is bound below.
                 if (uint32_t(rel.r_address) & R_SCATTERED) {
                     scattered_relocation_info srel;
-                    std::memcpy(&srel, &rel, sizeof srel);
+                    srel = fetch<decltype(srel)>(&rel);
                     if (srel.r_length == 2 && srel.r_type == GENERIC_RELOC_VANILLA) rebase(base + srel.r_address);
                 } else if (rel.r_length == 2 && rel.r_type == GENERIC_RELOC_VANILLA && rel.r_symbolnum != R_ABS) {
                     rebase(base + uint32_t(rel.r_address));
@@ -333,13 +417,13 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     const uint8_t *sectCmd = slice + sizeof header;
     for (uint32_t i = 0; i < header.ncmds; i++) {
         load_command lc;
-        std::memcpy(&lc, sectCmd, sizeof lc);
+        lc = fetch<decltype(lc)>(sectCmd);
         if (lc.cmd == LC_SEGMENT) {
             segment_command seg;
-            std::memcpy(&seg, sectCmd, sizeof seg);
+            seg = fetch<decltype(seg)>(sectCmd);
             for (uint32_t s = 0; s < seg.nsects; s++) {
                 section sect;
-                std::memcpy(&sect, sectCmd + sizeof seg + s * sizeof sect, sizeof sect);
+                sect = fetch<decltype(sect)>(sectCmd + sizeof seg + s * sizeof sect);
                 uint32_t type = sect.flags & SECTION_TYPE;
 #if defined(B32_GUEST_I386)
                 // Mac OS X 10.4-era __IMPORT,__jump_table: five-byte entries of
@@ -361,13 +445,12 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
 #endif
                 if (type != S_NON_LAZY_SYMBOL_POINTERS && type != S_LAZY_SYMBOL_POINTERS) continue;
                 for (uint32_t k = 0; k < sect.size / 4; k++) {
-                    uint32_t indirect;
-                    std::memcpy(&indirect, slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4, 4);
+                    uint32_t indirect = fetch<uint32_t>(slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4);
                     if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
                     // A symbol the linker made private to this image (a template
                     // instantiation): the pointer already holds its address.
                     struct nlist sym;
-                    std::memcpy(&sym, slice + symtab.symoff + indirect * sizeof sym, sizeof sym);
+                    sym = fetch<decltype(sym)>(slice + symtab.symoff + indirect * sizeof sym);
                     if ((sym.n_type & N_TYPE) == N_SECT && !(sym.n_type & N_EXT)) continue;
                     bind(sect.addr + slide + k * 4, symbolName(indirect), 0);
                 }
@@ -382,7 +465,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     GuestAddr relocBase = segments.empty() ? 0 : segments.front().vmaddr;
     for (uint32_t i = 0; i < dysymtab.nextrel; i++) {
         relocation_info rel;
-        std::memcpy(&rel, slice + dysymtab.extreloff + i * sizeof rel, sizeof rel);
+        rel = fetch<decltype(rel)>(slice + dysymtab.extreloff + i * sizeof rel);
         if (uint32_t(rel.r_address) & R_SCATTERED) continue;
         if (!rel.r_extern || rel.r_length != 2 || rel.r_type != GENERIC_RELOC_VANILLA) {
             log("skipping unsupported external relocation type %u at 0x%08x", rel.r_type, rel.r_address);
