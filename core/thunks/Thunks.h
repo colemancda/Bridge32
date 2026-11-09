@@ -72,6 +72,14 @@ public:
         std::memcpy(&d, &b, 8);
         return d;
     }
+    // A float that is a member of a struct passed by value (a CGRect, a CGPoint):
+    // those travel in the general-purpose words, never in the float registers.
+    float structFloat() {
+        uint32_t b = u32();
+        float f;
+        std::memcpy(&f, &b, 4);
+        return f;
+    }
     // The rest of the arguments are variadic: a caller shadows a float or
     // double in the words that follow, and that is where the callee reads it.
     void beginVarArgs() { variadic_ = true; }
