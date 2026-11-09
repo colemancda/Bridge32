@@ -78,7 +78,7 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             } else if (*p == 'j') {
                 wide = true;  // intmax_t is 64-bit
             } else if (*p == 'L') {
-                longDouble = true;  // long double is double on ARM
+                longDouble = true;
             }
             p++;  // h, hh, l, z and t are all 32-bit on armv7
         }
@@ -94,8 +94,7 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             out += piece;
             break;
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A':
-            (void)longDouble;
-            std::snprintf(piece, sizeof piece, (spec + conv).c_str(), args.f64());
+            std::snprintf(piece, sizeof piece, (spec + conv).c_str(), longDouble ? args.longDouble() : args.f64());
             out += piece;
             break;
         case 's': {
