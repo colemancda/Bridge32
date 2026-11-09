@@ -25,13 +25,15 @@ using namespace b32;
 namespace {
 template <typename T> T ref(Call &c) { return (T)c.rt.bridge().toHost(c.args.ptr()); }
 CGFloat cgf(Call &c) { return CGFloat(c.args.f32()); }
+// A float that's part of a struct passed by value.
+CGFloat cgs(Call &c) { return CGFloat(c.args.structFloat()); }
 CGRect rect(Call &c) {
-    CGFloat x = cgf(c), y = cgf(c), w = cgf(c), h = cgf(c);
+    CGFloat x = cgs(c), y = cgs(c), w = cgs(c), h = cgs(c);
     return CGRectMake(x, y, w, h);
 }
 CGPoint point(Call &c) {
-    CGFloat x = cgf(c);
-    return CGPointMake(x, cgf(c));
+    CGFloat x = cgs(c);
+    return CGPointMake(x, cgs(c));
 }
 }  // namespace
 
@@ -257,7 +259,7 @@ B32_THUNK(_CGImageGetHeight) { c.ret(uint32_t(CGImageGetHeight(ref<CGImageRef>(c
 namespace {
 CGAffineTransform transform(Call &c) {
     CGFloat v[6];
-    for (auto &x : v) x = cgf(c);
+    for (auto &x : v) x = cgs(c);
     return CGAffineTransformMake(v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 void writeTransform(Call &c, GuestAddr out, CGAffineTransform t) {
