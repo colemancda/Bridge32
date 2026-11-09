@@ -484,6 +484,91 @@ same `Cpu` interface, with the low-4 GB reservation. Independent of the
 AppKit work by then.
 Size: XL.
 
+## Phase 0 results (2026-11-08)
+
+Done on the `i386` branch, in the order the plan gives:
+
+- Unicorn 2.1.4 is a submodule (`external/unicorn`), built by CMake with
+  `-DB32_GUEST_ARCH=i386`; `external/unicorn-parallel.patch` (one line,
+  `curr_cflags()` returns `CF_PARALLEL`) is applied at configure time.
+- `Cpu` is architecture-neutral; `ArmCpu` (dynarmic) and `X86Cpu` (Unicorn)
+  carry the calling conventions in `core/arch/`. The thunk stub on i386 is
+  `hlt; ret`: the halt traps with the stub's index derived from its address,
+  the ret runs on resume, and a tail call moves eip past it. Everything the
+  shared thunk and ObjC files knew about ARM registers went through
+  `arg()`, `setArg()`, `sp()`, `returnAddress()`, `setResult*()`,
+  `frameChain()`, `threadState()` and `stubContext()`; the ARM host tools
+  still build and link (their guest tests need an iOS SDK that wasn't
+  available, so they were not rerun).
+- The loader takes i386 slices, `x86_THREAD_STATE32` entry points, and
+  aliases libSystem's `$UNIX2003`/`$INODE64`/`$NOCANCEL`/`$1050`/
+  `$DARWIN_EXTSN` variants to the base thunks (hello imported
+  `strtod$UNIX2003` on its first run).
+- `hello`, `rbtree` and a new `threads` test pass under `ctest`. `threads`
+  bumps a counter with `lock xadd` from four guest threads (exactly 800000,
+  so the atomics patch holds; the unlocked twin counter shows real
+  interleaving) and reads a double back from the host through ST(0).
+
+Measured on the build machine (Apple M1 Pro), `tests/guest/bench`
+built once natively for arm64 at -O1 and once for i386, best of two runs
+(a second run under load was 1.7× slower across the board):
+
+| Benchmark | Native arm64 | i386 under Unicorn | Ratio |
+| --- | --- | --- | --- |
+| Thunk round trip (`strlen` of a 20-byte string) | folded by the compiler | 32 ns per call | – |
+| `fib(31)` (2.7 M calls) | 0.005 s | 0.298 s | ~60× |
+| Byte sieve to 20 M | 0.062 s | 2.97 s | 48× |
+| Mandelbrot 400×400 in doubles (SSE2) | 0.016 s | 0.218 s | 14× |
+| `lock xadd` ×10 M, one thread | 0.069 s | 0.200 s | 3× |
+
+What the numbers mean for the plan:
+
+- The thunk trap is not a cost worth designing around: 32 ns is below the
+  "few microseconds" trigger by two orders of magnitude, so a message to a
+  host object will cost what the host dispatch costs.
+- Translated code is where Unicorn is slow: 15–60× below native arm64 on
+  integer code (call-heavy code worst, QEMU's indirect returns), 14× on
+  SSE2 doubles. Relative to the 2008 Macs these apps ran on, that is
+  roughly a late-1990s machine: enough for Cocoa productivity apps, not for
+  3D games. The Phase 5 FEXCore port is triggered by app performance, not
+  by thunk cost.
+
+Findings that changed the code or the plan:
+
+- SSE was disabled: Unicorn sets CR4.OSFXSR only for CPU models with XSAVE,
+  and the Penryn model predates it, so `cvtsi2sd` faulted as an invalid
+  instruction. `UnicornCpu` sets CR4.OSFXSR and OSXMMEXCPT itself.
+- Loading `%gs` from the GDT made QEMU recompute the 32-bit code and stack
+  flags from the reset-state CS and SS descriptors, truncating stack
+  addresses to 16 bits. All six segment registers are loaded from the
+  per-CPU GDT (code 0x08, data 0x10, GS 0x18 based at the TSD).
+- Guest memory is mapped into an engine lazily, from the unmapped-access
+  hook, one maximal run of committed pages at a time; the sentinel page
+  that holds the GDTs is mapped eagerly because segment loads read it
+  outside emulation.
+- `UC_TLB_VIRTUAL` (Unicorn's own TLB) hangs with the lazy mapping hook; it
+  was not pursued.
+- A misaligned lock-prefixed instruction raises `EXCP_ATOMIC`, which Unicorn
+  doesn't handle (QEMU's single-step fallback isn't compiled in); it
+  surfaces as a fatal `UC_ERR_EXCEPTION` with the eip. Not hit yet.
+- No i386 linker exists on a current Mac: Apple's `ld` refuses i386, `lld`
+  never supported 32-bit Mach-O, and building ld64 from cctools-port was
+  not permitted in the session that did this work. `tools/i386-link.py`
+  (a single-object linker: vanilla relocations, synthesized stubs and lazy
+  pointers, the object's own non-lazy pointers, LC_MAIN) links the C tests
+  compiled with `-mdynamic-no-pic`. It will not link ObjC or C++ tests; an
+  ld64 build (cctools-port, or `ld-classic` from Xcode 15/16) is needed
+  before Phase 2.
+
+Left for Phase 1 from its list: `__IMPORT,__jump_table` patching and the
+scattered relocations of 10.4-era binaries, fault delivery to guest signal
+handlers (`X86Cpu::deliverFault` is fatal), wiring `X86Cpu::retStruct` into
+the struct-returning thunks and `floatingResult()` into the host-to-guest
+trampolines (both compile but the ObjC paths still assume ARM's
+integer-register float returns), and the 32-bit-inode `stat` layout for
+imports without `$INODE64` (today they alias to the 64-bit-inode thunks,
+which is wrong for pre-10.6 binaries).
+
 ## Cross-cutting items already missing on the iOS side
 
 These block Mac apps sooner than iOS games, so they land in the plan:
