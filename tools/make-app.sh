@@ -20,8 +20,9 @@
 # The guest's files go in Out.app/Contents/Resources, so the game's
 # NSBundle mainBundle, nibs and resources resolve as on the device.
 #
-# Given an i386 Mac app (Foo.app/Contents/...) instead, it wraps that into the
-# AppKit shell (build/i386/Bridge32.app, from -DB32_MAC=ON; the options above
+# Given an i386 or PowerPC Mac app (Foo.app/Contents/...) instead, it wraps that
+# into the AppKit shell for its architecture (build/i386/Bridge32.app, or
+# build/ppc/Bridge32.app for an app with no i386 slice, from -DB32_MAC=ON; the options above
 # don't apply): the app's Resources become the shell's, and its executable and
 # Frameworks go to Contents/B32Guest with their relative layout intact.
 set -eu
@@ -48,20 +49,32 @@ input=$1
 
 if [ -d "$input/Contents" ]; then
     guest=${input%/}
-    shell_app="${B32_MAC_SHELL_APP:-$root/build/i386/Bridge32.app}"
-    [ -d "$shell_app" ] || { echo "build the AppKit shell first: cmake -S . -B build/i386 -DB32_GUEST_ARCH=i386 -DB32_MAC=ON" >&2; exit 1; }
     executable=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$guest/Contents/Info.plist")
+    # The guest's architectures: an i386 slice wins over a PowerPC one in a
+    # universal binary, since the Intel guest is the better tested.
+    guest_archs() { python3 -I "$here/macho-archs.py" "$1" 2>/dev/null; }
+    runs_here() { guest_archs "$1" | grep -qwE 'i386|ppc'; }
     # A launcher script (TowerFall's starts a Mono kickstart binary) isn't what
-    # runs: its i386 Mach-O beside it is, from the same folder.
+    # runs: its Mach-O beside it is, from the same folder.
     chdir_flag=""
-    if ! lipo -archs "$guest/Contents/MacOS/$executable" 2>/dev/null | grep -qw i386; then
+    if ! runs_here "$guest/Contents/MacOS/$executable"; then
         for candidate in "$guest"/Contents/MacOS/*; do
-            [ -f "$candidate" ] && lipo -archs "$candidate" 2>/dev/null | grep -qw i386 || continue
+            [ -f "$candidate" ] && runs_here "$candidate" || continue
             executable=$(basename "$candidate")
             chdir_flag=1
             break
         done
     fi
+    if guest_archs "$guest/Contents/MacOS/$executable" | grep -qw i386; then
+        guest_arch=i386
+    elif guest_archs "$guest/Contents/MacOS/$executable" | grep -qw ppc; then
+        guest_arch=ppc
+    else
+        echo "$guest has no i386 or PowerPC code to run" >&2
+        exit 1
+    fi
+    shell_app="${B32_MAC_SHELL_APP:-$root/build/$guest_arch/Bridge32.app}"
+    [ -d "$shell_app" ] || { echo "build the AppKit shell first: cmake -S . -B build/$guest_arch -DB32_GUEST_ARCH=$guest_arch -DB32_MAC=ON" >&2; exit 1; }
     name=$(basename "$guest" .app)
     out=${2:-$root/build/apps/$name.app}
     mkdir -p "$(dirname "$out")"
