@@ -15,19 +15,46 @@ std::unordered_map<std::string, ThunkFn> &ThunkRegistry::all() {
     return registry;
 }
 
-std::string baseSymbol(const std::string &symbol) {
-    size_t dollar = symbol.find('$');
-    if (dollar == std::string::npos) return symbol;
-    for (const char *suffix : {"$UNIX2003", "$INODE64", "$NOCANCEL", "$DARWIN_EXTSN", "$1050"})
-        if (symbol.compare(dollar, std::string::npos, suffix) == 0) return symbol.substr(0, dollar);
+namespace {
+const char *const kVariantSuffixes[] = {"$UNIX2003", "$INODE64", "$NOCANCEL", "$DARWIN_EXTSN", "$1050", "$1060", "$1070"};
+
+// Removes the variant suffixes from `symbol`, keeping $INODE64 when asked.
+std::string withoutVariants(std::string symbol, bool keepInode64) {
+    for (bool changed = true; changed;) {
+        changed = false;
+        for (const char *suffix : kVariantSuffixes) {
+            if (keepInode64 && std::strcmp(suffix, "$INODE64") == 0) continue;
+            size_t at = symbol.find(suffix);
+            if (at == std::string::npos) continue;
+            symbol.erase(at, std::strlen(suffix));
+            changed = true;
+        }
+    }
     return symbol;
 }
+}  // namespace
+
+std::string baseSymbol(const std::string &symbol) { return withoutVariants(symbol, false); }
 
 ThunkFn ThunkRegistry::find(const std::string &symbol) {
     auto &registry = all();
     auto it = registry.find(symbol);
+    if (it == registry.end()) it = registry.find(withoutVariants(symbol, true));
     if (it == registry.end()) it = registry.find(baseSymbol(symbol));
     return it == registry.end() ? nullptr : it->second;
+}
+
+StructResult::StructResult(Call &c, uint32_t size) : c_(c), inMemory_(arch::structReturnedInMemory(size)) {
+    addr_ = inMemory_ ? c.args.ptr() : c.heap.calloc(1, 8);
+}
+
+StructResult::~StructResult() {
+    if (inMemory_) {
+        c_.cpu.popStructPointer();
+        return;
+    }
+    c_.cpu.setResult64(c_.mem.read<uint64_t>(addr_));
+    c_.heap.free(addr_);
 }
 
 ThunkTable::ThunkTable(GuestMemory &mem) : mem_(mem) {
