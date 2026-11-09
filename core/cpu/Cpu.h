@@ -92,6 +92,9 @@ public:
 
     // Runs guest code until the sentinel is reached at the current call depth.
     void run();
+    // How many run()s are in progress on this thread: guest and host frames
+    // alternate, one stretch of guest code per run.
+    int runDepth() const { return runDepth_; }
 
     // Calls a guest function with argument words and returns its result()
     // (the high half holds the second word). Reentrant: thunks may call back
@@ -157,6 +160,7 @@ private:
     GuestMemory &mem_;
     SvcHandler handler_;
     bool stopRequested_ = false;
+    int runDepth_ = 0;
 
     std::mutex suspendLock_;
     std::condition_variable suspendChanged_;
