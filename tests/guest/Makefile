@@ -14,7 +14,7 @@ OUT     ?= ../../build/guest-i386
 CFLAGS  := -arch i386 -target i386-apple-macos10.13 -mdynamic-no-pic -fno-asynchronous-unwind-tables \
            -fno-unwind-tables -O1 -Wall -Wno-unused-command-line-argument
 LINK    := python3 ../../tools/i386-link.py
-TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib
+TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib objc objclegacy
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
@@ -23,6 +23,17 @@ all: $(addprefix $(OUT)/,$(TESTS))
 $(OUT)/cxx: cxx/cxx.cpp ../../tools/i386-link.py
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -std=c++17 -Wno-\#warnings -x c++ -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+# Manual retain/release and the legacy runtime, which clang uses for i386.
+$(OUT)/objc: objc/objc.m ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fno-objc-arc -c -o $@.o $<
+	$(LINK) -o $@ $@.o
+
+$(OUT)/objclegacy: objclegacy/objclegacy.m ../../tools/i386-link.py
+	@mkdir -p $(OUT)
+	$(CC) $(CFLAGS) -fno-objc-arc -c -o $@.o $<
 	$(LINK) -o $@ $@.o
 
 # Linked the way Mac OS X 10.4's ld did it.
