@@ -3,7 +3,9 @@
 name, NSMainNibFile, NSPrincipalClass, document types) with the shell's
 executable and the keys that describe the original binary replaced.
 
-usage: merge-mac-plist.py GUEST_INFO_PLIST SHELL_INFO_PLIST OUT_INFO_PLIST
+usage: merge-mac-plist.py GUEST_INFO_PLIST SHELL_INFO_PLIST OUT_INFO_PLIST [GUEST_EXECUTABLE]
+
+GUEST_EXECUTABLE overrides the guest's CFBundleExecutable, for launcher scripts.
 """
 import plistlib
 import sys
@@ -24,7 +26,7 @@ def main():
     with open(shell_path, "rb") as f:
         shell = plistlib.load(f)
     merged = {k: v for k, v in guest.items() if k not in DROP}
-    merged["B32GuestExecutable"] = guest["CFBundleExecutable"]
+    merged["B32GuestExecutable"] = sys.argv[4] if len(sys.argv) > 4 else guest["CFBundleExecutable"]
     if "LSMinimumSystemVersion" in guest:
         merged["B32GuestSDKVersion"] = guest["LSMinimumSystemVersion"]
     merged.update({k: shell[k] for k in FROM_SHELL if k in shell})
