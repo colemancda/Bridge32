@@ -595,14 +595,57 @@ Limits to carry forward:
   A handler runs with the faulting code's FP state, which is restored when it
   returns, so it can't change FP registers through the context.
 - `_signal` still records nothing; only `sigaction` handlers run.
-- `objc_allocateClassPair` has no thunk, so guests can't create classes at run
-  time yet. That belongs with the legacy runtime in Phase 2.
-- `tools/i386-link.py` links C and exception-free C++ from one object. The
-  ObjC tests of Phase 2 still need a real ld64.
+- `tools/i386-link.py` links C and exception-free C++ from one object. (Phase 2
+  extended it to ObjC; see below.)
 - The armv7 guest tests were not rerun, because the iOS SDK they build against
   is on an unmounted volume. ARM host tools build, and the Catalyst-only files
   type-check. On ARM the struct, float and stat paths go through the same
   rules as before by construction, but that is not a test result.
+
+## Phase 2 results (2026-11-09)
+
+Phase 2's exit test holds: `run-objc` passes as i386 with the same expected
+output as armv7, and all ten `ctest` entries pass in the i386 build.
+
+`core/objc/LegacyImage.mm` reads the `__OBJC` segment. It fixes up in place
+what guest code reads directly (`super_class`, metaclass links, class and
+selector references), keeps each class at its own address, and makes modern
+`class_ro_t`, ivar, method and protocol records for the rest of the bridge, so
+message dispatch and reflection did not need a second format.
+`core/objc/legacy_thunks.mm` adds setjmp-based exceptions and the garbage
+collector's write barriers.
+
+The `objclegacy` guest covers fragile ivars read directly, a chain of guest
+superclasses with super sends, `+load`, `+initialize`, a category, atomic
+properties, a protocol with an optional method, `double` and `NSRange` returns,
+`@try/@catch/@finally`, an exception thrown by host code, a guest throw that
+crosses host frames, a rethrow through `@finally`, a write barrier, and a class
+made at run time with an ivar and a method.
+
+A throw that can't reach its `@try` by longjmp, because host frames lie between
+them, becomes a host exception. Host `@try` blocks see it as they would on a
+real Mac, and the guest-to-host call site below the guest's `@try` turns it back
+into a guest throw.
+
+A real binary built by Apple's tools also goes through the reader: Breakpad's
+`crash_report_sender` (i386 AppKit) has its classes, categories and protocols
+read, and only 8 imports lack a thunk, 4 of them AppKit functions for Phase 3.
+
+Corrections and limits:
+
+- A real ld64 turned out not to be needed for these tests. `tools/i386-link.py`
+  now writes a `__OBJC` segment and external relocations, which covers a
+  single-object ObjC program. Multi-object test programs would still need one.
+- Run-time classes get their shadow class at `objc_allocateClassPair`, so
+  methods added before `objc_registerClassPair` are visible to the host at once.
+- A GC-only image is detected and logged, but it was not run: nothing on this
+  Mac is one. Without a collector its objects are never freed.
+- Old binaries with `@"..."` compiled as `NSConstantString` objects
+  (`-fno-constant-cfstrings`) are not handled.
+- `class_getInstanceSize` of a host class reports the 64-bit host size, not the
+  32-bit size a fragile subclass was compiled against.
+- `run-objc` passes on i386 only so far. The armv7 tests still need the iOS SDK
+  volume; ARM host tools build.
 
 ## Cross-cutting items already missing on the iOS side
 
