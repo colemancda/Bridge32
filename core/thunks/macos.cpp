@@ -51,7 +51,11 @@ void retErrno(Call &c, int result) {
 B32_THUNK(_mach_port_allocate) {
     c.args.u32();
     uint32_t right = c.args.u32();
-    c.ret(::mach_port_allocate(mach_task_self(), right, c.mem.ptr<mach_port_name_t>(c.args.ptr())));
+    GuestAddr out = c.args.ptr();
+    mach_port_name_t name = 0;
+    kern_return_t kr = ::mach_port_allocate(mach_task_self(), right, &name);
+    c.mem.write<uint32_t>(out, name);
+    c.ret(kr);
 }
 B32_THUNK(_mach_port_insert_right) {
     c.args.u32();
@@ -61,7 +65,12 @@ B32_THUNK(_mach_port_insert_right) {
 B32_THUNK(_task_set_exception_ports) { c.ret(KERN_SUCCESS); }
 // mach_msg_return_t mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify)
 B32_THUNK(_mach_msg) {
-    auto *msg = c.mem.ptr<mach_msg_header_t>(c.args.ptr());
+#if defined(B32_GUEST_BIG_ENDIAN)
+    // The message header's fields would need converting both ways; nothing on
+    // the PowerPC side has needed it yet.
+    fatal("mach_msg isn't converted for big-endian guests yet");
+#endif
+    auto *msg = static_cast<mach_msg_header_t *>(c.mem.ptr<void>(c.args.ptr()));
     uint32_t option = c.args.u32(), sendSize = c.args.u32(), receiveSize = c.args.u32(), name = c.args.u32();
     uint32_t timeout = c.args.u32();
     c.ret(::mach_msg(msg, option, sendSize, receiveSize, name, timeout, c.args.u32()));
