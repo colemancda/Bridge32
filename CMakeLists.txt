@@ -78,9 +78,11 @@ else()
     endif()
 endif()
 
-# The PowerPC guest so far is the CPU: the engine, the calling convention and
-# big-endian guest memory, tested without a loader (tests/ppc). The runtime
-# around it (b32core, the shell, b32-run) arrives with the loader.
+# The PowerPC guest's CPU: the engine, the calling convention and big-endian
+# guest memory, tested without a loader (tests/ppc). The runtime around it
+# (b32core, b32-run, b32-inspect) is built with -DB32_PPC_RUNTIME=ON; it isn't
+# finished (docs/ppc-mac-plan.md, Phases 1-3), so it's off until it compiles.
+option(B32_PPC_RUNTIME "Build the PowerPC runtime and tools (not complete)" OFF)
 if(B32_GUEST_ARCH STREQUAL "ppc")
     if(NOT B32_HAVE_ENGINE)
         message(FATAL_ERROR "The ppc guest needs Unicorn in external/unicorn")
@@ -97,7 +99,9 @@ if(B32_GUEST_ARCH STREQUAL "ppc")
     enable_testing()
     add_test(NAME ppc-cpu COMMAND b32-ppc-cpu-test)
     set_tests_properties(ppc-cpu PROPERTIES PASS_REGULAR_EXPRESSION "ppc cpu passed" FAIL_REGULAR_EXPRESSION "FAIL")
-    return()
+    if(NOT B32_PPC_RUNTIME)
+        return()
+    endif()
 endif()
 
 # An OBJECT library so the B32_THUNK registrars in every file are linked in.
@@ -133,9 +137,15 @@ add_library(b32core OBJECT
 if(B32_GUEST_ARCH STREQUAL "arm")
     target_sources(b32core PRIVATE core/arch/arm/ArmCpu.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_ARM=1)
+elseif(B32_GUEST_ARCH STREQUAL "ppc")
+    # No guest Objective-C yet (the legacy runtime reader is i386's), and no
+    # wide strings; the Mac's libSystem and libstdc++ thunks are shared with the
+    # i386 guest. B32_GUEST_MAC is what both Mac guests have in common.
+    target_sources(b32core PRIVATE core/arch/ppc/PowerCpu.cpp core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
+    target_compile_definitions(b32core PUBLIC B32_GUEST_PPC=1 B32_GUEST_BIG_ENDIAN=1 B32_GUEST_MAC=1)
 else()
     target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_wstring.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
-    target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1)
+    target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1 B32_GUEST_MAC=1)
 endif()
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -149,6 +159,10 @@ if(B32_HAVE_ENGINE)
         target_sources(b32core PRIVATE core/cpu/DynarmicCpu.cpp)
         target_link_libraries(b32core PUBLIC dynarmic)
         target_compile_definitions(b32core PUBLIC B32_HAVE_DYNARMIC=1)
+    elseif(B32_GUEST_ARCH STREQUAL "ppc")
+        target_sources(b32core PRIVATE core/cpu/UnicornPowerCpu.cpp)
+        target_link_libraries(b32core PUBLIC unicorn)
+        target_include_directories(b32core PUBLIC "${B32_UNICORN_DIR}/include")
     else()
         target_sources(b32core PRIVATE core/cpu/UnicornCpu.cpp)
         target_link_libraries(b32core PUBLIC unicorn)
@@ -215,6 +229,8 @@ endif()
 enable_testing()
 if(B32_GUEST_ARCH STREQUAL "arm")
     set(B32_GUEST_DIR "${CMAKE_SOURCE_DIR}/build/guest")
+elseif(B32_GUEST_ARCH STREQUAL "ppc")
+    set(B32_GUEST_DIR "${CMAKE_SOURCE_DIR}/build/guest-ppc")
 else()
     set(B32_GUEST_DIR "${CMAKE_SOURCE_DIR}/build/guest-i386")
 endif()
