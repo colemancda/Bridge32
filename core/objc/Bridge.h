@@ -146,7 +146,14 @@ public:
     // is where lookup starts (Super) or the class whose superclass it starts
     // at (Super2, what the compiler emits).
     enum class SuperKind { None, Super, Super2 };
-    void msgSend(Call &c, bool stret, SuperKind kind = SuperKind::None);
+    // `fpret` variants return a floating-point value (only i386 has them).
+    void msgSend(Call &c, bool stret, SuperKind kind = SuperKind::None, bool fpret = false);
+    // Returns a value already in guest layout to the guest, as its ABI says;
+    // `retPtr` is the hidden result pointer when guestReturnClass is Memory.
+    void returnToGuest(Call &c, const Type &type, const uint8_t *guest, GuestAddr retPtr);
+    // Stores what a guest function returned (`words` is Cpu::call's result)
+    // in guest layout, for a type that doesn't come back through memory.
+    void resultFromGuest(Cpu &cpu, const Type &type, uint64_t words, uint8_t *guest);
 
     // Sends a message from host code through the guest's dispatch, so guest
     // overrides run. Arguments are guest words after self and _cmd.
