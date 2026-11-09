@@ -408,12 +408,13 @@ B32_THUNK(_perror) {
 }
 B32_THUNK(_wcscpy) {
     GuestAddr dst = c.args.ptr();
-    std::wcscpy(c.mem.ptr<wchar_t>(dst), c.mem.ptr<wchar_t>(c.args.ptr()));
+    c.mem.writeWide(dst, c.mem.readWide(c.args.ptr()));
     c.ret(dst);
 }
 B32_THUNK(_wcscmp) {
-    const wchar_t *a = c.mem.ptr<wchar_t>(c.args.ptr());
-    c.ret(uint32_t(std::wcscmp(a, c.mem.ptr<wchar_t>(c.args.ptr()))));
+    std::wstring a = c.mem.readWide(c.args.ptr());
+    std::wstring b = c.mem.readWide(c.args.ptr());
+    c.ret(uint32_t(std::wcscmp(a.c_str(), b.c_str())));
 }
 
 B32_THUNK(_memcmp) {
@@ -847,9 +848,8 @@ B32_THUNK(_vasprintf) {
 
 // int64_t OSAtomicAdd64(int64_t amount, volatile int64_t *value)
 B32_THUNK(_OSAtomicAdd64) {
-    int64_t amount = int64_t(c.args.u64());
-    auto *value = c.mem.ptr<std::atomic<int64_t>>(c.args.ptr());
-    c.ret64(uint64_t(value->fetch_add(amount) + amount));
+    uint64_t amount = c.args.u64();
+    c.ret64(c.mem.atomicUpdate<uint64_t>(c.args.ptr(), [&](uint64_t v) { return v + amount; }) + amount);
 }
 // void __atomic_load(size_t size, void *src, void *dst, int order) and
 // __atomic_store(size_t size, void *dst, void *src, int order): for sizes
