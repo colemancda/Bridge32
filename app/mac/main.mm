@@ -48,6 +48,19 @@ int main(int argc, char **argv) {
             return std::make_unique<b32::UnicornCpu>(mem, std::move(handler));
         });
         if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
+        // A guest's libraries: its Frameworks folder and, for apps that set
+        // DYLD_LIBRARY_PATH in a launcher script, folders beside the executable.
+        rt.addGuestLibraryDir([guest stringByAppendingPathComponent:@"Frameworks"].fileSystemRepresentation);
+        NSString *macos = [guest stringByAppendingPathComponent:@"MacOS"];
+        rt.addGuestLibraryDir(macos.fileSystemRepresentation);
+        for (NSString *entry in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:macos error:nil]) {
+            BOOL isDirectory = NO;
+            NSString *full = [macos stringByAppendingPathComponent:entry];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:full isDirectory:&isDirectory] && isDirectory)
+                rt.addGuestLibraryDir(full.fileSystemRepresentation);
+        }
+        // A launcher script usually cd's there first.
+        if ([[bundle objectForInfoDictionaryKey:@"B32GuestChdir"] boolValue]) chdir(macos.fileSystemRepresentation);
         rt.load(path.fileSystemRepresentation);
         b32::log("loaded %s", path.fileSystemRepresentation);
 
