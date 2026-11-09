@@ -131,11 +131,11 @@ B32_THUNK(__NSGetArgv) { c.ret(processArgs(c) + 4); }
 
 B32_THUNK(_exit) {
     int status = c.args.i32();
-    log("guest called exit(%d) from 0x%08x", status, c.cpu.reg(Cpu::LR));
+    log("guest called exit(%d) from 0x%08x", status, c.cpu.returnAddress());
     c.rt.exit(status);
 }
 B32_THUNK(__exit) { c.rt.exit(c.args.i32()); }
-B32_THUNK(_abort) { fatal("guest called abort() from 0x%08x", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(_abort) { fatal("guest called abort() from 0x%08x", c.cpu.returnAddress()); }
 
 B32_THUNK(_atol) { c.ret(uint32_t(std::atol(c.mem.cstr(c.args.ptr())))); }
 B32_THUNK(_atof) { c.retF64(std::atof(c.mem.cstr(c.args.ptr()))); }
@@ -188,9 +188,8 @@ B32_THUNK(_strlen) {
     GuestAddr s = c.args.ptr();
     if (!c.mem.isMapped(s)) {
         std::string frames;
-        for (uint32_t fp = c.cpu.reg(7), i = 0; i < 12 && fp && c.mem.isMapped(fp); i++, fp = c.mem.read<uint32_t>(fp))
-            frames += " " + std::to_string(c.mem.read<uint32_t>(fp + 4));
-        fatal("strlen(0x%08x): unmapped (from 0x%08x; frames%s)", s, c.cpu.reg(Cpu::LR), frames.c_str());
+        for (uint32_t ret : c.cpu.frameChain(12)) frames += " " + std::to_string(ret);
+        fatal("strlen(0x%08x): unmapped (from 0x%08x; frames%s)", s, c.cpu.returnAddress(), frames.c_str());
     }
     c.ret(uint32_t(std::strlen(c.mem.cstr(s))));
 }
@@ -430,7 +429,7 @@ B32_THUNK(_cosf) { c.retF32(std::cos(c.args.f32())); }
 // --- stack protector -------------------------------------------------------
 
 B32_DATA(___stack_chk_guard, 4) { rt.mem().write<uint32_t>(addr, 0xB32C0DE5); }
-B32_THUNK(___stack_chk_fail) { fatal("guest stack smashing detected (from 0x%08x)", c.cpu.reg(Cpu::LR)); }
+B32_THUNK(___stack_chk_fail) { fatal("guest stack smashing detected (from 0x%08x)", c.cpu.returnAddress()); }
 
 // --- dyld (iPhone OS 2-3 binaries call these from crt1) --------------------
 
@@ -545,7 +544,7 @@ GuestAddr wrapFile(Call &c, FILE *host) {
 FILE *hostFile(Call &c, GuestAddr f) {
     std::lock_guard guard(filesLock);
     auto it = files.find(f);
-    if (it == files.end()) fatal("0x%08x is not an open FILE (from 0x%08x)", f, c.cpu.reg(Cpu::LR));
+    if (it == files.end()) fatal("0x%08x is not an open FILE (from 0x%08x)", f, c.cpu.returnAddress());
     return it->second;
 }
 
@@ -585,7 +584,7 @@ B32_THUNK(_fclose) {
         }
     }
     if (!host) {
-        log("fclose(0x%08x): not an open FILE (from 0x%08x)", f, c.cpu.reg(Cpu::LR));
+        log("fclose(0x%08x): not an open FILE (from 0x%08x)", f, c.cpu.returnAddress());
         setGuestErrno(c, EBADF);
         c.ret(uint32_t(EOF));
         return;
