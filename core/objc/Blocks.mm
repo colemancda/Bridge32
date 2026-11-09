@@ -466,8 +466,8 @@ B32_THUNK(__Block_object_dispose) {
 // converts the guest arguments by the host block's own signature and calls it.
 B32_THUNK(__b32_invoke_host_block) {
     Bridge &b = c.rt.bridge();
-    // A block returning a large struct takes the result pointer in r0.
-    bool stret = !hostBlockForWrapper(c.cpu.reg(0));
+    // A block returning a large struct takes the result pointer as its first argument.
+    bool stret = !hostBlockForWrapper(c.cpu.arg(0));
     GuestAddr retPtr = stret ? c.args.ptr() : 0;
     void *host = hostBlockForWrapper(c.args.ptr());
     if (!host) fatal("host block thunk called without its block");
@@ -529,10 +529,11 @@ B32_THUNK(__b32_invoke_host_block) {
     case 'S': lo = uint32_t(guest[0] | guest[1] << 8); break;
     default: std::memcpy(&lo, guest, 4); break;
     }
-    c.cpu.setReg(0, lo);
     if (size > 4) {
         uint32_t hi;
         std::memcpy(&hi, guest + 4, 4);
-        c.cpu.setReg(1, hi);
+        c.cpu.setResult64(lo | (uint64_t(hi) << 32));
+    } else {
+        c.cpu.setResult(lo);
     }
 }
