@@ -1,7 +1,9 @@
 # Running 32-bit PowerPC Mac apps: feasibility and plan
 
-Status: proposal for review. Nothing here is implemented. The spike results
-below were run on 2026-11-09 against the patched Unicorn in `external/unicorn`.
+Status: Phases 0 and 1 are implemented and tested, Phase 2 is done for the
+runtime and open for the Mac shell, and Phases 3-6 are not started; see
+"Progress" below. The spike results were run on 2026-11-09 against the patched
+Unicorn in `external/unicorn`.
 
 Target decided 2026-11-09: **World of Goo 1.30** (`ppc_7400` only), which sets
 the phase order below.
@@ -375,6 +377,64 @@ Decision needed:
   `qemu-system-ppc` (already installed). It isn't needed to reach World of Goo,
   which is itself a PowerPC binary, but it is the only way to test paths the game
   doesn't use. Until one exists, tests are hand-written assembly plus the game.
+
+## Progress (2026-11-09)
+
+Built with `-DB32_GUEST_ARCH=ppc`; the runtime and its tools also need
+`-DB32_PPC_RUNTIME=ON`, which stays off until Phase 3 lets `b32core` link into
+something useful. Tests: `ctest` runs `ppc-cpu` always, and `inspect-hello` and
+`run-hello` with the runtime (the last needs `make -C tests/guest ARCH=ppc`).
+
+**Phase 0 (CPU): done.** `external/unicorn-ppc.patch` adds the running time
+base (25 MHz, from the host clock), AltiVec registers, a correct XER and the
+per-target helper name. `PowerCpu` and `UnicornPowerCpu` carry Darwin's calling
+convention, frame chain, signal frames and the sentinel and stub encodings.
+`tests/ppc/cpu-test.cpp` covers big-endian memory, eight register and two stack
+arguments, a thunk's nine, a callback from a thunk, floating-point results,
+AltiVec, the time base, a SIGSEGV handler that skips its store, and four engines
+over one `lwarx`/`stwcx.` word; breaking the stack offset or the byte order
+makes it fail.
+
+**Phase 1 (memory, loader, ABI): done.**
+- `GuestMemory` swaps scalars for a big-endian guest, rejects a wider-than-byte
+  `ptr<T>` at compile time, and has atomic, array, wide-string and word-wise
+  helpers.
+- The loader reads big-endian images (every struct through `fetch<T>`, with
+  relocation bitfields decoded by hand). `b32-inspect` on World of Goo's
+  binary reports the entry (`0x2600`), all 20 sections, 13 libraries and 698
+  binds, matching an independent parse, and loads irrKlang's `ppc` slice.
+- `Args` takes floats from f1-f13 for a fixed prototype and from the shadow
+  words for a variadic one (printf's arguments), and a 64-bit value high word
+  first. `tests/guest/ppc/hello.s`, linked by `tools/ppc-link.py`, checks
+  `argc`, `%lld`, `%f`, `pow` and `strlen` through the real loader and thunk
+  trap; with the float-register rule broken it prints `pow=inf`.
+- Not yet confirmed against a real binary: the struct-return rule
+  (up to 8 bytes in r3:r4) and r3-high-word-first 64-bit results.
+
+**Phase 2 (the audit): done for `b32core`, open for the shell.** Compiling the
+runtime for a big-endian guest turned up 31 `ptr<T>` sites and about 40 raw
+copies of host numbers into guest memory; all are converted, or compiled out
+with a note and a loud failure: the socket thunks, `mach_msg`, the wide-character
+libc and C++ functions, and the libc++ shims. The sweep also caught silent
+cases the compiler can't see (sysctl replies, `tm` words, CFUUID bytes, atomics).
+The guest-ObjC parts of the bridge (`Dispatch.mm`, `Blocks.mm`, `overrides.mm`,
+`reflection.mm`) are not reviewed; World of Goo has no Objective-C.
+
+Measured for the Mac shell (`-DB32_MAC=ON` with the ppc arch, which CMake
+doesn't allow yet): 5 of its files fail to compile, with 14 sites.
+- `audioqueue.mm` and `audiounit.mm` (AudioQueue, AudioUnit): unneeded by World
+  of Goo, to be left out.
+- `agl.mm`: the pixel-format attribute list and two `GLint` outputs.
+- `carbon.mm`, `carbon_files.mm`: UTF-16 names, and `FSRef`, which is opaque to the
+  guest.
+- Not found by the compiler and bigger: `carbon_ui.mm` keeps Carbon event
+  parameters as raw host-order bytes (mouse locations, key codes), and
+  `hal.mm` copies audio buffers and format structs raw; each needs conversion
+  by parameter or format type.
+
+**Next:** Phase 3 (the 72 imports; with the Carbon, AGL, GL, display and HAL
+groups counted, `b32-inspect` reports 149 unimplemented for the game plus
+irrKlang), then the shell audit above, then Phases 4-6.
 
 ## Rough size
 
