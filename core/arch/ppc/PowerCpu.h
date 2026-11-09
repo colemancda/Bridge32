@@ -31,6 +31,9 @@ public:
 
     uint32_t arg(int i) const override;
     void setArg(int i, uint32_t value) override;
+    // The floating-point arguments of a call with a fixed prototype are in f1-f13.
+    bool floatArgsInRegisters() const override { return true; }
+    double floatArg(int n) const override { return fpr(1 + n); }
     uint32_t sp() const override { return reg(SP); }
     void setSp(uint32_t value) override { setReg(SP, value); }
     uint32_t pc() const override { return reg(PC); }
