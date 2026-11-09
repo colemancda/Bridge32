@@ -8,6 +8,13 @@
 //  - hostent, addrinfo and ifaddrs, which are full of pointers: built in
 //    guest memory from the host's results
 // Sockets never raise SIGPIPE (SO_NOSIGPIPE), which would end the whole app.
+//
+// None of this is converted for big-endian guests yet: socklen_t pointers,
+// fd_set's bit words, socket option values and the structs built for the guest
+// all have a byte order the host doesn't share, and no PowerPC app has needed
+// them. The thunks aren't there, so an app that imports one is told at load.
+
+#if !defined(B32_GUEST_BIG_ENDIAN)
 
 #include "Thunks.h"
 #include "core/Runtime.h"
@@ -376,3 +383,5 @@ B32_THUNK(_getnameinfo) {
     socklen_t servlen = c.args.u32();
     c.ret(uint32_t(::getnameinfo(sa, salen, host, hostlen, serv, servlen, c.args.i32())));
 }
+
+#endif  // !B32_GUEST_BIG_ENDIAN
