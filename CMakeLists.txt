@@ -272,6 +272,12 @@ if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "i386")
     add_test(NAME run-classic COMMAND b32-run "${B32_GUEST_DIR}/classic" "${B32_GUEST_DIR}/libclassic.dylib")
     set_tests_properties(run-classic PROPERTIES PASS_REGULAR_EXPRESSION "classic passed")
 endif()
+if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "ppc")
+    # Built by `make -C tests/guest ARCH=ppc`: assembly in the Darwin ABI.
+    add_test(NAME run-hello COMMAND b32-run "${B32_GUEST_DIR}/hello")
+    set_tests_properties(run-hello PROPERTIES PASS_REGULAR_EXPRESSION
+        "hello from ppc, argc=1.*long long=81985529216486895 hex=cafef00d.*double=3\\.142.*pow=1024\\.0.*strlen=5.*ppc hello passed")
+endif()
 if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "arm")
     add_test(NAME run-hello COMMAND b32-run "${B32_GUEST_DIR}/hello")
     set_tests_properties(run-hello PROPERTIES PASS_REGULAR_EXPRESSION
