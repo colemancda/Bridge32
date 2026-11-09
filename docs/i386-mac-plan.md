@@ -647,6 +647,60 @@ Corrections and limits:
 - `run-objc` passes on i386 only so far. The armv7 tests still need the iOS SDK
   volume; ARM host tools build.
 
+## Phase 3 results (2026-11-09)
+
+Phase 3's exit test holds. `AppKitTest`, an i386 app with a compiled nib, runs
+wrapped in the AppKit shell under `ctest` (`run-appkit`), and all twelve entries
+pass in the `-DB32_GUEST_ARCH=i386 -DB32_MAC=ON` build. The app checks itself:
+
+| Exit item | Check |
+| --- | --- |
+| Nib | The window, a guest `NSView` subclass, a button and a text field arrive through outlets to guest ivars |
+| Draws | A guest `-drawRect:` with `NSRectFill` and `NSBezierPath`; pixels are read back from the view, and a saved PNG of the window showed the expected oval |
+| Button | `performClick:` runs the guest action, which retitles the button |
+| Binding | A guest setter's change reaches an `NSTextField` bound to the model |
+| Sheet and timer | `beginSheet:` and `endSheet:returnCode:` reach the guest's did-end selector with its return code and context; a repeating `NSTimer` drives the whole test |
+
+What landed:
+
+- `app/mac/main.mm` is the shell, and `tools/make-app.sh` wraps a Mac `.app`
+  when given one. The guest's Resources become the shell's, so `NSBundle
+  mainBundle` is the guest's; its executable and Frameworks go in
+  `Contents/B32Guest`, which keeps `@executable_path/../Frameworks` working
+  without making them nested code the signature has to cover.
+- The shell's Mach-O claims the 10.14 SDK (`vtool`), so AppKit's linked-on-or-after
+  checks give guests the behaviors they were written for. This replaces most of
+  the per-behavior opt-outs the plan expected. It has only been exercised by the
+  test app so far.
+- A nib's outlets get a made-up `setFoo:` on the shadow class for each object
+  ivar without one. AppKit, unlike UIKit, doesn't fall back to KVC for outlets.
+- Sends to an object the host moved off its shadow class go through the host, so
+  KVO's setter runs. The binding test fails without this. It costs about 3% on a
+  guest-to-guest send:
+
+| Guest-to-guest send, 2M calls, 3 runs | ns per send |
+| --- | --- |
+| With the check | 722 to 746 (median 724) |
+| Without it | 583 to 707 (median 702) |
+
+Real-app status: Breakpad's `crash_report_sender` now has no unresolved imports,
+wraps, launches, runs its ObjC startup and exits with its own error when given a
+config file that doesn't exist. Its window was not exercised, because that takes
+a config in Breakpad's private format. Real apps are Phase 4.
+
+Limits to carry forward:
+
+- `foundation.mm` now builds for the Mac with its UIKit parts compiled out, and
+  `_NSFoundationVersionNumber` reports 10.14's value. The alert-panel and most
+  geometry thunks in `core/appkit/appkit.mm` compile but no test calls them.
+- The test app is built against today's SDK headers, with `prefix.h` declaring
+  the two classes they hide from the legacy runtime. Its nib comes from today's
+  `ibtool`. An old nib from a real app is still to be tried.
+- `NSQuickDrawView` and `NSMovieView` are empty views. `NSMovie` is still
+  present on the host, and QTKit's classes are not provided.
+- `_signal` handlers still don't run, and the shell has no sandbox or
+  entitlements, unlike the Catalyst shell.
+
 ## Cross-cutting items already missing on the iOS side
 
 These block Mac apps sooner than iOS games, so they land in the plan:
