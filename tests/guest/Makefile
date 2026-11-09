@@ -14,7 +14,7 @@ OUT     ?= ../../build/guest-i386
 CFLAGS  := -arch i386 -target i386-apple-macos10.13 -mdynamic-no-pic -fno-asynchronous-unwind-tables \
            -fno-unwind-tables -O1 -Wall -Wno-unused-command-line-argument
 LINK    := python3 ../../tools/i386-link.py
-TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib objc objclegacy
+TESTS   := hello rbtree threads bench abi objcabi cxx classic libclassic.dylib objc objclegacy AppKitTest.app
 
 .PHONY: all clean
 all: $(addprefix $(OUT)/,$(TESTS))
@@ -35,6 +35,14 @@ $(OUT)/objclegacy: objclegacy/objclegacy.m ../../tools/i386-link.py
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fno-objc-arc -c -o $@.o $<
 	$(LINK) -o $@ $@.o
+
+# A Mac app bundle, for tools/make-app.sh to wrap into the AppKit shell.
+$(OUT)/AppKitTest.app: appkit/main.m appkit/prefix.h appkit/MainMenu.xib appkit/Info.plist ../../tools/i386-link.py
+	@mkdir -p $@/Contents/MacOS $@/Contents/Resources
+	$(CC) $(CFLAGS) -fno-objc-arc -Wno-deprecated-declarations -include appkit/prefix.h -c -o $(OUT)/AppKitTest.o $<
+	$(LINK) -o $@/Contents/MacOS/AppKitTest $(OUT)/AppKitTest.o
+	xcrun ibtool --compile $@/Contents/Resources/MainMenu.nib appkit/MainMenu.xib
+	cp appkit/Info.plist $@/Contents/Info.plist
 
 # Linked the way Mac OS X 10.4's ld did it.
 $(OUT)/classic: classic/classic.c ../../tools/i386-link.py
