@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Cpu.h"
+#include "core/arch/arm/ArmCpu.h"
 
 #include <memory>
 
@@ -15,7 +15,7 @@ namespace b32 {
 
 // Cpu backed by dynarmic's A32 JIT, with fastmem over the guest reservation.
 // All guest threads share one ExclusiveMonitor so LDREX/STREX work across them.
-class DynarmicCpu final : public Cpu {
+class DynarmicCpu final : public ArmCpu {
 public:
     enum class Arch { V6K, V7 };
 
