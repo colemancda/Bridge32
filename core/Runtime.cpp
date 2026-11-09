@@ -1,6 +1,7 @@
 #include "Runtime.h"
 
 #include "core/Log.h"
+#include "core/arch/Arch.h"
 #include "core/mem/Layout.h"
 #include "core/objc/Bridge.h"
 
@@ -50,7 +51,7 @@ Cpu &Runtime::threadCpu() {
     if (!rt.idleCpus_.empty()) {
         auto [cpu, stackTop] = rt.idleCpus_.back();
         rt.idleCpus_.pop_back();
-        cpu->setReg(Cpu::SP, stackTop);
+        cpu->setSp(stackTop);
         currentCpuForThread = cpu;
         cpu->bindToCurrentThread();
         attachedCpu.cpu = cpu, attachedCpu.stackTop = stackTop;
@@ -63,7 +64,7 @@ Cpu &Runtime::threadCpu() {
     auto cpu = rt.newCpu();
     GuestAddr stackBottom = layout::kStackBase + slot * layout::kStackSize;
     rt.mem_->map(stackBottom, layout::kStackSize);
-    cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
+    cpu->setSp(stackBottom + layout::kStackSize - 16);
     currentCpuForThread = cpu.get();
     cpu->bindToCurrentThread();
     attachedCpu.cpu = cpu.get(), attachedCpu.stackTop = stackBottom + layout::kStackSize - 16;
@@ -97,7 +98,7 @@ Runtime::Runtime(CpuFactory makeCpu)
 
 std::unique_ptr<Cpu> Runtime::newCpu() {
     auto cpu = makeCpu_(*mem_, [this](Cpu &c, uint32_t imm) { thunks_->dispatch(*this, c, imm); });
-    cpu->setTsd(heap_->calloc(Cpu::kTsdSlots, 4));
+    if (cpu) cpu->setTsd(heap_->calloc(Cpu::kTsdSlots, 4));  // b32-inspect has no CPU
     return cpu;
 }
 
@@ -106,7 +107,7 @@ uint32_t Runtime::runThread(uint32_t slot, GuestAddr fn, GuestAddr arg) {
     std::unique_ptr<Cpu> cpu = newCpu();
     GuestAddr stackBottom = layout::kStackBase + slot * layout::kStackSize;
     if (!mem_->isMapped(stackBottom)) mem_->map(stackBottom, layout::kStackSize);
-    cpu->setReg(Cpu::SP, stackBottom + layout::kStackSize - 16);
+    cpu->setSp(stackBottom + layout::kStackSize - 16);
     currentCpuForThread = cpu.get();
     cpu->bindToCurrentThread();
     void *pool = objc_autoreleasePoolPush();
@@ -131,6 +132,7 @@ GuestAddr Runtime::dataSymbol(const std::string &symbol) {
     if (auto it = data_.find(symbol); it != data_.end()) return it->second;
     auto &registry = DataSymbolRegistry::all();
     auto entry = registry.find(symbol);
+    if (entry == registry.end()) entry = registry.find(baseSymbol(symbol));
     if (entry == registry.end()) return 0;
     GuestAddr addr = heap_->calloc(1, entry->second.size);
     data_.emplace(symbol, addr);
@@ -159,20 +161,13 @@ bool isConstructorOrDestructor(const std::string &symbol) {
 }
 }  // namespace
 
-// Apple's armv7 ABI has constructors and destructors return `this`, and
-// clang-built apps use the result; the GCC-built guest libstdc++ returns
-// nothing. Apps bind to a shim that keeps r0:
-//     push {r0, lr}
-//     ldr  r12, [pc, #4]
-//     blx  r12
-//     pop  {r0, pc}
-//     .word target
+// Where the guest ABI has constructors and destructors return `this` (arm),
+// apps bind to a shim around the library's that keeps the result
+// (arch::thisReturningShim); elsewhere the shim is the target itself.
 GuestAddr Runtime::thisReturning(GuestAddr target) {
     std::lock_guard guard(attachLock_);
     if (auto it = thisShims_.find(target); it != thisShims_.end()) return it->second;
-    GuestAddr shim = heap_->alloc(20);
-    const uint32_t code[5] = {0xe92d4001, 0xe59fc004, 0xe12fff3c, 0xe8bd8001, target};
-    mem_->copyIn(shim, code, sizeof code);
+    GuestAddr shim = arch::thisReturningShim(*mem_, *heap_, target);
     thisShims_[target] = shim;
     return shim;
 }
@@ -183,14 +178,14 @@ GuestAddr Runtime::resolve(const std::string &symbol) {
     if (GuestAddr data = dataSymbol(symbol)) return data;
     if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
     // Object constants (notification names, keys...) the host exports.
-    if (!ThunkRegistry::all().count(symbol))
+    if (!ThunkRegistry::find(symbol))
         if (GuestAddr constant = bridge_->resolveHostConstant(symbol)) return constant;
     return thunks_->stubFor(symbol);
 }
 
 GuestAddr Runtime::lookUp(const std::string &symbol, bool inApp) {
     if (auto it = image_.exports.find(symbol); inApp && it != image_.exports.end()) return it->second;
-    if (libraryExports_.count(symbol) || dataSymbol(symbol) || ThunkRegistry::all().count(symbol)) return resolve(symbol);
+    if (libraryExports_.count(symbol) || dataSymbol(symbol) || ThunkRegistry::find(symbol)) return resolve(symbol);
     if (GuestAddr objcData = bridge_->resolveDataSymbol(symbol)) return objcData;
     return bridge_->resolveHostConstant(symbol);
 }
@@ -368,7 +363,7 @@ int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::st
     mem_->map(stackBottom, layout::kStackSize);
     GuestAddr argvAddr, envpAddr, appleAddr;
     GuestAddr sp = buildProcessStack(stackBottom + layout::kStackSize, argv, envp, &argvAddr, &envpAddr, &appleAddr);
-    cpu_->setReg(Cpu::SP, sp);
+    cpu_->setSp(sp);
     currentCpuForThread = cpu_.get();
     cpu_->bindToCurrentThread();
     // Catches host objects autoreleased outside any guest pool.
@@ -393,8 +388,7 @@ int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::st
             return int32_t(status);
         }
         // crt1's start never returns; it calls exit().
-        cpu_->setReg(Cpu::LR, layout::kSentinel);
-        cpu_->jump(image_.entry);
+        cpu_->enterAt(image_.entry);
         cpu_->run();
         fatal("guest start routine returned");
     } catch (const ExitRequest &request) {
