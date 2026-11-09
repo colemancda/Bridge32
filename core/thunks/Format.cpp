@@ -37,6 +37,7 @@ void appendUTF16(std::string &out, const std::u16string &text) {
 }  // namespace
 
 std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber describe) {
+    args.beginVarArgs();
     std::string out;
     char piece[512];
     for (const char *p = format; *p;) {
