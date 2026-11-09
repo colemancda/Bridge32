@@ -40,6 +40,11 @@ std::string b32::objc::describeObject(Call &c, GuestAddr object) {
 
 B32_THUNK(_objc_msgSend) { bridge(c).msgSend(c, false); }
 B32_THUNK(_objc_msgSend_stret) { bridge(c).msgSend(c, true); }
+#if defined(B32_GUEST_I386)
+// Methods returning float, double or long double: a nil receiver has to leave
+// 0.0 on the x87 stack, which is what makes this a separate entry point.
+B32_THUNK(_objc_msgSend_fpret) { bridge(c).msgSend(c, false, Bridge::SuperKind::None, true); }
+#endif
 B32_THUNK(_objc_msgSendSuper) { bridge(c).msgSend(c, false, Bridge::SuperKind::Super); }
 B32_THUNK(_objc_msgSendSuper_stret) { bridge(c).msgSend(c, true, Bridge::SuperKind::Super); }
 B32_THUNK(_objc_msgSendSuper2) { bridge(c).msgSend(c, false, Bridge::SuperKind::Super2); }
