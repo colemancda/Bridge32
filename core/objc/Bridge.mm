@@ -162,6 +162,29 @@ void shadowOutletSetter(id self, SEL _cmd, id value) {
 }  // namespace
 #endif
 
+#if defined(B32_GUEST_I386)
+namespace {
+// AppKit stopped calling -lockFocus when it draws a view (10.14), and OpenGL
+// views of the era override it to attach their context (Apple's own samples
+// do). A guest view with a -lockFocus gets it before it first draws in a
+// window: once, since calling it on every draw makes AppKit redraw forever.
+char lockedWindowKey;
+void shadowViewWillDraw(id self, SEL _cmd) {
+    Bridge &bridge = *Bridge::shared();
+    id window = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(self, sel_registerName("window"));
+    if (window && objc_getAssociatedObject(self, &lockedWindowKey) != window) {
+        objc_setAssociatedObject(self, &lockedWindowKey, window, OBJC_ASSOCIATION_ASSIGN);
+        bridge.send(bridge.toGuest(self), "lockFocus");
+        reinterpret_cast<void (*)(id, SEL)>(objc_msgSend)(self, sel_registerName("unlockFocus"));
+    }
+    Class super = object_getClass(self);
+    while (bridge.isShadowClass(super)) super = class_getSuperclass(super);
+    struct objc_super sup{self, super};
+    reinterpret_cast<void (*)(struct objc_super *, SEL)>(objc_msgSendSuper)(&sup, _cmd);
+}
+}  // namespace
+#endif
+
 const GuestIvar *Bridge::ivarForKey(ClassInfo *cls, const std::string &key) {
     for (ClassInfo *c = cls; c && c->isGuest; c = c->super)
         for (const auto &ivar : c->ivars)
@@ -696,6 +719,9 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr ro) {
     if (cls->methods.count(guestSel("forwardInvocation:")) && !cls->methods.count(guestSel("methodSignatureForSelector:")))
         class_addMethod(shadow, @selector(methodSignatureForSelector:), reinterpret_cast<IMP>(shadowMethodSignature), "@@::");
 #if defined(B32_GUEST_I386)
+    if (Class view = NSClassFromString(@"NSView"); view && [shadow isSubclassOfClass:view] && cls->methods.count(guestSel("lockFocus")) &&
+                                                   !cls->methods.count(guestSel("viewWillDraw")))
+        class_addMethod(shadow, sel_registerName("viewWillDraw"), reinterpret_cast<IMP>(shadowViewWillDraw), "v@:");
     for (const GuestIvar &ivar : cls->ivars) {
         if (ivar.type.empty() || ivar.type[0] != '@') continue;
         std::string key = ivar.name[0] == '_' ? ivar.name.substr(1) : ivar.name;
