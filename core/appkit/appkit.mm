@@ -22,16 +22,16 @@ namespace {
 Bridge &bridge(Call &c) { return c.rt.bridge(); }
 
 NSRect rectArg(Call &c) {
-    float x = c.args.f32(), y = c.args.f32(), w = c.args.f32(), h = c.args.f32();
+    float x = c.args.structFloat(), y = c.args.structFloat(), w = c.args.structFloat(), h = c.args.structFloat();
     return NSMakeRect(x, y, w, h);
 }
 NSPoint pointArg(Call &c) {
-    float x = c.args.f32();
-    return NSMakePoint(x, c.args.f32());
+    float x = c.args.structFloat();
+    return NSMakePoint(x, c.args.structFloat());
 }
 NSSize sizeArg(Call &c) {
-    float w = c.args.f32();
-    return NSMakeSize(w, c.args.f32());
+    float w = c.args.structFloat();
+    return NSMakeSize(w, c.args.structFloat());
 }
 void writeRect(Call &c, GuestAddr out, NSRect r) {
     c.mem.write<float>(out, float(r.origin.x));
