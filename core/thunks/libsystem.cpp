@@ -110,6 +110,15 @@ bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr len
     } else if (name == "hw.cpufrequency") {
         int32_t hz = 1000000000;
         reply(&hz, 4);
+#if defined(B32_GUEST_I386)
+    } else if (name == "hw.cpufrequency_max") {
+        // What a 2006-era game wants to see of an Intel Mac; 32 or 64 bits as asked.
+        uint64_t hz = 2400000000ull;
+        reply(&hz, lenp && c.mem.read<uint32_t>(lenp) >= 8 ? 8 : 4);
+    } else if (name == "hw.optional.altivec") {
+        int32_t none = 0;
+        reply(&none, 4);
+#endif
     } else if (name == "kern.boottime") {
         // struct timeval: two 32-bit words in the guest.
         int32_t tv[2] = {int32_t(std::time(nullptr) - 3600), 0};
