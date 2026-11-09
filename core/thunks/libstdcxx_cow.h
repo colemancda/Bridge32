@@ -37,8 +37,9 @@ struct CowStrings {
     uint32_t length(GuestAddr d) const { return c.mem.template read<uint32_t>(d - 12); }
     uint32_t capacity(GuestAddr d) const { return c.mem.template read<uint32_t>(d - 8); }
     int32_t refcount(GuestAddr d) const { return c.mem.template read<int32_t>(d - 4); }
-    std::atomic<int32_t> &count(GuestAddr d) const {
-        return *reinterpret_cast<std::atomic<int32_t> *>(c.mem.template ptr<int32_t>(d - 4));
+    // Adds to the refcount atomically; returns what it was.
+    int32_t addRef(GuestAddr d, int32_t delta) const {
+        return int32_t(c.mem.template atomicUpdate<uint32_t>(d - 4, [&](uint32_t v) { return v + uint32_t(delta); }));
     }
     Ch *chars(GuestAddr d) const { return c.mem.template ptr<Ch>(d); }
     View at(GuestAddr d) const { return {chars(d), length(d)}; }
@@ -63,13 +64,13 @@ struct CowStrings {
     }
     void release(GuestAddr d) {
         if (d == emptyData) return;
-        if (count(d).fetch_sub(1) <= 0) c.heap.free(d - kRepHeader);
+        if (addRef(d, -1) <= 0) c.heap.free(d - kRepHeader);
     }
     // What a copy of the string at `d` should point at.
     GuestAddr share(GuestAddr d) {
         if (d == emptyData) return d;
         if (refcount(d) < 0) return make(at(d));
-        count(d).fetch_add(1);
+        addRef(d, 1);
         return d;
     }
     void set(GuestAddr self, GuestAddr d) {
