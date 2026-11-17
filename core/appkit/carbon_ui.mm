@@ -545,12 +545,23 @@ NSView *carbonViewForPort(GuestAddr port) {
     CWindow *w = portWindow(port);
     return w ? w->content : nil;
 }
-NSView *carbonFullScreenView(int width, int height) {
+namespace {
+int requestedWidth = 0, requestedHeight = 0;
+}
+void setRequestedDisplaySize(int width, int height) {
+    requestedWidth = width;
+    requestedHeight = height;
+}
+NSView *carbonFullScreenView(int &width, int &height) {
     static NSWindow *window = nil;
     if (!window) {
         ensureCarbonApplication();
         bool windowed = getenv("B32_WINDOWED") || [[NSBundle.mainBundle objectForInfoDictionaryKey:@"B32Windowed"] boolValue];
-        if (windowed && width > 0 && height > 0) {
+        if (windowed) {
+            if (width <= 0 || height <= 0) {
+                width = requestedWidth > 0 ? requestedWidth : 1024;
+                height = requestedHeight > 0 ? requestedHeight : 768;
+            }
             NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
             window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height) styleMask:style backing:NSBackingStoreBuffered defer:NO];
             window.title = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleName"] ?: @"Bridge32";
