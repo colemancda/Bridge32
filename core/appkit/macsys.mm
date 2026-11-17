@@ -9,6 +9,7 @@
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
 #include "core/thunks/CTable.h"
+#include "core/thunks/Discs.h"
 
 #import <AppKit/AppKit.h>
 #include <ApplicationServices/ApplicationServices.h>
@@ -18,6 +19,12 @@
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <mach/mach_time.h>
+
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -258,34 +265,74 @@ B32_THUNK(_KBGetLayoutType) { c.ret(0); }
 B32_THUNK(_LMGetKbdType) { c.ret(0); }
 B32_THUNK(_UCKeyTranslate) { c.ret(uint32_t(-1)); }
 
-// --- IOKit: nothing to find ----------------------------------------------------------
+// --- IOKit: the registry where a device name leads, and discs of its own --------------
+//
+// A disc check (Age of Mythology's) matches a volume by name, reads the mount table for a
+// read-only local one, and asks IOKit whether its device sits on CD media. The host has no
+// discs, but its disc images are discs to a guest: asked for optical media, each mounted
+// disc volume (core/thunks/Discs.h) gets an IOCDMedia of its own, with the volume's IOMedia
+// under it as a partition's is on the real thing.
 
 constexpr uint32_t kIOReturnFailure = 0xE00002BC;
 #define B32_IOKIT_ERROR(symbol) B32_THUNK(symbol) { c.ret(kIOReturnFailure); }
 #define B32_NOTHING(symbol) B32_THUNK(symbol) { c.ret(0); }
 
 B32_DATA(_kIOMasterPortDefault, 4) {}
-B32_NOTHING(_IOServiceMatching)
 B32_NOTHING(_IOServiceGetMatchingService)
-B32_IOKIT_ERROR(_IOMasterPort)
 B32_IOKIT_ERROR(_IORegistryEntryCreateCFProperties)
-// The registry is the host's, but only what a BSD device name leads to: a guest finds out what a volume is
-// on (a disc, a disk image, a disk) by matching its device and walking up. Matching anything else finds
-// nothing, as before. The handles are mach ports, the same size in the guest.
+
+// The registry entries a guest sees for a disc: the IOCDMedia that is its whole media, and
+// the IOMedia of each volume mounted from it. A handle is minted far above the mach ports
+// io_object_t values are, so the host's own can't be mistaken for one. Entries live as long
+// as the guest runs; an iterator goes when released.
 namespace {
-const CFunction kRegistry[] = {
-    {"IOIteratorNext", "u:u"},
-    {"IOIteratorIsValid", "u:u"},
-    {"IOObjectRelease", "i:u"},
-    {"IOObjectRetain", "i:u"},
-    {"IOObjectIsEqualTo", "u:uu"},
-    {"IOObjectGetClass", "i:up"},
-    {"IORegistryEntryGetParentEntry", "i:upp"},
-    {"IORegistryEntryCreateIterator", "i:upup"},
-    {"IORegistryEntryCreateCFProperty", "o:uouu"},
+struct FakeEntry {
+    const char *cls = nullptr;  // the class IOObjectGetClass reports; null when the handle is the host's
+    std::string bsd;            // the media's "BSD Name"
+    uint32_t parent = 0;        // the entry above, 0 at the top
 };
+std::mutex fakeLock;
+std::unordered_map<uint32_t, FakeEntry> fakeRegistry;
+std::unordered_map<uint32_t, std::vector<uint32_t>> fakeIterators;  // what an iterator has left
+uint32_t nextFakeHandle = 0x70000000;
+
+uint32_t mintFake(const char *cls, std::string bsd, uint32_t parent) {
+    std::lock_guard guard(fakeLock);
+    uint32_t handle = nextFakeHandle++;
+    fakeRegistry.emplace(handle, FakeEntry{cls, std::move(bsd), parent});
+    return handle;
+}
+uint32_t mintFakeIterator(std::vector<uint32_t> entries) {
+    std::lock_guard guard(fakeLock);
+    uint32_t handle = nextFakeHandle++;
+    fakeIterators.emplace(handle, std::move(entries));
+    return handle;
+}
+FakeEntry fakeEntry(uint32_t handle) {
+    std::lock_guard guard(fakeLock);
+    auto it = fakeRegistry.find(handle);
+    return it == fakeRegistry.end() ? FakeEntry{} : it->second;
+}
+bool isFakeHandle(uint32_t handle) {
+    std::lock_guard guard(fakeLock);
+    return fakeRegistry.count(handle) != 0 || fakeIterators.count(handle) != 0;
+}
 }  // namespace
-B32_C_FUNCTIONS(kRegistry, process);
+
+// CFMutableDictionaryRef IOServiceMatching(const char *className): a real dictionary, which
+// IOServiceGetMatchingServices answers.
+B32_THUNK(_IOServiceMatching) {
+    GuestAddr name = c.args.ptr();
+    CFMutableDictionaryRef matching = name ? IOServiceMatching(c.mem.cstr(name)) : nullptr;
+    c.ret(matching ? bridge(c).toGuest((id)CFBridgingRelease(matching)) : 0);
+}
+// kern_return_t IOMasterPort(mach_port_t bootstrapPort, mach_port_t *masterPort)
+B32_THUNK(_IOMasterPort) {
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, kIOMasterPortDefault);
+    c.ret(kIOReturnSuccess);
+}
 
 // CFMutableDictionaryRef IOBSDNameMatching(masterPort, options, const char *name)
 B32_THUNK(_IOBSDNameMatching) {
@@ -296,7 +343,8 @@ B32_THUNK(_IOBSDNameMatching) {
     c.ret(matching ? bridge(c).toGuest((id)CFBridgingRelease(matching)) : 0);
 }
 // kern_return_t IOServiceGetMatchingServices(masterPort, matching, io_iterator_t *): the call consumes the
-// dictionary, which the bridge still owns a reference to.
+// dictionary, which the bridge still owns a reference to. The host's matches come first and the discs' after:
+// the host's iterator is drained on the spot, so both flow through one handle of ours.
 B32_THUNK(_IOServiceGetMatchingServices) {
     c.args.u32();
     GuestAddr matching = c.args.ptr(), out = c.args.ptr();
@@ -308,8 +356,137 @@ B32_THUNK(_IOServiceGetMatchingServices) {
     CFRetain(dictionary);
     io_iterator_t iterator = 0;
     kern_return_t status = IOServiceGetMatchingServices(kIOMasterPortDefault, dictionary, &iterator);
-    if (out) c.mem.write<uint32_t>(out, iterator);
-    c.ret(uint32_t(status));
+    if (status != KERN_SUCCESS) {
+        if (out) c.mem.write<uint32_t>(out, 0);
+        c.ret(uint32_t(status));
+        return;
+    }
+    std::vector<uint32_t> entries;
+    while (io_object_t entry = IOIteratorNext(iterator)) entries.push_back(entry);
+    IOObjectRelease(iterator);
+    CFStringRef provider = (CFStringRef)CFDictionaryGetValue(dictionary, CFSTR("IOProviderClass"));
+    bool optical = provider && (CFStringCompare(provider, CFSTR("IOCDMedia"), 0) == 0 ||
+                                CFStringCompare(provider, CFSTR("IODVDMedia"), 0) == 0 ||
+                                CFStringCompare(provider, CFSTR("IOBDMedia"), 0) == 0);
+    if (optical)
+        for (const discs::Volume &volume : discs::mounted()) {
+            // A CD's shape: the whole media is the IOCDMedia, and the mounted volume's
+            // IOMedia hangs under it, as a partition's does on the real thing.
+            uint32_t disc = mintFake("IOCDMedia", volume.whole.substr(5), 0);
+            mintFake("IOMedia", volume.device.substr(5), disc);
+            entries.push_back(disc);
+        }
+    if (out) c.mem.write<uint32_t>(out, mintFakeIterator(std::move(entries)));
+    c.ret(kIOReturnSuccess);
+}
+
+// io_object_t IOIteratorNext(io_iterator_t iterator)
+B32_THUNK(_IOIteratorNext) {
+    uint32_t iterator = c.args.u32();
+    uint32_t next = 0;
+    bool fake = false;
+    {
+        std::lock_guard guard(fakeLock);
+        if (auto it = fakeIterators.find(iterator); it != fakeIterators.end()) {
+            fake = true;
+            if (!it->second.empty()) {
+                next = it->second.front();
+                it->second.erase(it->second.begin());
+            }
+        }
+    }
+    c.ret(fake ? next : IOIteratorNext(iterator));
+}
+// boolean IOIteratorIsValid(io_iterator_t iterator)
+B32_THUNK(_IOIteratorIsValid) { uint32_t iterator = c.args.u32(); c.ret(isFakeHandle(iterator) ? 1 : IOIteratorIsValid(iterator)); }
+// kern_return_t IOObjectRelease(io_object_t object)
+B32_THUNK(_IOObjectRelease) {
+    uint32_t object = c.args.u32();
+    bool fake = isFakeHandle(object);
+    if (fake) {
+        std::lock_guard guard(fakeLock);
+        fakeIterators.erase(object);
+    }
+    c.ret(fake ? kIOReturnSuccess : IOObjectRelease(object));
+}
+// kern_return_t IOObjectRetain(io_object_t object)
+B32_THUNK(_IOObjectRetain) { uint32_t object = c.args.u32(); c.ret(isFakeHandle(object) ? kIOReturnSuccess : IOObjectRetain(object)); }
+// boolean IOObjectIsEqualTo(io_object_t a, io_object_t b)
+B32_THUNK(_IOObjectIsEqualTo) {
+    uint32_t a = c.args.u32(), b = c.args.u32();
+    c.ret((isFakeHandle(a) || isFakeHandle(b)) ? uint32_t(a == b) : uint32_t(IOObjectIsEqualTo(a, b)));
+}
+// kern_return_t IOObjectGetClass(io_object_t object, io_name_t className)
+B32_THUNK(_IOObjectGetClass) {
+    uint32_t object = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    if (FakeEntry entry = fakeEntry(object); entry.cls) {
+        strlcpy(c.mem.ptr<char>(name), entry.cls, sizeof(io_name_t));
+        c.ret(kIOReturnSuccess);
+        return;
+    }
+    c.ret(IOObjectGetClass(object, c.mem.ptr<char>(name)));
+}
+// kern_return_t IORegistryEntryGetParentEntry(io_registry_entry_t entry, const io_name_t plane,
+//                                             io_registry_entry_t *parent)
+B32_THUNK(_IORegistryEntryGetParentEntry) {
+    uint32_t entry = c.args.u32();
+    GuestAddr plane = c.args.ptr(), parent = c.args.ptr();
+    if (FakeEntry fake = fakeEntry(entry); fake.cls) {
+        bool servicePlane = plane && !strcmp(c.mem.cstr(plane), "IOService");
+        if (servicePlane && fake.parent) {
+            c.mem.write<uint32_t>(parent, fake.parent);
+            c.ret(kIOReturnSuccess);
+        } else {
+            c.ret(kIOReturnNoDevice);
+        }
+        return;
+    }
+    c.ret(IORegistryEntryGetParentEntry(entry, plane ? c.mem.cstr(plane) : nullptr, c.mem.ptr<uint32_t>(parent)));
+}
+// kern_return_t IORegistryEntryCreateIterator(io_registry_entry_t entry, const io_name_t plane,
+//                                             IOOptionBits options, io_iterator_t *iter)
+B32_THUNK(_IORegistryEntryCreateIterator) {
+    uint32_t entry = c.args.u32();
+    GuestAddr plane = c.args.ptr();
+    uint32_t options = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    if (FakeEntry fake = fakeEntry(entry); fake.cls) {
+        std::vector<uint32_t> walk;
+        if (plane && !strcmp(c.mem.cstr(plane), "IOService")) {
+            if (options & kIORegistryIterateParents) {  // up: the chain this entry hangs from
+                for (uint32_t up = fake.parent; up; up = fakeEntry(up).parent) walk.push_back(up);
+            } else {                                    // down: the entries hanging from this one
+                std::lock_guard guard(fakeLock);
+                for (const auto &[handle, child] : fakeRegistry)
+                    if (child.parent == entry) walk.push_back(handle);
+            }
+        }
+        if (out) c.mem.write<uint32_t>(out, mintFakeIterator(std::move(walk)));
+        c.ret(kIOReturnSuccess);
+        return;
+    }
+    c.ret(IORegistryEntryCreateIterator(entry, plane ? c.mem.cstr(plane) : nullptr, options, c.mem.ptr<uint32_t>(out)));
+}
+// CFTypeRef IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef name,
+//                                            CFAllocatorRef allocator, IOOptionBits options)
+B32_THUNK(_IORegistryEntryCreateCFProperty) {
+    uint32_t entry = c.args.u32();
+    NSString *key = (NSString *)bridge(c).toHost(c.args.u32());
+    CFAllocatorRef allocator = (CFAllocatorRef)bridge(c).toHost(c.args.u32());
+    uint32_t options = c.args.u32();
+    if (FakeEntry fake = fakeEntry(entry); fake.cls) {
+        id value = nil;
+        if ([key isEqualToString:@"BSD Name"]) value = [[NSString alloc] initWithUTF8String:fake.bsd.c_str()];
+        else if ([key isEqualToString:@"Ejectable"] || [key isEqualToString:@"Removable"])
+            value = [[NSNumber alloc] initWithBool:YES];
+        else if ([key isEqualToString:@"Whole"]) value = [[NSNumber alloc] initWithBool:fake.parent == 0];
+        else if ([key isEqualToString:@"Writable"]) value = [[NSNumber alloc] initWithBool:NO];
+        c.ret(value ? bridge(c).toGuest(value) : 0);
+        return;
+    }
+    CFTypeRef value = IORegistryEntryCreateCFProperty(entry, (__bridge CFStringRef)key, allocator ?: kCFAllocatorDefault, options);
+    c.ret(value ? bridge(c).toGuest((id)CFBridgingRelease(value)) : 0);
 }
 B32_NOTHING(_IODisplayCreateInfoDictionary)
 B32_NOTHING(_IOPSCopyPowerSourcesInfo)
