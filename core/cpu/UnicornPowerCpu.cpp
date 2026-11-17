@@ -179,21 +179,21 @@ uint32_t UnicornPowerCpu::runUntilSvc() {
         uint32_t pc = reg(PC);
         switch (err) {
         case UC_ERR_OK: {
-            if (interrupt_ < 0) {  // a halt request (suspend, or a dump): the guest stopped wherever it was
-                if (dumpRequested.exchange(false)) {
-                    std::string frames;
-                    for (uint32_t ret : frameChain(12)) {
-                        char text[16];
-                        std::snprintf(text, sizeof text, " %08x", ret);
-                        frames += text;
-                    }
-                    log("guest at pc=0x%08x lr=0x%08x ctr=0x%08x cr=0x%08x; frames%s", pc, reg(LR), reg(CTR), reg(CR), frames.c_str());
-                    for (int base = 0; base < 32; base += 8)
-                        log("  r%-2d %08x %08x %08x %08x %08x %08x %08x %08x", base, reg(base), reg(base + 1), reg(base + 2), reg(base + 3),
-                            reg(base + 4), reg(base + 5), reg(base + 6), reg(base + 7));
+            // A dump request arrives as a halt, but a guest sitting in thunk after thunk never stops for one:
+            // so it is answered at the next thunk too.
+            if (dumpRequested.exchange(false)) {
+                std::string frames;
+                for (uint32_t ret : frameChain(12)) {
+                    char text[16];
+                    std::snprintf(text, sizeof text, " %08x", ret);
+                    frames += text;
                 }
-                continue;
+                log("guest at pc=0x%08x lr=0x%08x ctr=0x%08x cr=0x%08x; frames%s", pc, reg(LR), reg(CTR), reg(CR), frames.c_str());
+                for (int base = 0; base < 32; base += 8)
+                    log("  r%-2d %08x %08x %08x %08x %08x %08x %08x %08x", base, reg(base), reg(base + 1), reg(base + 2), reg(base + 3),
+                        reg(base + 4), reg(base + 5), reg(base + 6), reg(base + 7));
             }
+            if (interrupt_ < 0) continue;  // a halt request (suspend, or a dump): the guest stopped wherever it was
             // The PC is past the instruction that raised the exception.
             GuestAddr trap = pc - 4;
             if (interrupt_ != kSyscallException)
