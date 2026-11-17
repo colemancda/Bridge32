@@ -191,6 +191,16 @@ B32_THUNK(_FSCreateDirectoryUnicode) {
     std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
     UInt32 id = 0;
     OSErr error = FSCreateDirectoryUnicode(fsRef(c, parent), length, text.data(), 0, nullptr, out ? fsRef(c, out) : nullptr, nullptr, &id);
+    // A directory that already exists reports dupFNErr without a reference, yet
+    // callers go on to ask for its path, so hand back a reference to it.
+    if (error == dupFNErr && out) {
+        UInt8 base[1024];
+        NSString *leaf = [NSString stringWithCharacters:text.data() length:text.size()];
+        if (FSRefMakePath(fsRef(c, parent), base, sizeof base) == noErr) {
+            NSString *path = [[NSString stringWithUTF8String:reinterpret_cast<char *>(base)] stringByAppendingPathComponent:leaf];
+            if (FSPathMakeRef(reinterpret_cast<const UInt8 *>(path.fileSystemRepresentation), fsRef(c, out), nullptr) == noErr) error = noErr;
+        }
+    }
     if (directoryID) c.mem.write<uint32_t>(directoryID, id);
     c.ret(uint32_t(int32_t(error)));
 }
