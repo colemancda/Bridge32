@@ -8,6 +8,7 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
+#include "core/appkit/Carbon.h"
 #include "core/thunks/CTable.h"
 
 #import <AppKit/AppKit.h>
@@ -149,6 +150,7 @@ B32_THUNK(_CGDisplayBestModeForParametersAndRefreshRate) {
     double refresh = c.args.f64();
     GuestAddr exact = c.args.ptr();
     if (exact) c.mem.write<uint32_t>(exact, 1);
+    appkit::setRequestedDisplaySize(int(width), int(height));
     c.ret(bridge(c).toGuest(modeDictionary(width, height, refresh > 0 ? refresh : 60)));
 }
 // DMGetGDeviceByDisplayID(DisplayIDType, GDHandle *, Boolean failToMain): a handle to a blank GDevice.
