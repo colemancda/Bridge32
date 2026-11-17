@@ -215,7 +215,7 @@ if(B32_MAC)
     endif()
     target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
         "-framework QuartzCore" "-framework CoreData" "-framework OpenGL" "-framework ImageIO"
-        "-framework AudioToolbox" "-framework AudioUnit" "-framework CoreAudio" "-framework ApplicationServices" "-framework CoreVideo" "-framework GameController" "-framework Carbon" "-framework CoreServices")
+        "-framework AudioToolbox" "-framework AudioUnit" "-framework CoreAudio" "-framework ApplicationServices" "-framework CoreVideo" "-framework GameController" "-framework Carbon" "-framework CoreServices" "-framework IOKit")
 
     add_executable(Bridge32 MACOSX_BUNDLE app/mac/main.mm)
     target_link_libraries(Bridge32 PRIVATE b32core)
