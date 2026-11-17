@@ -19,6 +19,7 @@
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <mach/mach_time.h>
+#include <sys/sysctl.h>
 
 #include <cstring>
 #include <mutex>
@@ -609,6 +610,19 @@ B32_THUNK(_Gestalt) {
     case 'sys2': value = 6; break;
     case 'sys3': value = 8; break;
     case 'qtim': value = 0x07658000; break;  // QuickTime 7.6.5; its calls are thunks that fail softly
+    case 'ram ':   // physical RAM, bytes, as capped at 2 GB in the era
+    case 'lram':   // logical RAM, bytes
+    case 'ramm': {  // physical RAM, megabytes: a game with too little refuses to start
+        static uint64_t bytes = [] {
+            uint64_t mem = 0;
+            size_t size = sizeof mem;
+            sysctlbyname("hw.memsize", &mem, &size, nullptr, 0);
+            return mem ? mem : uint64_t(4) << 30;
+        }();
+        if (selector == 'ramm') value = int32_t(bytes >> 20);
+        else value = int32_t(selector == 'ram ' ? std::min<uint64_t>(bytes, uint64_t(2) << 30) : bytes);
+        break;
+    }
     default: break;
     }
     if (out) c.mem.write<int32_t>(out, value < 0 ? 0 : value);
