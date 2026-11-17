@@ -1356,6 +1356,10 @@ B32_THUNK(_InitCursor) {}
 B32_THUNK(_HideCursor) { [NSCursor hide]; }
 B32_THUNK(_ShowCursor) { [NSCursor unhide]; }
 B32_THUNK(_SetSystemUIMode) { c.ret(0); }
+// OSStatus BeginAppModalStateForWindow / EndAppModalStateForWindow(window): the alert's own run loop
+// already keeps the application's other windows quiet.
+B32_THUNK(_BeginAppModalStateForWindow) { c.ret(0); }
+B32_THUNK(_EndAppModalStateForWindow) { c.ret(0); }
 B32_THUNK(_GetSystemUIMode) {
     GuestAddr a = c.args.ptr(), b = c.args.ptr();
     if (a) c.mem.write<uint32_t>(a, 0);
