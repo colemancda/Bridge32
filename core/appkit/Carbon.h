@@ -16,7 +16,11 @@ NSView *carbonViewForPort(GuestAddr port);
 // A window filling the main display, for aglSetFullScreen.
 // The view a game's "full screen" picture goes in: a borderless window over the whole screen, or with
 // B32_WINDOWED=1 (or B32Windowed in the app's Info.plist) an ordinary window of the size the game asked for.
-NSView *carbonFullScreenView(int width, int height);
+// A zero size asks for the display's current mode, which a windowed picture takes from the last mode the guest
+// asked the display for (or 1024 x 768); the size used comes back in width and height.
+NSView *carbonFullScreenView(int &width, int &height);
+// Remembers the resolution a guest asked for, as CGDisplayBestModeForParameters is given it.
+void setRequestedDisplaySize(int width, int height);
 // Runs the Cocoa event queue, tracking key and mouse state, until something
 // arrives or `seconds` pass.
 void pumpCarbonEvents(double seconds);
