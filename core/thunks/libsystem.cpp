@@ -335,6 +335,8 @@ B32_THUNK(___maskrune) {
 }
 B32_THUNK(___tolower) { c.ret(uint32_t(__tolower(c.args.i32()))); }
 B32_THUNK(___toupper) { c.ret(uint32_t(__toupper(c.args.i32()))); }
+B32_THUNK(_tolower) { c.ret(uint32_t(::tolower(c.args.i32()))); }
+B32_THUNK(_toupper) { c.ret(uint32_t(::toupper(c.args.i32()))); }
 
 // _RuneLocale for inline ctype macros, which index __runetype directly. Laid
 // out for 32 bits: magic[8], encoding[32], two function pointers,
