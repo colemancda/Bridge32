@@ -308,6 +308,54 @@ B32_THUNK(_PBHGetVInfoSync) {
     c.ret(0);
 }
 
+// OSErr PBHGetVolParmsSync(HParmBlkPtr): ioNamePtr 18, ioVRefNum 22, ioBuffer 32, ioReqCount 36,
+// ioActCount 40. The GetVolParmsInfoBuffer (version 3, 2-byte aligned) says which device the volume is
+// on: vMVersion 0, vMAttrib 2, vMLocalHand 6, vMServerAdr 10, vMVolumeGrade 14, vMForeignPrivID 18,
+// vMExtendedAttributes 20, vMDeviceID 24 (a C string naming the BSD device, like "disk3s1").
+B32_THUNK(_PBHGetVolParmsSync) {
+    constexpr int32_t kNoSuchVolume = -35;
+    constexpr uint32_t kInfoSize = 28;
+    GuestAddr pb = c.args.ptr();
+    int16_t reference = c.mem.read<int16_t>(pb + 22);
+    GuestAddr buffer = c.mem.read<uint32_t>(pb + 32);
+    uint32_t count = c.mem.read<uint32_t>(pb + 36);
+    std::vector<Volume> volumes = mountedVolumes();
+    int position = reference < 0 ? -reference - 1 : 0;
+    if (position < 0 || size_t(position) >= volumes.size()) {
+        c.ret(uint32_t(kNoSuchVolume));
+        return;
+    }
+    // vMDeviceID points at the device's name, kept for as long as the guest runs.
+    static std::unordered_map<std::string, GuestAddr> deviceNames;
+    std::string device;
+    struct statfs st;
+    if (::statfs(volumes[size_t(position)].mount.c_str(), &st) == 0) {
+        device = st.f_mntfromname;
+        if (device.rfind("/dev/", 0) == 0) device.erase(0, 5);
+        else device.clear();
+    }
+    GuestAddr deviceName = 0;
+    if (!device.empty()) {
+        GuestAddr &slot = deviceNames[device];
+        if (!slot) {
+            slot = c.heap.alloc(uint32_t(device.size() + 1));
+            c.mem.copyIn(slot, device.c_str(), device.size() + 1);
+        }
+        deviceName = slot;
+    }
+    uint8_t info[kInfoSize] = {};
+    auto put16 = [&](uint32_t at, uint16_t v) { std::memcpy(info + at, &v, 2); };
+    auto put32 = [&](uint32_t at, uint32_t v) { std::memcpy(info + at, &v, 4); };
+    put16(0, 3);          // vMVersion
+    put32(2, 0);          // vMAttrib
+    put32(14, 0);         // vMVolumeGrade
+    put32(24, deviceName);  // vMDeviceID
+    uint32_t written = std::min(count, kInfoSize);
+    if (buffer && written) c.mem.copyIn(buffer, info, written);
+    c.mem.write<uint32_t>(pb + 40, written);
+    c.ret(0);
+}
+
 // --- Resource Manager: the host's reads the files; handles are copied to the guest -------
 // A wrapped app can't carry resource forks (code signing refuses them), so
 // tools/make-app.sh puts each one in Contents/B32Guest/Forks as a plain file.
