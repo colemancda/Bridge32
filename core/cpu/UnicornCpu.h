@@ -25,6 +25,8 @@ public:
 
     // For the engine's unmapped-memory hook.
     bool mapAroundForHook(uint64_t address);
+    // For the SIGUSR1 debug dump (B32_DUMP_ON_SIGUSR1).
+    void haltForDump();
 
 protected:
     uint32_t runUntilSvc() override;
