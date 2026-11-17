@@ -443,7 +443,10 @@ B32_THUNK(_IORegistryEntryGetParentEntry) {
         }
         return;
     }
-    c.ret(IORegistryEntryGetParentEntry(entry, plane ? c.mem.cstr(plane) : nullptr, c.mem.ptr<uint32_t>(parent)));
+    io_object_t hostParent = 0;
+    kern_return_t status = IORegistryEntryGetParentEntry(entry, plane ? c.mem.cstr(plane) : nullptr, &hostParent);
+    if (status == KERN_SUCCESS && parent) c.mem.write<uint32_t>(parent, hostParent);
+    c.ret(uint32_t(status));
 }
 // kern_return_t IORegistryEntryCreateIterator(io_registry_entry_t entry, const io_name_t plane,
 //                                             IOOptionBits options, io_iterator_t *iter)
@@ -467,7 +470,10 @@ B32_THUNK(_IORegistryEntryCreateIterator) {
         c.ret(kIOReturnSuccess);
         return;
     }
-    c.ret(IORegistryEntryCreateIterator(entry, plane ? c.mem.cstr(plane) : nullptr, options, c.mem.ptr<uint32_t>(out)));
+    io_iterator_t hostIterator = 0;
+    kern_return_t status = IORegistryEntryCreateIterator(entry, plane ? c.mem.cstr(plane) : nullptr, options, &hostIterator);
+    if (status == KERN_SUCCESS && out) c.mem.write<uint32_t>(out, hostIterator);
+    c.ret(uint32_t(status));
 }
 // CFTypeRef IORegistryEntryCreateCFProperty(io_registry_entry_t entry, CFStringRef name,
 //                                            CFAllocatorRef allocator, IOOptionBits options)
