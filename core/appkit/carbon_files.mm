@@ -9,12 +9,14 @@
 #import <Foundation/Foundation.h>
 #include <CoreServices/CoreServices.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -115,19 +117,46 @@ void fileRead(Call &c, bool write) {
 
 // Mounted volumes are numbered from 1 and addressed as -index: the first is the
 // boot volume. Pseudo and system mounts aren't shown, as the Finder doesn't show them.
+// The host has volume reference numbers of its own (-100 on), which its FSRefs carry in
+// their first bytes and games crack out; those resolve here too.
 namespace {
 struct Volume {
     std::string mount, name;
+    int16_t hostRef = 0;
 };
 std::vector<Volume> mountedVolumes() {
-    std::vector<Volume> list = {{"/", "Macintosh HD"}};
+    std::vector<Volume> list = {{"/", "Macintosh HD", 0}};
     struct statfs *mounts = nullptr;
     int count = ::getmntinfo(&mounts, MNT_NOWAIT);
     for (int i = 0; i < count; i++) {
         std::string path = mounts[i].f_mntonname;
-        if (path.rfind("/Volumes/", 0) == 0 && path.find("TimeMachine") == std::string::npos) list.push_back({path, leafOf(path)});
+        if (path.rfind("/Volumes/", 0) == 0 && path.find("TimeMachine") == std::string::npos) list.push_back({path, leafOf(path), 0});
+    }
+    for (ItemCount i = 1;; i++) {
+        FSVolumeRefNum ref = 0;
+        HFSUniStr255 name;
+        FSRef root;
+        if (FSGetVolumeInfo(kFSInvalidVolumeRefNum, i, &ref, kFSVolInfoNone, nullptr, &name, &root) != noErr) break;
+        char path[PATH_MAX] = "";
+        if (FSRefMakePath(&root, reinterpret_cast<uint8_t *>(path), sizeof path) != noErr) continue;
+        for (Volume &v : list)
+            if (v.mount == path) {
+                v.hostRef = ref;
+                NSString *own = [NSString stringWithCharacters:name.unicode length:name.length];
+                if (own.length) v.name = own.fileSystemRepresentation;  // the volume's own name beats the mount point's leaf
+            }
     }
     return list;
+}
+// Where a volume reference points: ours is -1.. as ioVRefNum hands it out; the host's
+// own is -100.. as its FSRefs carry it.
+int positionOf(const std::vector<Volume> &volumes, int16_t index, int16_t reference) {
+    if (index > 0) return index - 1;
+    if (reference >= 0) return 0;
+    if (size_t(-reference) <= volumes.size()) return -reference - 1;
+    for (size_t i = 0; i < volumes.size(); i++)
+        if (volumes[i].hostRef == reference) return int(i);
+    return -1;
 }
 bool isVolumeRoot(const std::string &path) {
     if (path == "/") return true;
@@ -139,6 +168,7 @@ bool isVolumeRoot(const std::string &path) {
 
 namespace {
 int32_t directoryOn(int16_t volume, int32_t dir);
+void writeCatalogInfo(Call &c, GuestAddr info, const std::string &path, const struct stat &st);
 }
 
 // OSErr PBGetCatInfoSync(CInfoPBRec *): ioNamePtr 18, ioVRefNum 22, ioFDirIndex 28,
@@ -176,10 +206,163 @@ namespace {
 int32_t directoryOn(int16_t volume, int32_t dir) {
     if ((dir != kRootDir && dir != 0) || volume >= 0) return dir;
     std::vector<Volume> volumes = mountedVolumes();
-    size_t position = size_t(-volume - 1);
-    return position < volumes.size() ? idForPath(volumes[position].mount) : dir;
+    int position = positionOf(volumes, 0, volume);
+    return position >= 0 && size_t(position) < volumes.size() ? idForPath(volumes[position].mount) : dir;
 }
 }  // namespace
+
+// OSErr FSGetCatalogInfo(const FSRef *ref, FSCatalogInfoBitmap whichInfo, FSCatalogInfo *catalogInfo,
+//                        HFSUniStr255 *outName, FSRef *parentRef, FSSpec *outSpec): explicit, so the
+// node and parent IDs are this file's, which the classic calls (HSetVol, FSpMakeFSRef) resolve.
+// The rest of the record comes from stat: dates as seconds since 1904, sizes and permissions;
+// what stat has no word for (finder info, sharing) stays zero.
+B32_THUNK(_FSGetCatalogInfo) {
+    GuestAddr ref = c.args.ptr();
+    uint32_t which = c.args.u32();
+    GuestAddr info = c.args.ptr(), outName = c.args.ptr(), parentRef = c.args.ptr(), outSpec = c.args.ptr();
+    char path[PATH_MAX] = "";
+    if (FSRefMakePath(fsRef(c, ref), reinterpret_cast<uint8_t *>(path), sizeof path) != noErr || !exists(path)) {
+        c.ret(uint32_t(kFnfErr));
+        return;
+    }
+    struct stat st;
+    ::stat(path, &st);
+    writeCatalogInfo(c, info, path, st);
+    (void)which;  // the fields it asked for are the ones filled; the rest are harmless
+    if (outName) {
+        NSString *leaf = @(leafOf(path).c_str());
+        NSUInteger length = MIN(leaf.length, NSUInteger(255));
+        c.mem.write<uint16_t>(outName, uint16_t(length));
+        std::vector<UniChar> characters(length);
+        [leaf getCharacters:characters.data() range:NSMakeRange(0, length)];
+        c.mem.writeArray<UniChar>(outName + 2, characters.data(), length);
+    }
+    if (parentRef) {
+        FSRef parent;
+        std::string up = parentOf(path);
+        if (FSPathMakeRef(reinterpret_cast<const uint8_t *>(up.c_str()), &parent, nullptr) == noErr)
+            c.mem.copyIn(parentRef, &parent, sizeof parent);
+    }
+    if (outSpec) writeSpec(c, outSpec, path);
+    c.ret(0);
+}
+
+// FSIterator: this file's directory table does the walking, so what it hands out
+// (ids, specs) matches the rest; the host's iterator would give the host's CNIDs.
+namespace {
+struct DirectoryIterator {
+    std::string base;                  // the directory it walks
+    std::vector<std::string> entries;  // leaf names, from the moment it opened
+    size_t position = 0;
+};
+std::mutex directoryIteratorLock;
+std::unordered_map<uint32_t, DirectoryIterator> directoryIterators;
+uint32_t nextDirectoryIterator = 0x30000000;
+
+void writeCatalogInfo(Call &c, GuestAddr info, const std::string &path, const struct stat &st) {
+    if (!info) return;
+    c.mem.write<uint16_t>(info + 0, S_ISDIR(st.st_mode) ? 0x10 : 0);  // kFSNodeIsDirectoryMask
+    c.mem.write<int16_t>(info + 2, kVolume);
+    c.mem.write<int32_t>(info + 4, isVolumeRoot(path) ? kRootParent : idForPath(parentOf(path)));
+    c.mem.write<int32_t>(info + 8, idForPath(path));
+    auto date = [&](uint32_t at, time_t when) {  // UTCDateTime: high then low half of seconds since 1904
+        uint64_t seconds = uint64_t(when) + 2082844800;
+        c.mem.write<uint16_t>(info + at, uint16_t(seconds >> 32));
+        c.mem.write<uint32_t>(info + at + 2, uint32_t(seconds));
+    };
+    date(56, st.st_birthtimespec.tv_sec);
+    date(62, st.st_mtimespec.tv_sec);
+    date(68, st.st_mtimespec.tv_sec);
+    date(74, st.st_atimespec.tv_sec);
+    c.mem.write<uint32_t>(info + 86, st.st_uid);
+    c.mem.write<uint32_t>(info + 90, st.st_gid);
+    c.mem.write<uint32_t>(info + 94, st.st_mode);
+    c.mem.write<uint32_t>(info + 102, uint32_t(std::min<uint64_t>(st.st_size, 0x7fffffff)));
+}
+}  // namespace
+
+// OSErr FSOpenIterator(const FSRef *container, FSIteratorFlags, FSIterator *out)
+B32_THUNK(_FSOpenIterator) {
+    GuestAddr container = c.args.ptr();
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    char path[PATH_MAX] = "";
+    if (FSRefMakePath(fsRef(c, container), reinterpret_cast<uint8_t *>(path), sizeof path) != noErr || !isDirectory(path)) {
+        c.ret(uint32_t(kDirNFErr));
+        return;
+    }
+    uint32_t handle;
+    {
+        std::lock_guard guard(directoryIteratorLock);
+        handle = nextDirectoryIterator++;
+        DirectoryIterator &it = directoryIterators[handle];
+        it.base = path;
+        it.position = 0;
+        NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(path) error:nil];
+        it.entries.reserve(entries.count);
+        for (NSString *entry in entries) it.entries.push_back(entry.fileSystemRepresentation);
+    }
+    if (out) c.mem.write<uint32_t>(out, handle);
+    c.ret(0);
+}
+// OSErr FSCloseIterator(FSIterator)
+B32_THUNK(_FSCloseIterator) {
+    uint32_t handle = c.args.u32();
+    std::lock_guard guard(directoryIteratorLock);
+    if (directoryIterators.erase(handle) == 0) {
+        c.ret(uint32_t(kParamErr));
+        return;
+    }
+    c.ret(0);
+}
+// OSErr FSGetCatalogInfoBulk(FSIterator, ItemCount maximum, ItemCount *actual, FSCatalogInfoBitmap,
+//                            FSCatalogInfo[] infos, HFSUniStr255[] names, FSRef[] refs, FSSpec[] specs,
+//                            Boolean *changes): one stride each — FSCatalogInfo 128, HFSUniStr255 512,
+//                            FSRef 80, FSSpec 70.
+B32_THUNK(_FSGetCatalogInfoBulk) {
+    uint32_t handle = c.args.u32();
+    uint32_t maximum = c.args.u32();
+    GuestAddr actual = c.args.ptr();
+    c.args.u32();  // whichInfo: the fields it asked for are the ones filled
+    GuestAddr infos = c.args.ptr(), names = c.args.ptr(), refs = c.args.ptr(), specs = c.args.ptr(), changes = c.args.ptr();
+    uint32_t count = 0;
+    {
+        std::lock_guard guard(directoryIteratorLock);
+        auto found = directoryIterators.find(handle);
+        if (found == directoryIterators.end()) {
+            c.ret(uint32_t(kParamErr));
+            return;
+        }
+        DirectoryIterator &it = found->second;
+        for (; count < maximum && it.position < it.entries.size(); count++, it.position++) {
+            const std::string &leaf = it.entries[it.position];
+            std::string path = (it.base == "/" ? "" : it.base) + "/" + leaf;
+            struct stat st;
+            ::stat(path.c_str(), &st);
+            writeCatalogInfo(c, infos ? infos + uint32_t(count) * 128 : 0, path, st);
+            if (names) {
+                NSString *name = @(leaf.c_str());
+                NSUInteger length = MIN(name.length, NSUInteger(255));
+                GuestAddr out = names + uint32_t(count) * 512;
+                c.mem.write<uint16_t>(out, uint16_t(length));
+                std::vector<UniChar> characters(length);
+                [name getCharacters:characters.data() range:NSMakeRange(0, length)];
+                c.mem.writeArray<UniChar>(out + 2, characters.data(), length);
+            }
+            if (refs) {
+                FSRef ref;
+                if (FSPathMakeRef(reinterpret_cast<const uint8_t *>(path.c_str()), &ref, nullptr) == noErr)
+                    c.mem.copyIn(refs + uint32_t(count) * 80, &ref, sizeof ref);
+                else
+                    c.mem.write<uint32_t>(refs + uint32_t(count) * 80, 0);
+            }
+            if (specs) writeSpec(c, specs + uint32_t(count) * 70, path);
+            if (changes) c.mem.write<uint8_t>(changes, 0);
+        }
+    }
+    if (actual) c.mem.write<uint32_t>(actual, count);
+    c.ret(0);
+}
 
 // OSErr FindFolder(vRefNum, folderType, createFolder, short *foundVRefNum, long *foundDirID)
 B32_THUNK(_FindFolder) {
@@ -277,7 +460,38 @@ B32_THUNK(_SetEOF) {
     int fd = int16_t(c.args.u32());
     c.ret(uint32_t(::ftruncate(fd, c.args.i32()) == 0 ? kNoErr : kIoErr));
 }
-B32_THUNK(_HSetVol) { c.ret(0); }
+// The default volume and directory HSetVol sets, as the pair the caller gave:
+// the ids are this file's (idForPath), which FSGetCatalogInfo below hands out,
+// so what went in comes back out.
+std::mutex defaultDirLock;
+int16_t defaultDirVolume = -1;
+int32_t defaultDirId = kRootDir;
+std::string defaultDirName;
+// OSErr HSetVol(ConstStr255Param name, short vRefNum, long dirID)
+B32_THUNK(_HSetVol) {
+    c.args.ptr();
+    int16_t volume = c.args.i32();
+    int32_t dir = c.args.i32();
+    {
+        std::lock_guard guard(defaultDirLock);
+        defaultDirVolume = volume;
+        defaultDirId = dir;
+        std::string path = pathForId(dir);
+        defaultDirName = path == "/" ? std::string() : leafOf(path);
+    }
+    c.ret(0);
+}
+// OSErr HGetVol(StringPtr name, short *vRefNum, long *dirID)
+B32_THUNK(_HGetVol) {
+    GuestAddr name = c.args.ptr(), volume = c.args.ptr(), dir = c.args.ptr();
+    {
+        std::lock_guard guard(defaultDirLock);
+        if (name) writePascal(c, name, defaultDirName);
+        if (volume) c.mem.write<int16_t>(volume, defaultDirVolume);
+        if (dir) c.mem.write<int32_t>(dir, defaultDirId);
+    }
+    c.ret(0);
+}
 
 // OSErr PBHGetVInfoSync(HParmBlkPtr): ioNamePtr 18, ioVRefNum 22, ioVolIndex 28,
 // ioVNmAlBlks 46, ioVAlBlkSiz 48, ioVFrBlk 62. An index above 0 enumerates, and
@@ -287,7 +501,7 @@ B32_THUNK(_PBHGetVInfoSync) {
     GuestAddr pb = c.args.ptr();
     int16_t index = c.mem.read<int16_t>(pb + 28), reference = c.mem.read<int16_t>(pb + 22);
     std::vector<Volume> volumes = mountedVolumes();
-    int position = index > 0 ? index - 1 : reference < 0 ? -reference - 1 : 0;
+    int position = positionOf(volumes, index, reference);
     if (position < 0 || size_t(position) >= volumes.size()) {
         c.ret(uint32_t(kNoSuchVolume));
         return;
@@ -320,7 +534,7 @@ B32_THUNK(_PBHGetVolParmsSync) {
     GuestAddr buffer = c.mem.read<uint32_t>(pb + 32);
     uint32_t count = c.mem.read<uint32_t>(pb + 36);
     std::vector<Volume> volumes = mountedVolumes();
-    int position = reference < 0 ? -reference - 1 : 0;
+    int position = positionOf(volumes, 0, reference);
     if (position < 0 || size_t(position) >= volumes.size()) {
         c.ret(uint32_t(kNoSuchVolume));
         return;
