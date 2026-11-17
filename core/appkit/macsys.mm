@@ -15,6 +15,7 @@
 #include <CoreVideo/CoreVideo.h>
 #include <ImageIO/ImageIO.h>
 #include <OpenGL/OpenGL.h>
+#include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <mach/mach_time.h>
 
@@ -266,17 +267,50 @@ constexpr uint32_t kIOReturnFailure = 0xE00002BC;
 B32_DATA(_kIOMasterPortDefault, 4) {}
 B32_NOTHING(_IOServiceMatching)
 B32_NOTHING(_IOServiceGetMatchingService)
-B32_NOTHING(_IOBSDNameMatching)
-B32_NOTHING(_IORegistryEntryCreateCFProperty)
 B32_IOKIT_ERROR(_IOMasterPort)
-B32_IOKIT_ERROR(_IOServiceGetMatchingServices)
-B32_NOTHING(_IOIteratorNext)
-B32_NOTHING(_IOIteratorIsValid)
-B32_NOTHING(_IOObjectRelease)
-B32_NOTHING(_IOObjectRetain)
-B32_NOTHING(_IOObjectIsEqualTo)
 B32_IOKIT_ERROR(_IORegistryEntryCreateCFProperties)
-B32_IOKIT_ERROR(_IORegistryEntryGetParentEntry)
+// The registry is the host's, but only what a BSD device name leads to: a guest finds out what a volume is
+// on (a disc, a disk image, a disk) by matching its device and walking up. Matching anything else finds
+// nothing, as before. The handles are mach ports, the same size in the guest.
+namespace {
+const CFunction kRegistry[] = {
+    {"IOIteratorNext", "u:u"},
+    {"IOIteratorIsValid", "u:u"},
+    {"IOObjectRelease", "i:u"},
+    {"IOObjectRetain", "i:u"},
+    {"IOObjectIsEqualTo", "u:uu"},
+    {"IOObjectGetClass", "i:up"},
+    {"IORegistryEntryGetParentEntry", "i:upp"},
+    {"IORegistryEntryCreateIterator", "i:upup"},
+    {"IORegistryEntryCreateCFProperty", "o:uouu"},
+};
+}  // namespace
+B32_C_FUNCTIONS(kRegistry, process);
+
+// CFMutableDictionaryRef IOBSDNameMatching(masterPort, options, const char *name)
+B32_THUNK(_IOBSDNameMatching) {
+    c.args.u32();
+    uint32_t options = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    CFMutableDictionaryRef matching = name ? IOBSDNameMatching(kIOMasterPortDefault, options, c.mem.cstr(name)) : nullptr;
+    c.ret(matching ? bridge(c).toGuest((id)CFBridgingRelease(matching)) : 0);
+}
+// kern_return_t IOServiceGetMatchingServices(masterPort, matching, io_iterator_t *): the call consumes the
+// dictionary, which the bridge still owns a reference to.
+B32_THUNK(_IOServiceGetMatchingServices) {
+    c.args.u32();
+    GuestAddr matching = c.args.ptr(), out = c.args.ptr();
+    if (!matching) {
+        c.ret(kIOReturnFailure);
+        return;
+    }
+    CFDictionaryRef dictionary = (CFDictionaryRef)bridge(c).toHost(matching);
+    CFRetain(dictionary);
+    io_iterator_t iterator = 0;
+    kern_return_t status = IOServiceGetMatchingServices(kIOMasterPortDefault, dictionary, &iterator);
+    if (out) c.mem.write<uint32_t>(out, iterator);
+    c.ret(uint32_t(status));
+}
 B32_NOTHING(_IODisplayCreateInfoDictionary)
 B32_NOTHING(_IOPSCopyPowerSourcesInfo)
 B32_NOTHING(_IOPSCopyPowerSourcesList)
