@@ -135,6 +135,7 @@ B32_THUNK(_aglGetDrawable) { c.ret(0); }
 B32_THUNK(_aglSetFullScreen) {
     NSOpenGLContext *context = contextOf(c.args.u32());
     GLint size[2] = {c.args.i32(), c.args.i32()};
+    log("aglSetFullScreen %d x %d", size[0], size[1]);
     context.view = b32::appkit::carbonFullScreenView(size[0], size[1]);
     if (size[0] > 0 && size[1] > 0) CGLSetParameter(context.CGLContextObj, kCGLCPSurfaceBackingSize, size);
     if (size[0] > 0 && size[1] > 0) CGLEnable(context.CGLContextObj, kCGLCESurfaceBackingSize);
