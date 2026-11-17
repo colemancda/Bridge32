@@ -3,6 +3,8 @@
 
 #include "Thunks.h"
 
+#include "Discs.h"
+
 #include "core/Log.h"
 #include "core/Runtime.h"
 
@@ -153,12 +155,15 @@ B32_THUNK(__NSGetEnviron) {
 }
 
 // int getmntinfo(struct statfs **list, int flags): the mounted volumes, in the
-// plain i386 struct statfs (272 bytes; see libsystem.cpp's _statfs).
+// plain i386 struct statfs (272 bytes; see libsystem.cpp's _statfs). Disc
+// volumes (images included) are read-only, as a disc mounts: a disc check
+// looks for the flag.
 B32_THUNK(_getmntinfo) {
     GuestAddr out = c.args.ptr();
     int flags = c.args.i32();
     struct statfs *mounts = nullptr;
     int count = ::getmntinfo(&mounts, flags);
+    std::vector<discs::Volume> discs = discs::mounted();
     GuestAddr list = c.heap.calloc(uint32_t(std::max(count, 1)), 272);
     for (int i = 0; i < count; i++) {
         GuestAddr e = list + uint32_t(i) * 272;
@@ -175,6 +180,11 @@ B32_THUNK(_getmntinfo) {
         strlcpy(c.mem.ptr<char>(e + 60), m.f_fstypename, 15);
         strlcpy(c.mem.ptr<char>(e + 75), m.f_mntonname, 90);
         strlcpy(c.mem.ptr<char>(e + 165), m.f_mntfromname, 90);
+        for (const discs::Volume &d : discs)
+            if (d.mount == m.f_mntonname) {
+                c.mem.write<int32_t>(e + 48, int32_t(m.f_flags) | MNT_RDONLY);
+                break;
+            }
     }
     c.mem.write<uint32_t>(out, list);
     c.ret(uint32_t(count));
