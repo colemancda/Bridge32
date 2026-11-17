@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstring>
 #include <ctime>
+#include <string>
 #include <vector>
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -70,6 +71,20 @@ B32_THUNK(_CFStringCreateMutableWithExternalCharactersNoCopy) {
     }
     c.ret(bridge(c).toGuest((id)CFBridgingRelease(string)));
 }
+// void CFStringSetExternalCharactersNoCopy(CFMutableStringRef, UniChar *, CFIndex, CFIndex):
+// the same copy, replacing what the string holds — a caller fills its buffer after
+// creating the string, then points the string at it.
+B32_THUNK(_CFStringSetExternalCharactersNoCopy) {
+    CFMutableStringRef string = (CFMutableStringRef)object(c);
+    GuestAddr chars = c.args.ptr();
+    int32_t length = c.args.i32();
+    c.args.i32();  // the capacity of the buffer it would point at
+    CFStringDelete(string, CFRangeMake(0, CFStringGetLength(string)));
+    if (chars && length > 0) {
+        std::vector<UniChar> text = c.mem.readArray<UniChar>(chars, size_t(length));
+        CFStringAppendCharacters(string, text.data(), length);
+    }
+}
 
 // Pascal string out of a CFString: buffer holds length then bytes.
 B32_THUNK(_CFStringGetPascalString) {
@@ -117,10 +132,8 @@ const CFunction kFiles[] = {
     {"FSDeleteObject", "i:p"},
     {"FSCloseFork", "i:i"},
 #if !defined(B32_GUEST_BIG_ENDIAN)
-    {"FSGetCatalogInfo", "i:pupppp"},
     {"FSSetCatalogInfo", "i:pup"},
     {"FSGetDataForkName", "i:p"},
-    {"FSMakeFSRefUnicode", "i:pzpup"},
     {"FSCreateFileUnicode", "i:pzpuppp"},
     {"FSGetForkSize", "i:ip"},
     {"FSGetForkPosition", "i:ip"},
@@ -128,6 +141,26 @@ const CFunction kFiles[] = {
 };
 }  // namespace
 B32_C_FUNCTIONS(kFiles, process);
+
+// OSErr FSMakeFSRefUnicode(const FSRef *parent, UniCharCount, const UniChar *, TextEncoding, FSRef *):
+// explicit for both guests, to name what wasn't found.
+B32_THUNK(_FSMakeFSRefUnicode) {
+    GuestAddr parent = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    TextEncoding hint = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
+    OSErr error = FSMakeFSRefUnicode(fsRef(c, parent), length, text.data(), hint, fsRef(c, out));
+    if (error) {  // the name it wanted, and where: a missing resource named for the log
+        char path[PATH_MAX] = "";
+        FSRefMakePath(fsRef(c, parent), reinterpret_cast<uint8_t *>(path), sizeof path);
+        CFStringRef string = CFStringCreateWithCharacters(nullptr, text.data(), length);
+        log("FSMakeFSRefUnicode %s/%s -> %d", path, [(__bridge NSString *)string UTF8String] ?: "?", error);
+        if (string) CFRelease(string);
+    }
+    c.ret(uint32_t(int32_t(error)));
+}
 
 #if defined(B32_GUEST_BIG_ENDIAN)
 // OSErr FSGetDataForkName(HFSUniStr255 *): { UInt16 length; UniChar unicode[255] }
@@ -138,16 +171,6 @@ B32_THUNK(_FSGetDataForkName) {
     c.mem.write<uint16_t>(out, name.length);
     c.mem.writeArray<UniChar>(out + 2, name.unicode, name.length);
     c.ret(uint32_t(int32_t(error)));
-}
-// OSErr FSMakeFSRefUnicode(const FSRef *parent, UniCharCount, const UniChar *, TextEncoding, FSRef *)
-B32_THUNK(_FSMakeFSRefUnicode) {
-    GuestAddr parent = c.args.ptr();
-    uint32_t length = c.args.u32();
-    GuestAddr name = c.args.ptr();
-    TextEncoding hint = c.args.u32();
-    GuestAddr out = c.args.ptr();
-    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
-    c.ret(uint32_t(int32_t(FSMakeFSRefUnicode(fsRef(c, parent), length, text.data(), hint, fsRef(c, out)))));
 }
 // OSErr FSCreateFileUnicode(parent, UniCharCount, name, whichInfo, const FSCatalogInfo *, FSRef *, FSSpec *):
 // the catalog info (dates, permissions) isn't converted, so the file gets the defaults.
@@ -346,7 +369,14 @@ B32_THUNK(_CreateStandardAlert) {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = title ?: @"";
     alert.informativeText = text ?: @"";
-    log("Carbon alert: %s / %s", alert.messageText.UTF8String, alert.informativeText.UTF8String);
+    // The guest's frames too: an alert with empty text still says who is asking.
+    std::string frames;
+    for (uint32_t ret : c.cpu.frameChain(12)) {
+        char text[16];
+        std::snprintf(text, sizeof text, " %08x", ret);
+        frames += text;
+    }
+    log("Carbon alert: %s / %s; frames%s", alert.messageText.UTF8String, alert.informativeText.UTF8String, frames.c_str());
     c.mem.write<uint32_t>(out, bridge(c).toGuest(alert));
     c.ret(0);
 }
