@@ -9,6 +9,7 @@
 #include "core/thunks/CTable.h"
 
 #import <AppKit/AppKit.h>
+#include <Carbon/Carbon.h>
 #include <CoreServices/CoreServices.h>
 #include <dlfcn.h>
 #include <mach/mach_time.h>
@@ -606,7 +607,50 @@ B32_THUNK(_IdenticalString) {
     c.ret(la == lb && std::memcmp(c.mem.ptr<char>(a + 1), c.mem.ptr<char>(b + 1), la) == 0 ? 0 : 1);
 }
 B32_THUNK(_GetScriptVariable) { c.ret(0); }
-B32_THUNK(_GetScriptManagerVariable) { c.ret(0); }
+// long GetScriptManagerVariable(short selector): smKCHRCache (38) is the keyboard layout KeyTranslate takes,
+// which here stands for the host's (any address the guest can hold); the rest are 0.
+namespace {
+GuestAddr keyboardLayoutToken(Call &c) {
+    static GuestAddr token = 0;
+    if (!token) token = c.heap.calloc(1, 16);
+    return token;
+}
+}  // namespace
+B32_THUNK(_GetScriptManagerVariable) {
+    constexpr int16_t kKCHRCache = 38;
+    c.ret(int16_t(c.args.u32()) == kKCHRCache ? keyboardLayoutToken(c) : 0);
+}
+// UInt32 KeyTranslate(const void *layout, UInt16 keycode, UInt32 *state): the character a key makes with the
+// modifiers in the keycode's high byte (shift 0x02, caps lock 0x04, option 0x08, control 0x10), as the host's
+// keyboard layout has it, in Mac Roman in the low byte. A dead key leaves its state for the next key and
+// makes nothing yet; bit 7 of the keycode is a key coming up, which makes nothing.
+B32_THUNK(_KeyTranslate) {
+    c.args.ptr();
+    uint16_t keycode = uint16_t(c.args.u32());
+    GuestAddr stateAddr = c.args.ptr();
+    static CFDataRef layoutData = [] {
+        TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+        CFDataRef data = source ? (CFDataRef)TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) : nullptr;
+        if (data) CFRetain(data);
+        if (source) CFRelease(source);
+        return data;
+    }();
+    UInt32 dead = stateAddr ? c.mem.read<uint32_t>(stateAddr) : 0;
+    UniChar chars[4];
+    UniCharCount length = 0;
+    OSStatus status = -1;
+    if (layoutData && !(keycode & 0x80))
+        status = UCKeyTranslate(reinterpret_cast<const UCKeyboardLayout *>(CFDataGetBytePtr(layoutData)), keycode & 0x7f, kUCKeyActionDown,
+                                (keycode >> 8) & 0xff, LMGetKbdType(), 0, &dead, 4, &length, chars);
+    if (stateAddr) c.mem.write<uint32_t>(stateAddr, status == noErr ? dead : 0);
+    if (status != noErr || length == 0) {
+        c.ret(0);
+        return;
+    }
+    NSString *text = [NSString stringWithCharacters:chars length:length];
+    NSData *roman = [text dataUsingEncoding:NSMacOSRomanStringEncoding allowLossyConversion:YES];
+    c.ret(roman.length ? static_cast<const uint8_t *>(roman.bytes)[0] : 0);
+}
 B32_THUNK(_SetQDGlobalsRandomSeed) {}
 B32_THUNK(_RegisterEventHotKey) { c.ret(0); }
 B32_THUNK(__ZSt15set_new_handlerPFvvE) { c.ret(0); }
@@ -666,6 +710,17 @@ B32_THUNK(_SndDisposeChannel) { c.ret(0); }
 B32_THUNK(_SndPlay) { c.ret(0); }
 B32_THUNK(_SndDoCommand) { c.ret(0); }
 B32_THUNK(_SndDoImmediate) { c.ret(0); }
+// OSErr SndChannelStatus(SndChannelPtr, short length, SCStatus *): a silent channel, never busy.
+B32_THUNK(_SndChannelStatus) {
+    c.args.ptr();
+    int16_t length = int16_t(c.args.u32());
+    GuestAddr status = c.args.ptr();
+    if (status && length > 0) {
+        std::vector<uint8_t> zeros(size_t(length), 0);
+        c.mem.copyIn(status, zeros.data(), zeros.size());
+    }
+    c.ret(0);
+}
 B32_THUNK(_NewSndCallBackUPP) { c.ret(c.args.ptr()); }
 B32_THUNK(_DisposeSndCallBackUPP) {}
 B32_THUNK(_ExitToShell) { c.rt.exit(0); }
