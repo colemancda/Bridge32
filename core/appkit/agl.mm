@@ -10,7 +10,9 @@
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 
+#include <cstring>
 #include <set>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -35,14 +37,55 @@ constexpr int32_t kSwapInterval = 222, kBufferRect = 203, kSwapRect = 200;
 constexpr int32_t kDescAccelerated = 73, kDescVideoMemory = 120, kDescTextureMemory = 121, kDescRendererID = 70, kDescFullscreen = 54,
                   kDescBufferModes = 100, kDescColorModes = 103, kDescDepthModes = 105;
 
-// An AGL context as the guest holds it: a record in its own memory. Games call
-// through the record's private slots (Age of Mythology its +0x1d8, with the GL
-// string enums), so the record carries a stub there.
+// An AGL context as the guest holds it: a record in its own memory, which begins as the real thing did.
+// A program built with aglMacro.h doesn't call glClear(...): it calls through the record,
+// (*context->disp.clear)(context->rend, ...). So the record is `rend` (here the record itself) and then the
+// dispatch table, a pointer for each OpenGL function in gliDispatch.h's order, each of them a stub that
+// drops `rend` and goes on to that function's own thunk.
+const char *const kDispatch[] = {
+#include "core/gl/gli_dispatch.inc"
+};
+constexpr uint32_t kDispatchSlots = sizeof kDispatch / sizeof kDispatch[0];
+constexpr uint32_t kRecordSize = 4 + kDispatchSlots * 4 + 256;  // and room for what follows the table
+constexpr char kForwardPrefix[] = "_gli_";
+
 std::unordered_map<uint32_t, NSOpenGLContext *> aglContexts;
+
+// The thunk behind every slot: the call is for the context named by its first argument.
+void dispatchForward(Call &c) {
+    struct Target {
+        ThunkFn function;
+        std::string name;
+    };
+    // By the stub's own name, which stays where it is for as long as the program runs.
+    thread_local std::unordered_map<const char *, Target> targets;
+    auto found = targets.find(c.name);
+    if (found == targets.end()) {
+        std::string name = std::string("_") + (c.name + sizeof kForwardPrefix - 1);
+        found = targets.emplace(c.name, Target{ThunkRegistry::find(name), name}).first;
+    }
+    GuestAddr record = c.args.ptr();
+    if (auto context = aglContexts.find(record); context != aglContexts.end() && NSOpenGLContext.currentContext != context->second)
+        [context->second makeCurrentContext];
+    Call call{c.rt, c.cpu, c.mem, c.heap, c.args, found->second.name.c_str()};
+    found->second.function(call);
+}
+const int dispatchRegistration = [] {
+    for (const char *function : kDispatch)
+        if (function) ThunkRegistry::all().emplace(std::string(kForwardPrefix) + function, dispatchForward);
+    return 0;
+}();
+
 GuestAddr aglContextRecord(Call &c, NSOpenGLContext *context) {
-    GuestAddr record = c.heap.calloc(1, 0x200);
-    c.mem.write<uint32_t>(record, record);  // what the record calls itself
-    c.mem.write<uint32_t>(record + 0x1d8, c.rt.thunks().stubFor("_aglRecordString"));
+    GuestAddr record = c.heap.calloc(1, kRecordSize);
+    c.mem.write<uint32_t>(record, record);  // rend: what the record's functions are called with
+    for (uint32_t slot = 0; slot < kDispatchSlots; slot++) {
+        const char *function = kDispatch[slot];
+        if (!function || !ThunkRegistry::find(std::string("_") + function)) continue;
+        // A string is answered per name, which the table's thunk would take the record for.
+        bool string = !std::strcmp(function, "glGetString");
+        c.mem.write<uint32_t>(record + 4 + slot * 4, c.rt.thunks().stubFor(string ? "_aglRecordString" : std::string(kForwardPrefix) + function));
+    }
     aglContexts[record] = context;
     return record;
 }
