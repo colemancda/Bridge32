@@ -8,6 +8,7 @@
 
 #import <Foundation/Foundation.h>
 #include <CoreServices/CoreServices.h>
+#include <CoreText/CoreText.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mount.h>
@@ -489,6 +490,64 @@ B32_THUNK(_HGetVol) {
         if (name) writePascal(c, name, defaultDirName);
         if (volume) c.mem.write<int16_t>(volume, defaultDirVolume);
         if (dir) c.mem.write<int32_t>(dir, defaultDirId);
+    }
+    c.ret(0);
+}
+
+// Boolean FSResolveAliasFile(FSRef *theRef, Boolean targetIsFolder, Boolean *wasAliased):
+// no aliases are made here; what it pointed at is what it is.
+B32_THUNK(_FSResolveAliasFile) {
+    c.args.ptr();
+    c.args.u32();
+    GuestAddr wasAliased = c.args.ptr();
+    if (wasAliased) c.mem.write<uint8_t>(wasAliased, 0);
+    c.ret(1);
+}
+
+// OSStatus ATSFontActivateFromFileSpecification(const FSSpec *, ATSFontContext, ATSFontFormat,
+//                                               ATSFontFilter, OptionBits, ATSFontContainerRef *):
+// CoreText registers the font file for the process.
+namespace {
+std::unordered_map<uint32_t, CFURLRef> fontContainers;  // the guest's container → its file
+uint32_t nextFontContainer = 0x60000001;
+}
+B32_THUNK(_ATSFontActivateFromFileSpecification) {
+    GuestAddr spec = c.args.ptr();
+    c.args.u32();
+    c.args.u32();
+    c.args.u32();
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    std::string path = specPath(c, spec);
+    if (!exists(path)) {
+        c.ret(uint32_t(kFnfErr));
+        return;
+    }
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8 *>(path.c_str()), path.size(), false);
+    CFErrorRef error = nullptr;
+    bool ok = CTFontManagerRegisterFontsForURL(url, kCTFontManagerScopeProcess, &error);
+    if (error) CFRelease(error);
+    uint32_t container = 0;
+    if (ok) {
+        container = nextFontContainer++;
+        fontContainers[container] = url;  // kept, for deactivation
+    } else if (url) {
+        CFRelease(url);
+    }
+    if (out) c.mem.write<uint32_t>(out, container);
+    c.ret(ok ? 0 : uint32_t(kFnfErr));
+}
+// OSStatus ATSFontDeactivate(ATSFontContainerRef, ATSFontDeactivateOptions, ItemCount)
+B32_THUNK(_ATSFontDeactivate) {
+    uint32_t container = c.args.u32();
+    c.args.u32();
+    c.args.u32();
+    if (auto it = fontContainers.find(container); it != fontContainers.end()) {
+        CFErrorRef error = nullptr;
+        CTFontManagerUnregisterFontsForURL(it->second, kCTFontManagerScopeProcess, &error);
+        if (error) CFRelease(error);
+        CFRelease(it->second);
+        fontContainers.erase(it);
     }
     c.ret(0);
 }
