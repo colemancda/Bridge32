@@ -1680,6 +1680,15 @@ B32_THUNK(_LocalToGlobal) {
         c.mem.write<int16_t>(point + 2, int16_t(c.mem.read<int16_t>(point + 2) + bounds.origin.x));
     }
 }
+// void GlobalToLocal(Point *): from the screen's coordinates to the current window's, LocalToGlobal undone.
+B32_THUNK(_GlobalToLocal) {
+    GuestAddr point = c.args.ptr();
+    if (CWindow *w = windowOf(currentPort)) {
+        NSRect bounds = globalBounds(w);
+        c.mem.write<int16_t>(point, int16_t(c.mem.read<int16_t>(point) - bounds.origin.y));
+        c.mem.write<int16_t>(point + 2, int16_t(c.mem.read<int16_t>(point + 2) - bounds.origin.x));
+    }
+}
 // QuickDraw's current port, all games ask it to remember for them.
 B32_THUNK(_SetPort) { currentPort = c.args.ptr(); }
 B32_THUNK(_GetPort) { c.mem.write<uint32_t>(c.args.ptr(), currentPort); }
