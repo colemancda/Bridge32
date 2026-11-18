@@ -172,6 +172,22 @@ B32_THUNK(_DMGetGDeviceByDisplayID) {
     if (out) c.mem.write<uint32_t>(out, handle);
     c.ret(0);
 }
+// CFDictionaryRef CGDisplayBestModeForParameters(display, bitsPerPixel, width, height, boolean_t *exactMatch):
+// the screen never changes; what it is is the best there is.
+B32_THUNK(_CGDisplayBestModeForParameters) {
+    uint32_t display = c.args.u32();
+    c.args.u32();
+    size_t width = c.args.u32(), height = c.args.u32();
+    GuestAddr exact = c.args.ptr();
+    if (exact) c.mem.write<uint32_t>(exact, 1);
+    c.ret(bridge(c).toGuest(modeDictionary(width, height, 60)));
+}
+// CGDataProviderRef CGDataProviderCreateWithURL(CFURLRef)
+B32_THUNK(_CGDataProviderCreateWithURL) {
+    NSURL *url = (NSURL *)bridge(c).toHost(c.args.ptr());
+    CGDataProviderRef provider = url ? CGDataProviderCreateWithURL((__bridge CFURLRef)url) : nullptr;
+    c.ret(provider ? bridge(c).toGuest((id)CFBridgingRelease(provider)) : 0);
+}
 
 // The screen stays the user's.
 #define B32_SUCCEEDS(symbol) B32_THUNK(symbol) { c.ret(0); }
