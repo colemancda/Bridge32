@@ -7,8 +7,17 @@
 @class NSView;
 @class NSWindow;
 
-namespace b32::appkit {
+namespace b32 {
 
+class Runtime;
+
+namespace appkit {
+
+// Where the guest's SetPort and SetGWorld leave the current port, and the
+// screen's PixMapHandle to stand in for a window port's own
+// (core/appkit/quickdraw.mm).
+extern GuestAddr currentPort;
+GuestAddr screenPixMap(Runtime &rt);
 // Makes the guest a running Mac application the first time Carbon UI is used.
 void ensureCarbonApplication();
 // The content view behind a guest window or its port, or nil.
@@ -26,3 +35,5 @@ void setRequestedDisplaySize(int width, int height);
 void pumpCarbonEvents(double seconds);
 
 }  // namespace b32::appkit
+
+}  // namespace b32

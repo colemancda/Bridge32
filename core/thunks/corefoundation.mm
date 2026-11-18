@@ -579,10 +579,15 @@ B32_THUNK(_CFStringCreateWithFormat) {
 }
 
 // void CFStringGetCharacters(CFStringRef, CFRange, UniChar *buffer): the guest's CFRange is two words.
+// The range is clamped to the string: a guest reading a fixed 256 characters out of a shorter one
+// (a name into a Str255) was fine in the era, where today's CFString throws instead.
 B32_THUNK(_CFStringGetCharacters) {
     auto string = (CFStringRef)bridge(c).toHost(c.args.ptr());
     CFIndex location = c.args.i32(), length = c.args.i32();
     GuestAddr out = c.args.ptr();
+    CFIndex size = string ? CFStringGetLength(string) : 0;
+    if (length < 0 || location < 0 || location > size) length = 0;
+    else length = std::min(length, size - location);
     std::vector<UniChar> characters(size_t(std::max<CFIndex>(length, 0)));
     CFStringGetCharacters(string, CFRangeMake(location, length), characters.data());
     c.mem.writeArray<UniChar>(out, characters.data(), characters.size());

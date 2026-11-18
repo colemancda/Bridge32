@@ -6,8 +6,15 @@
 
 #include <unicorn/unicorn.h>
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
+#include <string>
+
+#include <signal.h>
 
 namespace b32 {
 
@@ -67,6 +74,17 @@ bool onUnmapped(uc_engine *, uc_mem_type type, uint64_t address, int, int64_t, v
     return cpu->mapAroundForHook(address);
 }
 
+// B32_DUMP_ON_SIGUSR1=1: `kill -USR1 <pid>` stops every guest thread long enough to log where it
+// is (the PC, the stack pointer and the frames above), to find what a guest that has gone quiet
+// is doing.
+std::mutex enginesLock;
+std::set<UnicornCpu *> engines;
+std::atomic<bool> dumpRequested{false};
+void onDumpSignal(int) {
+    dumpRequested = true;
+    for (UnicornCpu *cpu : engines) cpu->haltForDump();
+}
+
 }  // namespace
 
 UnicornCpu::UnicornCpu(GuestMemory &mem, SvcHandler handler)
@@ -90,9 +108,19 @@ UnicornCpu::UnicornCpu(GuestMemory &mem, SvcHandler handler)
     mapPages(page, page + 1);
     gdt_ = allocGdt();
     writeGdt();
+    if (getenv("B32_DUMP_ON_SIGUSR1")) {
+        static std::once_flag installed;
+        std::call_once(installed, [] { signal(SIGUSR1, onDumpSignal); });
+        std::lock_guard guard(enginesLock);
+        engines.insert(this);
+    }
 }
 
 UnicornCpu::~UnicornCpu() {
+    {
+        std::lock_guard guard(enginesLock);
+        engines.erase(this);
+    }
     freeGdt(gdt_);
     uc_close(uc_);
 }
@@ -226,6 +254,18 @@ uint32_t UnicornCpu::runUntilSvc() {
         case UC_ERR_OK: {
             // A hlt leaves eip just past itself; a halt request (suspend)
             // leaves it wherever the guest was.
+            if (dumpRequested.exchange(false)) {  // the SIGUSR1 debug dump
+                std::string frames;
+                for (uint32_t ret : frameChain(12)) {
+                    char text[16];
+                    std::snprintf(text, sizeof text, " %08x", ret);
+                    frames += text;
+                }
+                log("guest at eip=0x%08x esp=0x%08x ebp=0x%08x; frames%s", eip, reg(ESP), reg(EBP), frames.c_str());
+                log("  eax %08x ebx %08x ecx %08x edx %08x esi %08x edi %08x", reg(EAX), reg(EBX), reg(ECX), reg(EDX),
+                    reg(ESI), reg(EDI));
+                continue;
+            }
             GuestAddr trap = eip - 1;
             if (trap == layout::kSentinel) return kSentinelSvc;
             if (trap >= layout::kStubBase && trap < layout::kStubBase + layout::kStubRegionSize &&
@@ -259,5 +299,7 @@ uint32_t UnicornCpu::runUntilSvc() {
 }
 
 void UnicornCpu::requestHalt() { uc_emu_stop(uc_); }
+
+void UnicornCpu::haltForDump() { uc_emu_stop(uc_); }
 
 }  // namespace b32

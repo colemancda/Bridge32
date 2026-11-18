@@ -94,7 +94,8 @@ std::unordered_map<GuestAddr, CEvent *> events;
 std::unordered_map<GuestAddr, NSXMLDocument *> nibs;
 std::unordered_map<GuestAddr, NSTimer *> timers;
 std::unordered_map<void *, CControl *> controlByView;
-GuestAddr applicationTarget = 0, dispatcherTarget = 0, currentPort = 0;
+using b32::appkit::currentPort;  // QuickDraw's, where SetPort and SetGWorld leave it
+GuestAddr applicationTarget = 0, dispatcherTarget = 0;
 
 GuestAddr makeTarget(Call &c, GuestAddr parent) {
     GuestAddr handle = newHandle(c);
@@ -425,12 +426,21 @@ NSWindowStyleMask styleFor(NSXMLElement *e) {
 
 CWindow *registerWindow(Call &c, NSWindow *ns) {
     auto *window = new CWindow{};
-    window->handle = newHandle(c);
+    // A window is a port: its handle holds a CGrafPort (quickdraw.mm's layout),
+    // drawing on the screen's pixmap, with the content bounds for a portRect.
+    window->handle = c.heap.calloc(1, 128);
+    c.mem.write<uint32_t>(window->handle + 4, b32::appkit::screenPixMap(c.rt));
+    CGFloat screen = NSScreen.screens.firstObject.frame.size.height;
+    NSRect content = [ns contentRectForFrameRect:ns.frame];
+    c.mem.write<int16_t>(window->handle + 18, int16_t(screen - NSMaxY(content)));
+    c.mem.write<int16_t>(window->handle + 20, int16_t(content.origin.x));
+    c.mem.write<int16_t>(window->handle + 22, int16_t(screen - content.origin.y));
+    c.mem.write<int16_t>(window->handle + 24, int16_t(NSMaxX(content)));
     window->target = makeTarget(c, appTarget(c));
     window->window = ns;
-    B32CarbonContent *content = [[B32CarbonContent alloc] initWithFrame:ns.contentView.bounds];
-    ns.contentView = content;
-    window->content = content;
+    B32CarbonContent *content2 = [[B32CarbonContent alloc] initWithFrame:ns.contentView.bounds];
+    ns.contentView = content2;
+    window->content = content2;
     ns.delegate = responder();
     ns.releasedWhenClosed = NO;
     windows[window->handle] = window;
@@ -719,6 +729,39 @@ B32_THUNK(_IsWindowVisible) {
 }
 B32_THUNK(_GetWindowPort) { c.ret(c.args.ptr()); }
 B32_THUNK(_GetWindowFromPort) { c.ret(c.args.ptr()); }
+// void SetPortWindowPort(WindowRef): the window's port, which is the window.
+B32_THUNK(_SetPortWindowPort) { currentPort = c.args.ptr(); }
+// void GetWindowPortBounds(WindowRef, Rect *): the port's local rect, kept in the
+// port itself so an offscreen read of it agrees.
+B32_THUNK(_GetWindowPortBounds) {
+    CWindow *w = windowOf(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    if (!w) return;
+    NSSize size = w->content.bounds.size;
+    writeRect(c, out, NSMakeRect(0, 0, size.width, size.height));
+    for (int i = 0; i < 8; i++) c.mem.write<uint8_t>(w->handle + 18 + i, c.mem.read<uint8_t>(out + i));
+}
+// short GetWindowKind(WindowRef) / void SetWindowKind(WindowRef, short)
+std::unordered_map<GuestAddr, int16_t> windowKinds;
+B32_THUNK(_GetWindowKind) {
+    CWindow *w = windowOf(c.args.ptr());
+    auto it = w ? windowKinds.find(w->handle) : windowKinds.end();
+    c.ret(uint32_t(it != windowKinds.end() ? it->second : 8));  // userKind
+}
+B32_THUNK(_SetWindowKind) {
+    GuestAddr window = c.args.ptr();
+    int16_t kind = c.args.i32();
+    if (windowOf(window)) windowKinds[window] = kind;
+}
+// WindowRef FrontWindow(void): the key window, or the front of what's visible.
+B32_THUNK(_FrontWindow) {
+    CWindow *front = nullptr;
+    for (auto &[handle, window] : windows) {
+        if (!window->window.visible) continue;
+        if (!front || window->window == NSApp.keyWindow || (!NSApp.keyWindow && window->window == NSApp.mainWindow)) front = window;
+    }
+    c.ret(front ? front->handle : 0);
+}
 B32_THUNK(_SetWRefCon) {
     CWindow *w = windowOf(c.args.ptr());
     uint32_t value = c.args.u32();
@@ -732,6 +775,39 @@ B32_THUNK(_SetWindowTitleWithCFString) {
     CWindow *w = windowOf(c.args.ptr());
     NSString *title = object(c);
     if (w) w->window.title = title ?: @"";
+    c.ret(0);
+}
+// OSStatus GetWindowRegion(WindowRef, WindowRegionCode, Rect *out): the content,
+// which is the part a game draws into.
+B32_THUNK(_GetWindowRegion) {
+    CWindow *w = windowOf(c.args.ptr());
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    if (w) writeRect(c, out, globalBounds(w));
+    c.ret(0);
+}
+// OSStatus InvalWindowRect(WindowRef, const Rect *): drawing is the host's own
+B32_THUNK(_InvalWindowRect) {
+    c.args.ptr();
+    c.args.ptr();
+    c.ret(0);
+}
+// The Finder decorations a game dresses its window in; nothing to show for them.
+B32_THUNK(_SetWindowProxyCreatorAndType) {
+    c.args.ptr();
+    c.args.u32();
+    c.args.u32();
+    c.args.u32();
+    c.ret(0);
+}
+B32_THUNK(_SetWindowModified) {
+    c.args.ptr();
+    c.args.u32();
+    c.ret(0);
+}
+B32_THUNK(_SetWindowContentColor) {
+    c.args.ptr();
+    c.args.ptr();
     c.ret(0);
 }
 // OSStatus GetWindowBounds(window, region, Rect *out)
@@ -750,6 +826,7 @@ B32_THUNK(_SetWindowBounds) {
         CGFloat screen = NSScreen.screens.firstObject.frame.size.height;
         NSRect cocoa = NSMakeRect(rect.origin.x, screen - NSMaxY(rect), rect.size.width, rect.size.height);
         [w->window setFrame:[w->window frameRectForContentRect:cocoa] display:YES];
+        writeRect(c, w->handle + 18, NSMakeRect(0, 0, rect.size.width, rect.size.height));  // the port follows
     }
     c.ret(0);
 }
@@ -1367,6 +1444,10 @@ B32_THUNK(_InitCursor) {}
 B32_THUNK(_HideCursor) { [NSCursor hide]; }
 B32_THUNK(_ShowCursor) { [NSCursor unhide]; }
 B32_THUNK(_SetSystemUIMode) { c.ret(0); }
+// OSStatus BeginAppModalStateForWindow / EndAppModalStateForWindow(window): the alert's own run loop
+// already keeps the application's other windows quiet.
+B32_THUNK(_BeginAppModalStateForWindow) { c.ret(0); }
+B32_THUNK(_EndAppModalStateForWindow) { c.ret(0); }
 B32_THUNK(_GetSystemUIMode) {
     GuestAddr a = c.args.ptr(), b = c.args.ptr();
     if (a) c.mem.write<uint32_t>(a, 0);
@@ -1376,14 +1457,25 @@ B32_THUNK(_SysBeep) { NSBeep(); }
 B32_THUNK(_TickCount) { c.ret(uint32_t(NSProcessInfo.processInfo.systemUptime * 60)); }
 B32_THUNK(_GetDblTime) { c.ret(30); }
 
+// void LocalToGlobal(Point *): by where the current port sits on screen.
+B32_THUNK(_LocalToGlobal) {
+    GuestAddr point = c.args.ptr();
+    if (CWindow *w = windowOf(currentPort)) {
+        NSRect bounds = globalBounds(w);
+        c.mem.write<int16_t>(point, int16_t(c.mem.read<int16_t>(point) + bounds.origin.y));
+        c.mem.write<int16_t>(point + 2, int16_t(c.mem.read<int16_t>(point + 2) + bounds.origin.x));
+    }
+}
 // QuickDraw's current port, all games ask it to remember for them.
 B32_THUNK(_SetPort) { currentPort = c.args.ptr(); }
 B32_THUNK(_GetPort) { c.mem.write<uint32_t>(c.args.ptr(), currentPort); }
 B32_THUNK(_SetPortDialogPort) { currentPort = c.args.ptr(); }
 B32_THUNK(_GetPortBounds) {
     GuestAddr port = c.args.ptr(), out = c.args.ptr();
-    NSRect bounds = NSZeroRect;
-    if (CWindow *w = windowOf(port)) bounds = NSMakeRect(0, 0, w->content.bounds.size.width, w->content.bounds.size.height);
-    writeRect(c, out, bounds);
+    if (CWindow *w = windowOf(port)) {
+        writeRect(c, out, NSMakeRect(0, 0, w->content.bounds.size.width, w->content.bounds.size.height));
+    } else {  // an offscreen port: the rect it was made with (quickdraw.mm's layout)
+        for (int i = 0; i < 8; i++) c.mem.write<uint8_t>(out + i, c.mem.read<uint8_t>(port + 18 + i));
+    }
     c.ret(out);
 }

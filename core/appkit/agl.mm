@@ -28,7 +28,22 @@ constexpr int32_t kSwapInterval = 222, kBufferRect = 203, kSwapRect = 200;
 constexpr int32_t kDescAccelerated = 73, kDescVideoMemory = 120, kDescTextureMemory = 121, kDescRendererID = 70, kDescFullscreen = 54,
                   kDescBufferModes = 100, kDescColorModes = 103, kDescDepthModes = 105;
 
-NSOpenGLContext *contextOf(uint32_t handle) { return handle ? (NSOpenGLContext *)hostPointer(handle) : nil; }
+// An AGL context as the guest holds it: a record in its own memory. Games call
+// through the record's private slots (Age of Mythology its +0x1d8, with the GL
+// string enums), so the record carries a stub there.
+std::unordered_map<uint32_t, NSOpenGLContext *> aglContexts;
+GuestAddr aglContextRecord(Call &c, NSOpenGLContext *context) {
+    GuestAddr record = c.heap.calloc(1, 0x200);
+    c.mem.write<uint32_t>(record, record);  // what the record calls itself
+    c.mem.write<uint32_t>(record + 0x1d8, c.rt.thunks().stubFor("_aglRecordString"));
+    aglContexts[record] = context;
+    return record;
+}
+NSOpenGLContext *contextOf(uint32_t handle) {
+    if (!handle) return nil;
+    if (auto it = aglContexts.find(handle); it != aglContexts.end()) return it->second;
+    return (NSOpenGLContext *)hostPointer(handle);
+}
 
 uint32_t currentHandle = 0;
 
@@ -101,11 +116,24 @@ B32_THUNK(_aglCreateContext) {
     auto *format = (NSOpenGLPixelFormat *)hostPointer(c.args.u32());
     NSOpenGLContext *share = contextOf(c.args.u32());
     NSOpenGLContext *context = [[NSOpenGLContext alloc] initWithFormat:format shareContext:share];
-    c.ret(context ? hostHandle(context) : 0);
+    c.ret(context ? aglContextRecord(c, context) : 0);
+}
+// const GLubyte *aglRecordString(AGLRecord, GLenum name): what the record's
+// +0x1d8 slot answers, on the record's own context.
+B32_THUNK(_aglRecordString) {
+    GuestAddr record = c.args.ptr();
+    uint32_t name = c.args.u32();
+    if (NSOpenGLContext *context = aglContexts[record]) [context makeCurrentContext];
+    const GLubyte *string = glGetString(name);
+    c.ret(string ? c.rt.internString((const char *)string) : 0);
 }
 B32_THUNK(_aglDestroyContext) {
     uint32_t handle = c.args.u32();
-    if (NSOpenGLContext *context = contextOf(handle)) {
+    if (auto it = aglContexts.find(handle); it != aglContexts.end()) {
+        [it->second clearDrawable];
+        [it->second release];
+        aglContexts.erase(it);
+    } else if (NSOpenGLContext *context = contextOf(handle)) {
         [context clearDrawable];
         [context release];
         forgetHostHandle(context);

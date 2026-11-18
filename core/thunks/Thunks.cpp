@@ -87,7 +87,16 @@ void ThunkTable::dispatch(Runtime &rt, Cpu &cpu, uint32_t index) {
         fn = entries_[index].fn;
         name = entries_[index].name.c_str();
     }
-    if (!fn) fatal("missing symbol %s (called from 0x%08x)", name, cpu.returnAddress());
+    if (!fn) {
+        // B32_STUB_MISSING=1 logs an unimplemented import and returns 0, to see
+        // what a program reaches past its first one (the callee's arguments stay).
+        static const bool stub = getenv("B32_STUB_MISSING") != nullptr;
+        if (!stub) fatal("missing symbol %s (called from 0x%08x)", name, cpu.returnAddress());
+        log("missing symbol %s (called from 0x%08x)", name, cpu.returnAddress());
+        Call call{rt, cpu, rt.mem(), rt.heap(), Args(cpu), name};
+        call.ret(0);
+        return;
+    }
     // B32_TRACE_THUNKS=1 logs every import called; any other value only the
     // imports whose names contain it.
     static const char *trace = getenv("B32_TRACE_THUNKS");
