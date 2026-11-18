@@ -172,7 +172,8 @@ B32_THUNK(_aglSetDrawable) {
 }
 B32_THUNK(_aglGetDrawable) { c.ret(0); }
 // GLboolean aglSetFullScreen(ctx, width, height, freq, device): the picture is
-// scaled to the display rather than changing the display's mode.
+// scaled to the display rather than changing the display's mode. A size of 0 is
+// the mode the display is in, which comes back as the size the game asked it for.
 B32_THUNK(_aglSetFullScreen) {
     NSOpenGLContext *context = contextOf(c.args.u32());
     GLint size[2] = {c.args.i32(), c.args.i32()};
