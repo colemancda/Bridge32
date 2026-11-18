@@ -582,7 +582,10 @@ B32_THUNK(_CFStringCreateWithFormat) {
 B32_THUNK(_CFStringGetCharacters) {
     auto string = (CFStringRef)bridge(c).toHost(c.args.ptr());
     CFIndex location = c.args.i32(), length = c.args.i32();
-    CFStringGetCharacters(string, CFRangeMake(location, length), c.mem.ptr<UniChar>(c.args.ptr()));
+    GuestAddr out = c.args.ptr();
+    std::vector<UniChar> characters(size_t(std::max<CFIndex>(length, 0)));
+    CFStringGetCharacters(string, CFRangeMake(location, length), characters.data());
+    c.mem.writeArray<UniChar>(out, characters.data(), characters.size());
 }
 
 // Boolean CFStringFindWithOptions(CFStringRef, CFStringRef toFind, CFRange rangeToSearch,
@@ -653,6 +656,8 @@ B32_THUNK(_CFUUIDCreateFromUUIDBytes) {
     CFUUIDBytes bytes;
     for (int i = 0; i < 4; i++) {
         uint32_t w = c.args.u32();
+        // The struct is 16 bytes passed as four words; put each back in the order its bytes had.
+        w = GuestMemory::inGuestOrder(w);
         std::memcpy(reinterpret_cast<uint8_t *>(&bytes) + i * 4, &w, 4);
     }
     c.ret(bridge(c).toGuest((id)CFUUIDCreateFromUUIDBytes(nullptr, bytes)));

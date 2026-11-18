@@ -327,8 +327,8 @@ B32_THUNK(__ZNSsD1Ev) {
     GuestAddr self = c.args.ptr();
     GuestAddr rep = c.mem.read<uint32_t>(self) - 12;
     if (rep != emptyRep) {
-        auto *refcount = c.mem.ptr<int32_t>(rep + 8);
-        if (__atomic_fetch_sub(refcount, 1, __ATOMIC_ACQ_REL) <= 0) c.heap.free(rep);
+        int32_t before = int32_t(c.mem.atomicUpdate<uint32_t>(rep + 8, [](uint32_t v) { return v - 1; }));
+        if (before <= 0) c.heap.free(rep);
     }
     c.ret(self);
 }
@@ -336,8 +336,8 @@ B32_THUNK(__ZNSsD2Ev) {
     GuestAddr self = c.args.ptr();
     GuestAddr rep = c.mem.read<uint32_t>(self) - 12;
     if (rep != emptyRep) {
-        auto *refcount = c.mem.ptr<int32_t>(rep + 8);
-        if (__atomic_fetch_sub(refcount, 1, __ATOMIC_ACQ_REL) <= 0) c.heap.free(rep);
+        int32_t before = int32_t(c.mem.atomicUpdate<uint32_t>(rep + 8, [](uint32_t v) { return v - 1; }));
+        if (before <= 0) c.heap.free(rep);
     }
     c.ret(self);
 }

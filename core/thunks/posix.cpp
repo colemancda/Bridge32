@@ -119,7 +119,7 @@ B32_THUNK(_access) {
 //   dev 0, ino 4, mode 8, nlink 10, uid 12, gid 16, rdev 20, atime 24, mtime 32,
 //   ctime 40, size 48, blocks 56, blksize 64, flags 68, gen 72
 namespace {
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 constexpr bool kPlainInode64 = false;
 #else
 constexpr bool kPlainInode64 = true;
@@ -191,7 +191,7 @@ void statDescriptor(Call &c, bool inode64) {
 B32_THUNK(_stat) { statPath(c, ::stat, kPlainInode64); }
 B32_THUNK(_lstat) { statPath(c, ::lstat, kPlainInode64); }
 B32_THUNK(_fstat) { statDescriptor(c, kPlainInode64); }
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 B32_THUNK(_stat$INODE64) { statPath(c, ::stat, true); }
 B32_THUNK(_lstat$INODE64) { statPath(c, ::lstat, true); }
 B32_THUNK(_fstat$INODE64) { statDescriptor(c, true); }
@@ -210,7 +210,7 @@ B32_THUNK(_statvfs) {
         uint32_t fields[] = {uint32_t(st.f_bsize), uint32_t(st.f_frsize), uint32_t(st.f_blocks), uint32_t(st.f_bfree),
                              uint32_t(st.f_bavail), uint32_t(st.f_files), uint32_t(st.f_ffree), uint32_t(st.f_favail),
                              uint32_t(st.f_fsid), uint32_t(st.f_flag), uint32_t(st.f_namemax)};
-        c.mem.copyIn(out, fields, sizeof fields);
+        c.mem.writeWords(out, fields, sizeof fields);
     }
     c.ret(uint32_t(rc));
 }
@@ -271,9 +271,66 @@ void readDirectory(Call &c, bool inode64) {
 }  // namespace
 
 B32_THUNK(_readdir) { readDirectory(c, kPlainInode64); }
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC) && !defined(B32_GUEST_BIG_ENDIAN)  // its entry is the host's struct, copied as it is
 B32_THUNK(_readdir$INODE64) { readDirectory(c, true); }
 #endif
+
+// int scandir(const char *dir, struct dirent ***names, int (*select)(struct dirent *),
+//             int (*compar)(const void *, const void *)): the entries as the old 32-bit
+// layout, in a guest array the caller frees; the callbacks are guest functions.
+namespace {
+GuestAddr guestDirent(Call &c, const struct dirent &e) {
+    constexpr uint32_t kOldNameMax = 255;
+    uint32_t length = std::min<uint32_t>(e.d_namlen, kOldNameMax);
+    uint32_t size = ((8 + length + 1) + 3) & ~3u;
+    GuestAddr entry = c.heap.calloc(1, std::max(size, 12u));
+    c.mem.write<uint32_t>(entry, uint32_t(e.d_ino));
+    c.mem.write<uint16_t>(entry + 4, uint16_t(size));
+    c.mem.write<uint8_t>(entry + 6, e.d_type);
+    c.mem.write<uint8_t>(entry + 7, uint8_t(length));
+    c.mem.copyIn(entry + 8, e.d_name, length);
+    return entry;
+}
+}  // namespace
+B32_THUNK(_scandir) {
+    const char *path = c.mem.cstr(c.args.ptr());
+    GuestAddr out = c.args.ptr(), select = c.args.ptr(), compar = c.args.ptr();
+    DIR *dir = ::opendir(path);
+    if (!dir) {
+        setGuestErrno(c, errno);
+        c.ret(uint32_t(-1));
+        return;
+    }
+    std::vector<GuestAddr> entries;
+    while (struct dirent *e = ::readdir(dir)) {
+        GuestAddr entry = guestDirent(c, *e);
+        if (select && !uint32_t(c.cpu.call(select, {entry}))) {
+            c.heap.free(entry);
+            continue;
+        }
+        entries.push_back(entry);
+    }
+    ::closedir(dir);
+    if (compar) {
+        // qsort hands the comparison pointers to the array's elements.
+        GuestAddr scratch = c.heap.calloc(2, 4);
+        std::stable_sort(entries.begin(), entries.end(), [&](GuestAddr a, GuestAddr b) {
+            c.mem.write<uint32_t>(scratch, a);
+            c.mem.write<uint32_t>(scratch + 4, b);
+            return int32_t(c.cpu.call(compar, {scratch, scratch + 4})) < 0;
+        });
+        c.heap.free(scratch);
+    }
+    GuestAddr array = c.heap.calloc(uint32_t(std::max<size_t>(entries.size(), 1)), 4);
+    for (size_t i = 0; i < entries.size(); i++) c.mem.write<uint32_t>(array + uint32_t(i) * 4, entries[i]);
+    c.mem.write<uint32_t>(out, array);
+    c.ret(uint32_t(entries.size()));
+}
+// int alphasort(const void *, const void *): the elements are pointers to dirent pointers.
+B32_THUNK(_alphasort) {
+    GuestAddr a = c.mem.read<uint32_t>(c.args.ptr()), b = c.mem.read<uint32_t>(c.args.ptr());
+    c.ret(uint32_t(std::strcmp(c.mem.cstr(a + 8), c.mem.cstr(b + 8))));
+}
 
 B32_THUNK(_closedir) {
     GuestAddr handle = c.args.ptr();
@@ -325,7 +382,7 @@ thread_local GuestAddr tmBuffer = 0;
 GuestAddr guestTm(Call &c, const struct tm &t) {
     if (!tmBuffer) tmBuffer = c.heap.calloc(1, 44);
     int32_t ints[] = {t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday, t.tm_isdst};
-    c.mem.copyIn(tmBuffer, ints, sizeof ints);
+    c.mem.writeWords(tmBuffer, ints, sizeof ints);
     c.mem.write<int32_t>(tmBuffer + 36, int32_t(t.tm_gmtoff));
     c.mem.write<uint32_t>(tmBuffer + 40, t.tm_zone ? c.rt.internString(t.tm_zone) : 0);
     return tmBuffer;
@@ -336,7 +393,7 @@ namespace {
 struct tm hostTm(Call &c, GuestAddr p) {
     struct tm t{};
     int32_t ints[9];
-    std::memcpy(ints, c.mem.ptr<void>(p), sizeof ints);
+    c.mem.readWords(p, ints, sizeof ints);
     t.tm_sec = ints[0], t.tm_min = ints[1], t.tm_hour = ints[2], t.tm_mday = ints[3], t.tm_mon = ints[4];
     t.tm_year = ints[5], t.tm_wday = ints[6], t.tm_yday = ints[7], t.tm_isdst = ints[8];
     t.tm_gmtoff = c.mem.read<int32_t>(p + 36);
@@ -375,18 +432,21 @@ B32_THUNK(_strptime) {
     const char *end = ::strptime(in, format, &t);
     if (!end) return c.ret(0);
     int32_t ints[] = {t.tm_sec, t.tm_min, t.tm_hour, t.tm_mday, t.tm_mon, t.tm_year, t.tm_wday, t.tm_yday, t.tm_isdst};
-    c.mem.copyIn(p, ints, sizeof ints);
+    c.mem.writeWords(p, ints, sizeof ints);
     c.mem.write<int32_t>(p + 36, int32_t(t.tm_gmtoff));
     c.ret(buf + uint32_t(end - in));
 }
 
 // size_t wcsftime(wchar_t *s, size_t max, const wchar_t *format, const struct tm *tm)
 B32_THUNK(_wcsftime) {
-    wchar_t *out = c.mem.ptr<wchar_t>(c.args.ptr());
+    GuestAddr out = c.args.ptr();
     size_t max = c.args.u32();
-    const wchar_t *format = c.mem.ptr<wchar_t>(c.args.ptr());
+    std::wstring format = c.mem.readWide(c.args.ptr());
     struct tm t = hostTm(c, c.args.ptr());
-    c.ret(uint32_t(std::wcsftime(out, max, format, &t)));
+    std::vector<wchar_t> text(max + 1);
+    size_t n = std::wcsftime(text.data(), max, format.c_str(), &t);
+    if (n) c.mem.writeWide(out, std::wstring(text.data(), n));
+    c.ret(uint32_t(n));
 }
 
 B32_THUNK(_localtime) {
@@ -419,8 +479,15 @@ B32_DATA(_tzname, 8) {
 
 B32_DATA(_mach_task_self_, 4) { rt.mem().write<uint32_t>(addr, mach_task_self()); }
 B32_THUNK(_mach_absolute_time) { c.ret64(mach_absolute_time()); }
-// struct mach_timebase_info { uint32_t numer, denom } matches the host's.
-B32_THUNK(_mach_timebase_info) { c.ret(mach_timebase_info(c.mem.ptr<mach_timebase_info_data_t>(c.args.ptr()))); }
+// struct mach_timebase_info is { uint32_t numer, denom }.
+B32_THUNK(_mach_timebase_info) {
+    GuestAddr out = c.args.ptr();
+    mach_timebase_info_data_t info;
+    kern_return_t kr = mach_timebase_info(&info);
+    c.mem.write<uint32_t>(out, info.numer);
+    c.mem.write<uint32_t>(out + 4, info.denom);
+    c.ret(kr);
+}
 
 // Semaphores are Mach port names, the same 32-bit values in both.
 B32_THUNK(_semaphore_create) {
@@ -685,8 +752,12 @@ B32_THUNK(_ioctl) {
     unsigned long request = c.args.u32();
     GuestAddr arg = c.args.ptr();
     if ((request == FIONBIO || request == FIONREAD) && arg) {
-        int r = ::ioctl(fd, request, c.mem.ptr<int>(arg));
-        if (r < 0) setGuestErrno(c, errno);
+        int value = c.mem.read<int32_t>(arg);
+        int r = ::ioctl(fd, request, &value);
+        if (r < 0)
+            setGuestErrno(c, errno);
+        else
+            c.mem.write<int32_t>(arg, value);
         c.ret(uint32_t(r));
         return;
     }
@@ -694,11 +765,21 @@ B32_THUNK(_ioctl) {
     c.ret(uint32_t(-1));
 }
 
-// struct pollfd { int fd; short events, revents; } matches the host's.
+// struct pollfd { int fd; short events, revents; }: 8 bytes in the guest, whose
+// byte order the host's isn't.
 B32_THUNK(_poll) {
-    auto *fds = c.mem.ptr<struct pollfd>(c.args.ptr());
+    GuestAddr guestFds = c.args.ptr();
     nfds_t count = c.args.u32();
-    c.ret(uint32_t(::poll(fds, count, c.args.i32())));
+    int timeout = c.args.i32();
+    std::vector<struct pollfd> fds(count);
+    for (nfds_t i = 0; i < count; i++) {
+        fds[i].fd = c.mem.read<int32_t>(guestFds + i * 8);
+        fds[i].events = c.mem.read<int16_t>(guestFds + i * 8 + 4);
+        fds[i].revents = 0;
+    }
+    int r = ::poll(fds.data(), count, timeout);
+    for (nfds_t i = 0; i < count; i++) c.mem.write<int16_t>(guestFds + i * 8 + 6, fds[i].revents);
+    c.ret(uint32_t(r));
 }
 
 // ssize_t writev(int fd, const struct iovec *iov, int count): guest iovecs
@@ -752,7 +833,19 @@ B32_THUNK(_getsectdatafromheader) {
 B32_THUNK(_getcwd) {
     GuestAddr buf = c.args.ptr();
     uint32_t size = c.args.u32();
-    if (!buf) fatal("getcwd(NULL) isn't supported");
+    if (!buf) {
+        // The BSD form: a NULL buffer is allocated, from the guest heap so free() takes it back.
+        char path[PATH_MAX];
+        if (!::getcwd(path, sizeof path)) {
+            setGuestErrno(c, errno);
+            c.ret(0);
+            return;
+        }
+        GuestAddr copy = c.heap.alloc(uint32_t(std::max<size_t>(std::strlen(path) + 1, size)));
+        c.mem.copyIn(copy, path, std::strlen(path) + 1);
+        c.ret(copy);
+        return;
+    }
     c.ret(::getcwd(c.mem.ptr<char>(buf), size) ? buf : 0);
 }
 
@@ -1000,7 +1093,7 @@ GuestAddr currentUserEntry(Call &c) {
         uint32_t words[10] = {c.rt.internString(pw ? pw->pw_name : "mobile"), empty, ::getuid(), ::getgid(), 0,
                               empty, c.rt.internString(pw ? pw->pw_gecos : "Mobile User"),
                               c.rt.internString(getenv("HOME") ? getenv("HOME") : "/"), c.rt.internString("/bin/sh"), 0};
-        c.mem.copyIn(entry, words, sizeof words);
+        c.mem.writeWords(entry, words, sizeof words);
     }
     return entry;
 }

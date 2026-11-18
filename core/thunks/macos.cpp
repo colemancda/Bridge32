@@ -51,7 +51,11 @@ void retErrno(Call &c, int result) {
 B32_THUNK(_mach_port_allocate) {
     c.args.u32();
     uint32_t right = c.args.u32();
-    c.ret(::mach_port_allocate(mach_task_self(), right, c.mem.ptr<mach_port_name_t>(c.args.ptr())));
+    GuestAddr out = c.args.ptr();
+    mach_port_name_t name = 0;
+    kern_return_t kr = ::mach_port_allocate(mach_task_self(), right, &name);
+    c.mem.write<uint32_t>(out, name);
+    c.ret(kr);
 }
 B32_THUNK(_mach_port_insert_right) {
     c.args.u32();
@@ -61,7 +65,12 @@ B32_THUNK(_mach_port_insert_right) {
 B32_THUNK(_task_set_exception_ports) { c.ret(KERN_SUCCESS); }
 // mach_msg_return_t mach_msg(msg, option, send_size, rcv_size, rcv_name, timeout, notify)
 B32_THUNK(_mach_msg) {
-    auto *msg = c.mem.ptr<mach_msg_header_t>(c.args.ptr());
+#if defined(B32_GUEST_BIG_ENDIAN)
+    // The message header's fields would need converting both ways; nothing on
+    // the PowerPC side has needed it yet.
+    fatal("mach_msg isn't converted for big-endian guests yet");
+#endif
+    auto *msg = static_cast<mach_msg_header_t *>(c.mem.ptr<void>(c.args.ptr()));
     uint32_t option = c.args.u32(), sendSize = c.args.u32(), receiveSize = c.args.u32(), name = c.args.u32();
     uint32_t timeout = c.args.u32();
     c.ret(::mach_msg(msg, option, sendSize, receiveSize, name, timeout, c.args.u32()));
@@ -158,7 +167,8 @@ B32_THUNK(_getmntinfo) {
         c.mem.write<int32_t>(e + 8, int32_t(m.f_iosize));
         const uint64_t counts[] = {m.f_blocks, m.f_bfree, m.f_bavail, m.f_files, m.f_ffree};
         for (int k = 0; k < 5; k++) c.mem.write<int32_t>(e + 12 + uint32_t(k) * 4, int32_t(std::min<uint64_t>(counts[k], INT32_MAX)));
-        c.mem.copyIn(e + 32, &m.f_fsid, 8);
+        c.mem.write<int32_t>(e + 32, m.f_fsid.val[0]);
+        c.mem.write<int32_t>(e + 36, m.f_fsid.val[1]);
         c.mem.write<uint32_t>(e + 40, m.f_owner);
         c.mem.write<int16_t>(e + 46, int16_t(m.f_type));
         c.mem.write<int32_t>(e + 48, int32_t(m.f_flags));
@@ -210,7 +220,7 @@ int writePasswd(Call &c, GuestAddr out, GuestAddr buffer, uint32_t left, const s
               dir = bufferString(c, buffer, left, pw->pw_dir), shell = bufferString(c, buffer, left, pw->pw_shell);
     if (!name || !pass || !cls || !gecos || !dir || !shell) return ERANGE;
     const uint32_t words[10] = {name, pass, pw->pw_uid, pw->pw_gid, 0, cls, gecos, dir, shell, 0};
-    c.mem.copyIn(out, words, sizeof words);
+    c.mem.writeWords(out, words, sizeof words);
     return 0;
 }
 
@@ -224,7 +234,7 @@ int writeGroup(Call &c, GuestAddr out, GuestAddr buffer, uint32_t left, const st
     GuestAddr name = bufferString(c, buffer, left, gr->gr_name), pass = bufferString(c, buffer, left, "*");
     if (!name || !pass) return ERANGE;
     const uint32_t words[4] = {name, pass, uint32_t(gr->gr_gid), members};
-    c.mem.copyIn(out, words, sizeof words);
+    c.mem.writeWords(out, words, sizeof words);
     return 0;
 }
 

@@ -363,7 +363,7 @@ GuestAddr Runtime::buildProcessStack(GuestAddr top, const std::vector<std::strin
 int Runtime::run(const std::vector<std::string> &argv, const std::vector<std::string> &envp) {
     GuestAddr stackBottom = layout::kStackBase;
     mem_->map(stackBottom, layout::kStackSize);
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
     // A Mac main thread has 8 MB, and runtimes like Mono use it. The extra
     // goes below the first stack slot, which is the main thread's.
     constexpr uint32_t kMainStackExtra = 7 * 1024 * 1024;

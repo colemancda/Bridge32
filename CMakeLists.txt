@@ -11,16 +11,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# The guest architecture: arm (armv6/armv7 iOS apps, run by dynarmic) or
-# i386 (32-bit Intel Mac apps, run by Unicorn). One build serves one guest.
-set(B32_GUEST_ARCH "arm" CACHE STRING "Guest architecture: arm or i386")
-set_property(CACHE B32_GUEST_ARCH PROPERTY STRINGS arm i386)
-if(NOT B32_GUEST_ARCH STREQUAL "arm" AND NOT B32_GUEST_ARCH STREQUAL "i386")
-    message(FATAL_ERROR "B32_GUEST_ARCH must be arm or i386, not ${B32_GUEST_ARCH}")
+# The guest architecture: arm (armv6/armv7 iOS apps, run by dynarmic), i386
+# (32-bit Intel Mac apps, run by Unicorn) or ppc (32-bit PowerPC Mac apps, run
+# by Unicorn; so far only the CPU). One build serves one guest.
+set(B32_GUEST_ARCH "arm" CACHE STRING "Guest architecture: arm, i386 or ppc")
+set_property(CACHE B32_GUEST_ARCH PROPERTY STRINGS arm i386 ppc)
+if(NOT B32_GUEST_ARCH STREQUAL "arm" AND NOT B32_GUEST_ARCH STREQUAL "i386" AND NOT B32_GUEST_ARCH STREQUAL "ppc")
+    message(FATAL_ERROR "B32_GUEST_ARCH must be arm, i386 or ppc, not ${B32_GUEST_ARCH}")
 endif()
 
 # The JIT: dynarmic (A32 frontend, arm64 backend) for arm, Unicorn (QEMU's
-# TCG) for i386. Without the engine only the loader tools build.
+# TCG) for i386 and ppc. Without the engine only the loader tools build.
 set(B32_HAVE_ENGINE OFF)
 if(B32_GUEST_ARCH STREQUAL "arm")
     set(B32_DYNARMIC_DIR "${CMAKE_SOURCE_DIR}/external/dynarmic" CACHE PATH "dynarmic source tree")
@@ -38,12 +39,18 @@ else()
         # compile to plain loads and stores; guest threads share memory here,
         # so the first patch makes them real atomics. The second runs the ones
         # the host can't do atomically, rather than retrying them forever. The
-        # other two are for speed: writes only take the slow path on pages
+        # next two are for speed: writes only take the slow path on pages
         # with translated code, and the exit check is inline, once per block.
-        foreach(patch unicorn-parallel:B32_CF_PARALLEL:qemu/include/exec/exec-all.h
-                      unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c
-                      unicorn-fast-writes:B32_FAST_WRITES:qemu/accel/tcg/cputlb.c
-                      unicorn-inline-exit-check:B32_INLINE_EXIT_CHECK:qemu/include/exec/gen-icount.h)
+        # The last is the PowerPC target's: a running time base, the AltiVec
+        # registers, XER's carry, and a per-target helper name.
+        set(B32_UNICORN_PATCHES unicorn-parallel:B32_CF_PARALLEL:qemu/include/exec/exec-all.h
+                                unicorn-step-atomic:B32_STEP_ATOMIC:qemu/accel/tcg/cpu-exec.c
+                                unicorn-fast-writes:B32_FAST_WRITES:qemu/accel/tcg/cputlb.c
+                                unicorn-inline-exit-check:B32_INLINE_EXIT_CHECK:qemu/include/exec/gen-icount.h)
+        if(B32_GUEST_ARCH STREQUAL "ppc")
+            list(APPEND B32_UNICORN_PATCHES unicorn-ppc:B32_PPC:qemu/target/ppc/timebase_helper.c)
+        endif()
+        foreach(patch ${B32_UNICORN_PATCHES})
             string(REPLACE ":" ";" B32_PATCH_FIELDS "${patch}")
             list(GET B32_PATCH_FIELDS 0 B32_PATCH_NAME)
             list(GET B32_PATCH_FIELDS 1 B32_PATCH_MARKER)
@@ -58,12 +65,42 @@ else()
                 endif()
             endif()
         endforeach()
-        set(UNICORN_ARCH "x86" CACHE STRING "" FORCE)
+        if(B32_GUEST_ARCH STREQUAL "ppc")
+            set(UNICORN_ARCH "ppc" CACHE STRING "" FORCE)
+        else()
+            set(UNICORN_ARCH "x86" CACHE STRING "" FORCE)
+        endif()
         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
         set(UNICORN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
         set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
         set(UNICORN_LEGACY_STATIC_ARCHIVE OFF CACHE BOOL "" FORCE)
         add_subdirectory("${B32_UNICORN_DIR}" unicorn EXCLUDE_FROM_ALL)
+    endif()
+endif()
+
+# The PowerPC guest's CPU: the engine, the calling convention and big-endian
+# guest memory, tested without a loader (tests/ppc). The runtime around it
+# (b32core, b32-run, b32-inspect) is built with -DB32_PPC_RUNTIME=ON; it isn't
+# finished (docs/ppc-mac-plan.md, Phases 1-3), so it's off until it compiles.
+option(B32_PPC_RUNTIME "Build the PowerPC runtime and tools (not complete)" OFF)
+if(B32_GUEST_ARCH STREQUAL "ppc")
+    if(NOT B32_HAVE_ENGINE)
+        message(FATAL_ERROR "The ppc guest needs Unicorn in external/unicorn")
+    endif()
+    add_library(b32cpu OBJECT core/Log.cpp core/mem/GuestMemory.cpp core/cpu/Cpu.cpp
+        core/arch/ppc/PowerCpu.cpp core/cpu/UnicornPowerCpu.cpp)
+    target_compile_definitions(b32cpu PUBLIC B32_GUEST_PPC=1 B32_GUEST_BIG_ENDIAN=1)
+    target_include_directories(b32cpu PUBLIC "${CMAKE_SOURCE_DIR}" "${B32_UNICORN_DIR}/include")
+    target_compile_options(b32cpu PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    target_link_libraries(b32cpu PUBLIC unicorn)
+
+    add_executable(b32-ppc-cpu-test tests/ppc/cpu-test.cpp)
+    target_link_libraries(b32-ppc-cpu-test PRIVATE b32cpu)
+    enable_testing()
+    add_test(NAME ppc-cpu COMMAND b32-ppc-cpu-test)
+    set_tests_properties(ppc-cpu PROPERTIES PASS_REGULAR_EXPRESSION "ppc cpu passed" FAIL_REGULAR_EXPRESSION "FAIL")
+    if(NOT B32_PPC_RUNTIME)
+        return()
     endif()
 endif()
 
@@ -100,9 +137,16 @@ add_library(b32core OBJECT
 if(B32_GUEST_ARCH STREQUAL "arm")
     target_sources(b32core PRIVATE core/arch/arm/ArmCpu.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_ARM=1)
+elseif(B32_GUEST_ARCH STREQUAL "ppc")
+    # No guest Objective-C yet (the legacy runtime reader is i386's), and none
+    # of the wide-character C++ (wstring, the locale facets): the Mac's
+    # libSystem and libstdc++ thunks are shared with the i386 guest otherwise.
+    # B32_GUEST_MAC is what both Mac guests have in common.
+    target_sources(b32core PRIVATE core/arch/ppc/PowerCpu.cpp core/thunks/crt.cpp core/thunks/curl.cpp core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp)
+    target_compile_definitions(b32core PUBLIC B32_GUEST_PPC=1 B32_GUEST_BIG_ENDIAN=1 B32_GUEST_MAC=1)
 else()
     target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_wstring.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
-    target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1)
+    target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1 B32_GUEST_MAC=1)
 endif()
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
 target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
@@ -116,6 +160,10 @@ if(B32_HAVE_ENGINE)
         target_sources(b32core PRIVATE core/cpu/DynarmicCpu.cpp)
         target_link_libraries(b32core PUBLIC dynarmic)
         target_compile_definitions(b32core PUBLIC B32_HAVE_DYNARMIC=1)
+    elseif(B32_GUEST_ARCH STREQUAL "ppc")
+        target_sources(b32core PRIVATE core/cpu/UnicornPowerCpu.cpp)
+        target_link_libraries(b32core PUBLIC unicorn)
+        target_include_directories(b32core PUBLIC "${B32_UNICORN_DIR}/include")
     else()
         target_sources(b32core PRIVATE core/cpu/UnicornCpu.cpp)
         target_link_libraries(b32core PUBLIC unicorn)
@@ -152,15 +200,19 @@ if(B32_CATALYST)
         COMMENT "Signing Bridge32.app (ad hoc)")
 endif()
 
-# The AppKit shell for i386 Mac apps (configure with -DB32_MAC=ON). Apps are
-# wrapped into copies of it by tools/make-app.sh.
-option(B32_MAC "Build the AppKit shell for i386 Mac apps" OFF)
+# The AppKit shell for i386 and PowerPC Mac apps (configure with -DB32_MAC=ON).
+# Apps are wrapped into copies of it by tools/make-app.sh.
+option(B32_MAC "Build the AppKit shell for i386 and PowerPC Mac apps" OFF)
 if(B32_MAC)
-    if(NOT B32_GUEST_ARCH STREQUAL "i386" OR NOT B32_HAVE_ENGINE)
-        message(FATAL_ERROR "The AppKit shell is the i386 guest's and needs Unicorn in external/unicorn")
+    if(NOT (B32_GUEST_ARCH STREQUAL "i386" OR B32_GUEST_ARCH STREQUAL "ppc") OR NOT B32_HAVE_ENGINE)
+        message(FATAL_ERROR "The AppKit shell is the Mac guests' and needs Unicorn in external/unicorn")
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/appkit/appkit.mm core/appkit/compat.mm
-        core/appkit/macsys.mm core/appkit/carbon.mm core/appkit/carbon_ui.mm core/appkit/carbon_files.mm core/appkit/agl.mm core/appkit/controller.mm core/gl/opengl.mm core/audio/audiounit.mm core/audio/audioqueue.mm core/audio/hal.mm)
+        core/appkit/macsys.mm core/appkit/carbon.mm core/appkit/carbon_ui.mm core/appkit/carbon_files.mm core/appkit/agl.mm core/appkit/controller.mm core/gl/opengl.mm core/audio/hal.mm)
+    # AudioQueue and AudioUnit aren't converted for the big-endian guest yet.
+    if(NOT B32_GUEST_ARCH STREQUAL "ppc")
+        target_sources(b32core PRIVATE core/audio/audiounit.mm core/audio/audioqueue.mm)
+    endif()
     target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
         "-framework QuartzCore" "-framework CoreData" "-framework OpenGL" "-framework ImageIO"
         "-framework AudioToolbox" "-framework AudioUnit" "-framework CoreAudio" "-framework ApplicationServices" "-framework CoreVideo" "-framework GameController" "-framework Carbon" "-framework CoreServices")
@@ -182,6 +234,8 @@ endif()
 enable_testing()
 if(B32_GUEST_ARCH STREQUAL "arm")
     set(B32_GUEST_DIR "${CMAKE_SOURCE_DIR}/build/guest")
+elseif(B32_GUEST_ARCH STREQUAL "ppc")
+    set(B32_GUEST_DIR "${CMAKE_SOURCE_DIR}/build/guest-ppc")
 else()
     set(B32_GUEST_DIR "${CMAKE_SOURCE_DIR}/build/guest-i386")
 endif()
@@ -221,6 +275,12 @@ if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "i386")
     endif()
     add_test(NAME run-classic COMMAND b32-run "${B32_GUEST_DIR}/classic" "${B32_GUEST_DIR}/libclassic.dylib")
     set_tests_properties(run-classic PROPERTIES PASS_REGULAR_EXPRESSION "classic passed")
+endif()
+if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "ppc")
+    # Built by `make -C tests/guest ARCH=ppc`: assembly in the Darwin ABI.
+    add_test(NAME run-hello COMMAND b32-run "${B32_GUEST_DIR}/hello")
+    set_tests_properties(run-hello PROPERTIES PASS_REGULAR_EXPRESSION
+        "hello from ppc, argc=1.*long long=81985529216486895 hex=cafef00d.*double=3\\.142.*pow=1024\\.0.*strlen=5.*ppc hello passed")
 endif()
 if(B32_HAVE_ENGINE AND B32_GUEST_ARCH STREQUAL "arm")
     add_test(NAME run-hello COMMAND b32-run "${B32_GUEST_DIR}/hello")

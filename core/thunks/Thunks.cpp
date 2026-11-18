@@ -16,7 +16,8 @@ std::unordered_map<std::string, ThunkFn> &ThunkRegistry::all() {
 }
 
 namespace {
-const char *const kVariantSuffixes[] = {"$UNIX2003", "$INODE64", "$NOCANCEL", "$DARWIN_EXTSN", "$1050", "$1060", "$1070"};
+// $LDBL128: the 10.4 PowerPC variants of the printf and scanf families that take a 128-bit long double.
+const char *const kVariantSuffixes[] = {"$UNIX2003", "$INODE64", "$NOCANCEL", "$DARWIN_EXTSN", "$1050", "$1060", "$1070", "$LDBL128"};
 
 // Removes the variant suffixes from `symbol`, keeping $INODE64 when asked.
 std::string withoutVariants(std::string symbol, bool keepInode64) {

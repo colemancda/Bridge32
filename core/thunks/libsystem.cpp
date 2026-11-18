@@ -27,6 +27,7 @@
 #include <ctime>
 #include <unistd.h>
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
@@ -36,7 +37,14 @@ using namespace b32;
 
 namespace {
 thread_local GuestAddr errnoSlot = 0;
+// Mac OS X 10.3 and 10.4 binaries read errno as a variable libSystem exports,
+// not through __error(); it follows the thread that sets it.
+std::atomic<GuestAddr> errnoVariable{0};
 }  // namespace
+
+#if defined(B32_GUEST_MAC)
+B32_DATA(_errno, 4) { errnoVariable = addr; }
+#endif
 
 B32_THUNK(___error) {
     if (!errnoSlot) errnoSlot = c.heap.calloc(1, 4);
@@ -46,6 +54,7 @@ B32_THUNK(___error) {
 void b32::setGuestErrno(Call &c, int value) {
     if (!errnoSlot) errnoSlot = c.heap.calloc(1, 4);
     c.mem.write<int32_t>(errnoSlot, value);
+    if (GuestAddr variable = errnoVariable) c.mem.write<int32_t>(variable, value);
 }
 
 B32_THUNK(___assert_rtn) {
@@ -58,9 +67,10 @@ B32_THUNK(___assert_rtn) {
 
 // --- system information -----------------------------------------------------------------
 
-// struct utsname is five char[256] arrays in both ABIs.
+// struct utsname is five char[256] arrays in every ABI: bytes only, so the host's
+// struct can be laid over guest memory whatever its byte order.
 B32_THUNK(_uname) {
-    auto *u = c.mem.ptr<struct utsname>(c.args.ptr());
+    auto *u = static_cast<struct utsname *>(c.mem.ptr<void>(c.args.ptr()));
     std::memset(u, 0, sizeof *u);
     std::strcpy(u->sysname, "Darwin");
     std::strcpy(u->nodename, "Bridge32");
@@ -80,21 +90,30 @@ bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr len
             c.mem.write<uint32_t>(lenp, size);
         }
     };
+    // An integer reply as the guest stores it.
+    auto replyInt = [&](int32_t value) {
+        int32_t guest = GuestMemory::inGuestOrder(value);
+        reply(&guest, 4);
+    };
+    auto replyInt64 = [&](int64_t value) {
+        int64_t guest = GuestMemory::inGuestOrder(value);
+        reply(&guest, 8);
+    };
     if (name == "hw.machine" || name == "hw.model") {
         const char *s = name == "hw.machine" ? device::current().machine : device::current().model;
         reply(s, uint32_t(std::strlen(s) + 1));
     } else if (name == "hw.ncpu" || name == "hw.physicalcpu" || name == "hw.activecpu" || name == "hw.logicalcpu") {
-        int32_t n = 2;
-        reply(&n, 4);
+        replyInt(2);
     } else if (name == "hw.physmem" || name == "hw.usermem") {
-        int32_t bytes = 512 << 20;
-        reply(&bytes, 4);
+        replyInt(512 << 20);
     } else if (name == "hw.memsize") {
-        int64_t bytes = int64_t(512) << 20;
-        reply(&bytes, 8);
+        replyInt64(int64_t(512) << 20);
     } else if (name == "hw.cputype" || name == "hw.cpusubtype") {
-        int32_t value = name == "hw.cputype" ? 12 /* CPU_TYPE_ARM */ : 9 /* CPU_SUBTYPE_ARM_V7 */;
-        reply(&value, 4);
+#if defined(B32_GUEST_PPC)
+        replyInt(name == "hw.cputype" ? 18 /* CPU_TYPE_POWERPC */ : 10 /* CPU_SUBTYPE_POWERPC_7400 */);
+#else
+        replyInt(name == "hw.cputype" ? 12 /* CPU_TYPE_ARM */ : 9 /* CPU_SUBTYPE_ARM_V7 */);
+#endif
     } else if (name == "hw.physicalcpu_max" || name == "hw.logicalcpu_max") {
         int32_t n = 2;
         reply(&n, 4);
@@ -105,23 +124,32 @@ bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr len
         const char *build = "10B329";  // iOS 6.1.3
         reply(build, uint32_t(std::strlen(build) + 1));
     } else if (name == "hw.pagesize") {
-        int32_t bytes = 4096;
-        reply(&bytes, 4);
+        replyInt(4096);
     } else if (name == "hw.cpufrequency") {
-        int32_t hz = 1000000000;
-        reply(&hz, 4);
-#if defined(B32_GUEST_I386)
+        replyInt(1000000000);
+#if defined(B32_GUEST_MAC)
     } else if (name == "hw.cpufrequency_max") {
-        // What a 2006-era game wants to see of an Intel Mac; 32 or 64 bits as asked.
-        uint64_t hz = 2400000000ull;
-        reply(&hz, lenp && c.mem.read<uint32_t>(lenp) >= 8 ? 8 : 4);
+        // What a 2004 or 2006-era game wants to see of its Mac (a 1.25 GHz G4,
+        // a 2.4 GHz Core 2); 32 or 64 bits as asked.
+#if defined(B32_GUEST_PPC)
+        constexpr int64_t kHz = 1250000000;
+#else
+        constexpr int64_t kHz = 2400000000;
+#endif
+        if (lenp && c.mem.read<uint32_t>(lenp) >= 8)
+            replyInt64(kHz);
+        else
+            replyInt(int32_t(kHz));
     } else if (name == "hw.optional.altivec") {
-        int32_t none = 0;
-        reply(&none, 4);
+#if defined(B32_GUEST_PPC)
+        replyInt(1);
+#else
+        replyInt(0);
+#endif
 #endif
     } else if (name == "kern.boottime") {
         // struct timeval: two 32-bit words in the guest.
-        int32_t tv[2] = {int32_t(std::time(nullptr) - 3600), 0};
+        int32_t tv[2] = {GuestMemory::inGuestOrder(int32_t(std::time(nullptr) - 3600)), 0};
         reply(tv, 8);
     } else {
         return false;
@@ -162,7 +190,7 @@ B32_THUNK(_sysctl) {
         c.ret(0);
         return;
     }
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
     if (top == CTL_KERN && second == KERN_PROC && length > 2 && c.mem.read<int32_t>(mib + 8) == KERN_PROC_ALL) {
         // The process list. A guest sees no other processes, just one blank
         // entry for itself: real lists are never empty, and code that searches
@@ -202,13 +230,17 @@ B32_THUNK(_time) {
     c.ret(uint32_t(now));
 }
 
-// The guest's struct statfs (64-bit inode variant) has the host's layout:
-// its 8-byte fields happen to sit at 8-byte-aligned offsets.
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
+// The guest's struct statfs (64-bit inode variant) has the host's layout: its
+// 8-byte fields happen to sit at 8-byte-aligned offsets. Only little-endian
+// guests have the $INODE64 symbols (PowerPC's SDKs never did), so the layout is
+// never converted.
+#if !defined(B32_GUEST_BIG_ENDIAN)
 B32_THUNK(_statfs$INODE64) {
     const char *path = c.mem.cstr(c.args.ptr());
     c.ret(uint32_t(::statfs(path, c.mem.ptr<struct statfs>(c.args.ptr()))));
 }
+#endif
 // i386 Mac's plain struct statfs, 272 bytes: otype 0, oflags 2, bsize 4,
 // iosize 8, blocks 12, bfree 16, bavail 20, files 24, ffree 28, fsid 32,
 // owner 40, reserved1 44, type 46, flags 48, reserved2 52, fstypename[15] 60,
@@ -224,7 +256,8 @@ B32_THUNK(_statfs) {
         c.mem.write<int32_t>(out + 8, int32_t(st.f_iosize));
         const uint64_t counts[] = {st.f_blocks, st.f_bfree, st.f_bavail, st.f_files, st.f_ffree};
         for (int i = 0; i < 5; i++) c.mem.write<int32_t>(out + 12 + i * 4, int32_t(std::min<uint64_t>(counts[i], INT32_MAX)));
-        c.mem.copyIn(out + 32, &st.f_fsid, 8);
+        c.mem.write<int32_t>(out + 32, st.f_fsid.val[0]);
+        c.mem.write<int32_t>(out + 36, st.f_fsid.val[1]);
         c.mem.write<uint32_t>(out + 40, st.f_owner);
         c.mem.write<int16_t>(out + 46, int16_t(st.f_type));
         c.mem.write<int32_t>(out + 48, int32_t(st.f_flags));
@@ -283,7 +316,16 @@ B32_THUNK(_read) {
 }
 B32_THUNK(_close) { c.ret(uint32_t(::close(c.args.i32()))); }
 // int pipe(int fds[2]): host descriptors, like every other.
-B32_THUNK(_pipe) { c.ret(uint32_t(::pipe(c.mem.ptr<int>(c.args.ptr())))); }
+B32_THUNK(_pipe) {
+    GuestAddr out = c.args.ptr();
+    int fds[2];
+    int r = ::pipe(fds);
+    if (r == 0) {
+        c.mem.write<int32_t>(out, fds[0]);
+        c.mem.write<int32_t>(out + 4, fds[1]);
+    }
+    c.ret(uint32_t(r));
+}
 
 // --- ctype ----------------------------------------------------------------------------------
 
@@ -443,7 +485,7 @@ void timeToGuestTm(Call &c, bool local) {
         return;
     }
     const int32_t ints[] = {r.tm_sec, r.tm_min, r.tm_hour, r.tm_mday, r.tm_mon, r.tm_year, r.tm_wday, r.tm_yday, r.tm_isdst};
-    c.mem.copyIn(out, ints, sizeof ints);
+    c.mem.writeWords(out, ints, sizeof ints);
     c.mem.write<int32_t>(out + 36, int32_t(r.tm_gmtoff));
     c.mem.write<uint32_t>(out + 40, r.tm_zone ? c.rt.internString(r.tm_zone) : 0);
     c.ret(out);
@@ -526,18 +568,19 @@ B32_THUNK(_CC_SHA256) {
     c.ret(md);
 }
 
-// Incremental digests: CC_MD5_CTX and CC_SHA256_CTX are all 32-bit words on
-// both sides, so the host works on the guest's context in place.
+// Incremental digests: CC_MD5_CTX and CC_SHA256_CTX are the same size on both
+// sides, and only these three thunks ever touch one, so the host works on the
+// guest's context in place whatever its byte order.
 #define B32_CC_DIGEST(name, Ctx)                                                           \
-    B32_THUNK(_CC_##name##_Init) { c.ret(uint32_t(CC_##name##_Init(c.mem.ptr<Ctx>(c.args.ptr())))); } \
+    B32_THUNK(_CC_##name##_Init) { c.ret(uint32_t(CC_##name##_Init(static_cast<Ctx *>(c.mem.ptr<void>(c.args.ptr()))))); } \
     B32_THUNK(_CC_##name##_Update) {                                                       \
-        auto *ctx = c.mem.ptr<Ctx>(c.args.ptr());                                          \
+        auto *ctx = static_cast<Ctx *>(c.mem.ptr<void>(c.args.ptr()));                     \
         GuestAddr data = c.args.ptr();                                                     \
         c.ret(uint32_t(CC_##name##_Update(ctx, c.mem.ptr<void>(data), c.args.u32())));     \
     }                                                                                      \
     B32_THUNK(_CC_##name##_Final) {                                                        \
         auto *md = c.mem.ptr<unsigned char>(c.args.ptr());                                 \
-        c.ret(uint32_t(CC_##name##_Final(md, c.mem.ptr<Ctx>(c.args.ptr()))));              \
+        c.ret(uint32_t(CC_##name##_Final(md, static_cast<Ctx *>(c.mem.ptr<void>(c.args.ptr()))))); \
     }
 B32_CC_DIGEST(MD5, CC_MD5_CTX)
 B32_CC_DIGEST(SHA256, CC_SHA256_CTX)
@@ -567,7 +610,7 @@ B32_THUNK(_getrusage) {
                              usage.ru_nswap, usage.ru_inblock, usage.ru_oublock, usage.ru_msgsnd, usage.ru_msgrcv,
                              usage.ru_nsignals, usage.ru_nvcsw, usage.ru_nivcsw};
         for (int i = 0; i < 13; i++) words[5 + i] = int32_t(rest[i]);
-        c.mem.copyIn(out, words, sizeof words);
+        c.mem.writeWords(out, words, sizeof words);
     }
     c.ret(uint32_t(r));
 }

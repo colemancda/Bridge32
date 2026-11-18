@@ -25,13 +25,15 @@ using namespace b32;
 namespace {
 template <typename T> T ref(Call &c) { return (T)c.rt.bridge().toHost(c.args.ptr()); }
 CGFloat cgf(Call &c) { return CGFloat(c.args.f32()); }
+// A float that's part of a struct passed by value.
+CGFloat cgs(Call &c) { return CGFloat(c.args.structFloat()); }
 CGRect rect(Call &c) {
-    CGFloat x = cgf(c), y = cgf(c), w = cgf(c), h = cgf(c);
+    CGFloat x = cgs(c), y = cgs(c), w = cgs(c), h = cgs(c);
     return CGRectMake(x, y, w, h);
 }
 CGPoint point(Call &c) {
-    CGFloat x = cgf(c);
-    return CGPointMake(x, cgf(c));
+    CGFloat x = cgs(c);
+    return CGPointMake(x, cgs(c));
 }
 }  // namespace
 
@@ -257,7 +259,7 @@ B32_THUNK(_CGImageGetHeight) { c.ret(uint32_t(CGImageGetHeight(ref<CGImageRef>(c
 namespace {
 CGAffineTransform transform(Call &c) {
     CGFloat v[6];
-    for (auto &x : v) x = cgf(c);
+    for (auto &x : v) x = cgs(c);
     return CGAffineTransformMake(v[0], v[1], v[2], v[3], v[4], v[5]);
 }
 void writeTransform(Call &c, GuestAddr out, CGAffineTransform t) {
@@ -268,7 +270,7 @@ void writeTransform(Call &c, GuestAddr out, CGAffineTransform t) {
 
 B32_DATA(_CGAffineTransformIdentity, 24) {
     const float identity[6] = {1, 0, 0, 1, 0, 0};
-    rt.mem().copyIn(addr, identity, sizeof identity);
+    rt.mem().writeArray<float>(addr, identity, 6);
 }
 
 B32_THUNK(_CGAffineTransformMakeRotation) {
@@ -521,8 +523,7 @@ namespace {
 // An optional const CGAffineTransform * argument.
 bool optionalTransform(Call &c, GuestAddr p, CGAffineTransform &t) {
     if (!p) return false;
-    float v[6];
-    std::memcpy(v, c.mem.ptr<void>(p), sizeof v);
+    std::vector<float> v = c.mem.readArray<float>(p, 6);
     t = CGAffineTransformMake(v[0], v[1], v[2], v[3], v[4], v[5]);
     return true;
 }
@@ -600,7 +601,7 @@ B32_THUNK(_CGRectApplyAffineTransform) {
     CGRect r = rect(c);
     CGRect result = CGRectApplyAffineTransform(r, transform(c));
     const float v[4] = {float(result.origin.x), float(result.origin.y), float(result.size.width), float(result.size.height)};
-    c.mem.copyIn(out, v, sizeof v);
+    c.mem.writeArray<float>(out, v, 4);
 }
 
 // void CGRectDivide(CGRect, CGRect *slice, CGRect *remainder, CGFloat amount, CGRectEdge)
@@ -612,8 +613,8 @@ B32_THUNK(_CGRectDivide) {
     CGRectDivide(r, &s, &rest, amount, CGRectEdge(c.args.u32()));
     const float sv[4] = {float(s.origin.x), float(s.origin.y), float(s.size.width), float(s.size.height)};
     const float rv[4] = {float(rest.origin.x), float(rest.origin.y), float(rest.size.width), float(rest.size.height)};
-    if (slice) c.mem.copyIn(slice, sv, sizeof sv);
-    if (remainder) c.mem.copyIn(remainder, rv, sizeof rv);
+    if (slice) c.mem.writeArray<float>(slice, sv, 4);
+    if (remainder) c.mem.writeArray<float>(remainder, rv, 4);
 }
 
 B32_THUNK(_CGAffineTransformIsIdentity) { c.ret(CGAffineTransformIsIdentity(transform(c))); }
@@ -635,13 +636,17 @@ B32_THUNK(_CGDataProviderCreateWithData) {
 }
 
 // bool CGFontGetGlyphAdvances(CGFontRef, const CGGlyph glyphs[], size_t count, int advances[]):
-// both arrays have the same layout in the guest.
+// 16-bit glyphs in, 32-bit advances out, in the guest's byte order.
 B32_THUNK(_CGFontGetGlyphAdvances) {
     auto font = ref<CGFontRef>(c);
     GuestAddr glyphs = c.args.ptr();
     size_t count = c.args.u32();
     GuestAddr advances = c.args.ptr();
-    c.ret(CGFontGetGlyphAdvances(font, c.mem.ptr<CGGlyph>(glyphs), count, c.mem.ptr<int>(advances)));
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    std::vector<int> hostAdvances(count);
+    bool ok = CGFontGetGlyphAdvances(font, hostGlyphs.data(), count, hostAdvances.data());
+    c.mem.writeArray<int32_t>(advances, hostAdvances.data(), count);
+    c.ret(ok);
 }
 
 // bool CGFontGetGlyphBBoxes(CGFontRef, const CGGlyph glyphs[], size_t count, CGRect bboxes[]):
@@ -652,11 +657,12 @@ B32_THUNK(_CGFontGetGlyphBBoxes) {
     size_t count = c.args.u32();
     GuestAddr bboxes = c.args.ptr();
     std::vector<CGRect> rects(count);
-    bool ok = CGFontGetGlyphBBoxes(font, c.mem.ptr<CGGlyph>(glyphs), count, rects.data());
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    bool ok = CGFontGetGlyphBBoxes(font, hostGlyphs.data(), count, rects.data());
     for (size_t i = 0; ok && i < count; i++) {
         const CGRect &r = rects[i];
         const float v[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
-        c.mem.copyIn(bboxes + GuestAddr(i * sizeof v), v, sizeof v);
+        c.mem.writeArray<float>(bboxes + GuestAddr(i * sizeof v), v, 4);
     }
     c.ret(ok);
 }
@@ -718,17 +724,20 @@ CGFloat showGlyphsAt(CGContextRef ctx, CGFloat x, CGFloat y, const CGGlyph *glyp
 B32_THUNK(_CGContextShowGlyphsAtPoint) {
     auto ctx = ref<CGContextRef>(c);
     CGFloat x = cgf(c), y = cgf(c);
-    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
-    showGlyphsAt(ctx, x, y, glyphs, c.args.u32());
+    GuestAddr glyphs = c.args.ptr();
+    size_t count = c.args.u32();
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
+    showGlyphsAt(ctx, x, y, hostGlyphs.data(), count);
 }
 // void CGContextShowGlyphs(CGContextRef, const CGGlyph glyphs[], size_t count): from the text
 // position, which moves past them.
 B32_THUNK(_CGContextShowGlyphs) {
     auto ctx = ref<CGContextRef>(c);
-    const CGGlyph *glyphs = c.mem.ptr<CGGlyph>(c.args.ptr());
+    GuestAddr glyphs = c.args.ptr();
     size_t count = c.args.u32();
+    std::vector<CGGlyph> hostGlyphs = c.mem.readArray<CGGlyph>(glyphs, count);
     CGPoint at = CGContextGetTextPosition(ctx);
-    CGContextSetTextPosition(ctx, showGlyphsAt(ctx, at.x, at.y, glyphs, count), at.y);
+    CGContextSetTextPosition(ctx, showGlyphsAt(ctx, at.x, at.y, hostGlyphs.data(), count), at.y);
 }
 
 // --- transparency layers, masks, shadings, transformed paths ---------------------------------------
@@ -942,7 +951,7 @@ B32_THUNK(_CFStreamCreatePairWithSocketToHost) {
 namespace {
 void writeRectTo(Call &c, GuestAddr out, CGRect r) {
     const float f[4] = {float(r.origin.x), float(r.origin.y), float(r.size.width), float(r.size.height)};
-    c.mem.copyIn(out, f, sizeof f);
+    c.mem.writeArray<float>(out, f, 4);
 }
 }  // namespace
 
@@ -1029,7 +1038,8 @@ B32_THUNK(_CFStringCreateWithCharactersNoCopy) {
     c.args.u32();
     GuestAddr chars = c.args.ptr();
     CFIndex length = c.args.i32();
-    c.ret(c.rt.bridge().toGuest((id)CFStringCreateWithCharacters(nullptr, c.mem.ptr<UniChar>(chars), length)));
+    std::vector<UniChar> hostChars = c.mem.readArray<UniChar>(chars, size_t(std::max<CFIndex>(length, 0)));
+    c.ret(c.rt.bridge().toGuest((id)CFStringCreateWithCharacters(nullptr, hostChars.data(), length)));
 }
 // Boolean CFStringFindCharacterFromSet(CFStringRef, CFCharacterSetRef, CFRange, CFStringCompareFlags, CFRange *)
 B32_THUNK(_CFStringFindCharacterFromSet) {

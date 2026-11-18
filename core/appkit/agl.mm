@@ -10,6 +10,7 @@
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +31,20 @@ constexpr int32_t kDescAccelerated = 73, kDescVideoMemory = 120, kDescTextureMem
 NSOpenGLContext *contextOf(uint32_t handle) { return handle ? (NSOpenGLContext *)hostPointer(handle) : nil; }
 
 uint32_t currentHandle = 0;
+
+// A CGL attribute list, copied out of the guest's byte order: attributes
+// ending at a zero, most of them followed by a value (which may be zero too),
+// so the ones that stand alone are named.
+std::vector<CGLPixelFormatAttribute> hostAttributes(Call &c, GuestAddr list) {
+    static const std::set<uint32_t> alone = {1, 5, 6, 51, 52, 53, 54, 57, 58, 59, 60, 61, 71, 72, 73, 74, 75, 76, 78, 80, 81, 83, 90, 91, 96};
+    std::vector<CGLPixelFormatAttribute> attributes;
+    for (uint32_t i = 0;; i++) {
+        uint32_t attribute = c.mem.read<uint32_t>(list + i * 4);
+        attributes.push_back(CGLPixelFormatAttribute(attribute));
+        if (!attribute) return attributes;
+        if (!alone.count(attribute)) attributes.push_back(CGLPixelFormatAttribute(c.mem.read<uint32_t>(list + ++i * 4)));
+    }
+}
 }  // namespace
 
 // AGLPixelFormat aglChoosePixelFormat(const AGLDevice *devs, GLint ndev, const GLint *attribs)
@@ -120,7 +135,8 @@ B32_THUNK(_aglGetDrawable) { c.ret(0); }
 B32_THUNK(_aglSetFullScreen) {
     NSOpenGLContext *context = contextOf(c.args.u32());
     GLint size[2] = {c.args.i32(), c.args.i32()};
-    context.view = b32::appkit::carbonFullScreenView();
+    log("aglSetFullScreen %d x %d", size[0], size[1]);
+    context.view = b32::appkit::carbonFullScreenView(size[0], size[1]);
     if (size[0] > 0 && size[1] > 0) CGLSetParameter(context.CGLContextObj, kCGLCPSurfaceBackingSize, size);
     if (size[0] > 0 && size[1] > 0) CGLEnable(context.CGLContextObj, kCGLCESurfaceBackingSize);
     [context update];
@@ -162,7 +178,7 @@ B32_THUNK(_CGLChoosePixelFormat) {
     GuestAddr attribs = c.args.ptr(), out = c.args.ptr(), count = c.args.ptr();
     CGLPixelFormatObj format = nullptr;
     GLint n = 0;
-    CGLError error = CGLChoosePixelFormat(c.mem.ptr<CGLPixelFormatAttribute>(attribs), &format, &n);
+    CGLError error = CGLChoosePixelFormat(hostAttributes(c, attribs).data(), &format, &n);
     c.mem.write<uint32_t>(out, format ? hostHandle(format) : 0);
     if (count) c.mem.write<int32_t>(count, n);
     c.ret(uint32_t(error));
@@ -176,7 +192,11 @@ B32_THUNK(_CGLDescribePixelFormat) {
     auto format = (CGLPixelFormatObj)hostPointer(c.args.u32());
     GLint number = c.args.i32();
     auto attribute = CGLPixelFormatAttribute(c.args.u32());
-    c.ret(uint32_t(CGLDescribePixelFormat(format, number, attribute, c.mem.ptr<GLint>(c.args.ptr()))));
+    GuestAddr out = c.args.ptr();
+    GLint value = 0;
+    CGLError error = CGLDescribePixelFormat(format, number, attribute, &value);
+    c.mem.write<int32_t>(out, value);
+    c.ret(uint32_t(error));
 }
 // CGLError CGLCreateContext(pix, share, CGLContextObj *out)
 B32_THUNK(_CGLCreateContext) {
@@ -208,7 +228,11 @@ B32_THUNK(_CGLDescribeRenderer) {
     auto info = (CGLRendererInfoObj)hostPointer(c.args.u32());
     GLint renderer = c.args.i32();
     auto property = CGLRendererProperty(c.args.u32());
-    c.ret(uint32_t(CGLDescribeRenderer(info, renderer, property, c.mem.ptr<GLint>(c.args.ptr()))));
+    GuestAddr out = c.args.ptr();
+    GLint value = 0;
+    CGLError error = CGLDescribeRenderer(info, renderer, property, &value);
+    c.mem.write<int32_t>(out, value);
+    c.ret(uint32_t(error));
 }
 B32_THUNK(_CGLDestroyRendererInfo) {
     uint32_t handle = c.args.u32();

@@ -7,6 +7,7 @@
 
 #include "Format.h"
 #include "Thunks.h"
+#include "core/Log.h"
 #include "core/Runtime.h"
 
 #include <algorithm>
@@ -23,7 +24,17 @@ using namespace b32;
 
 namespace {
 char *hostPtr(Call &c, GuestAddr p) { return p ? c.mem.ptr<char>(p) : nullptr; }
+#if defined(B32_GUEST_BIG_ENDIAN)
+// A big-endian guest's wide strings can't be read in place by the host's wcs
+// functions, and converting each of the thunks below is work no PowerPC app has
+// asked for yet: they stop the guest, saying why, rather than misread it.
+[[noreturn]] wchar_t *hostWide(Call &c, GuestAddr) {
+    fatal("%s was called (from 0x%08x); the wide-character libc functions aren't converted for big-endian guests yet", c.name,
+          c.cpu.returnAddress());
+}
+#else
 wchar_t *hostWide(Call &c, GuestAddr p) { return p ? c.mem.ptr<wchar_t>(p) : nullptr; }
+#endif
 GuestAddr guestWide(GuestAddr base, const wchar_t *hostBase, const wchar_t *result) {
     return result ? GuestAddr(base + (result - hostBase) * sizeof(wchar_t)) : 0;
 }
@@ -428,38 +439,35 @@ B32_THUNK(_asprintf_l) {
 // int swprintf(wchar_t *, size_t, const wchar_t *format, ...): libc++ formats
 // numbers with it, so the format is plain ASCII; it runs as printf and the
 // result is widened.
-B32_THUNK(_swprintf) {
-    wchar_t *buf = hostWide(c, c.args.ptr());
-    uint32_t size = c.args.u32();
-    std::string format;
-    for (const wchar_t *f = hostWide(c, c.args.ptr()); *f; f++) format += char(*f);
-    std::string s = formatGuest(c, format.c_str(), c.args);
-    if (!size || s.size() >= size) {
-        if (size) buf[0] = 0;
+// The wide printf family formats in UTF-8 and converts: the format string and the result are the guest's wchar_t.
+namespace {
+void wideFormat(Call &c, GuestAddr buffer, uint32_t size, const std::wstring &format, Args &args) {
+    std::wstring result = utf8ToWide(formatGuest(c, wideToUTF8(format).c_str(), args));
+    if (!size || result.size() >= size) {
+        if (size) c.mem.write<uint32_t>(buffer, 0);
         c.ret(uint32_t(-1));
         return;
     }
-    for (size_t i = 0; i < s.size(); i++) buf[i] = wchar_t(static_cast<unsigned char>(s[i]));
-    buf[s.size()] = 0;
-    c.ret(uint32_t(s.size()));
+    c.mem.writeWide(buffer, result);
+    c.ret(uint32_t(result.size()));
+}
+}  // namespace
+
+// int swprintf(wchar_t *, size_t, const wchar_t *format, ...)
+B32_THUNK(_swprintf) {
+    GuestAddr buffer = c.args.ptr();
+    uint32_t size = c.args.u32();
+    std::wstring format = c.mem.readWide(c.args.ptr());
+    wideFormat(c, buffer, size, format, c.args);
 }
 
 // int vswprintf(wchar_t *, size_t, const wchar_t *format, va_list)
 B32_THUNK(_vswprintf) {
-    wchar_t *buf = hostWide(c, c.args.ptr());
+    GuestAddr buffer = c.args.ptr();
     uint32_t size = c.args.u32();
-    std::string format;
-    for (const wchar_t *f = hostWide(c, c.args.ptr()); *f; f++) format += char(*f);
+    std::wstring format = c.mem.readWide(c.args.ptr());
     Args va = Args::fromVaList(c.cpu, c.args.ptr());
-    std::string s = formatGuest(c, format.c_str(), va);
-    if (!size || s.size() >= size) {
-        if (size) buf[0] = 0;
-        c.ret(uint32_t(-1));
-        return;
-    }
-    for (size_t i = 0; i < s.size(); i++) buf[i] = wchar_t(static_cast<unsigned char>(s[i]));
-    buf[s.size()] = 0;
-    c.ret(uint32_t(s.size()));
+    wideFormat(c, buffer, size, format, va);
 }
 
 // --- message catalogs: none, so std::messages returns its defaults -------------------------

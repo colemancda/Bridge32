@@ -12,6 +12,10 @@ namespace b32 {
 using ObjectDescriber = std::string (*)(Call &, GuestAddr object);
 std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber describe = nullptr);
 
+// Wide characters (the Mac's wchar_t is 32 bits) to and from UTF-8.
+std::string wideToUTF8(const std::wstring &text);
+std::wstring utf8ToWide(const std::string &text);
+
 // Scans `input` by a scanf-style format, storing through the guest pointers
 // `args` supplies; returns scanf's result, and how much input it used in
 // *consumed (posix.cpp).
