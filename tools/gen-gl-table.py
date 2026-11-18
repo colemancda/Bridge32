@@ -21,7 +21,8 @@ ARRAY = {"glVertexPointer", "glNormalPointer", "glColorPointer", "glIndexPointer
 ELEMENT = {"glDrawElements", "glDrawRangeElements", "glDrawRangeElementsEXT", "glDrawElementsBaseVertex",
            "glDrawRangeElementsBaseVertex", "glDrawElementsInstancedBaseVertex", "glDrawElementsInstancedARB",
            "glDrawElementsInstancedEXT", "glDrawElementsInstanced"}
-SKIP = {"glMapBuffer", "glMapBufferARB", "glMapBufferRange", "glMapObjectBufferATI", "glCompileShader", "glShaderSource"}
+SKIP = {"glMapBuffer", "glMapBufferARB", "glMapBufferRange", "glMapObjectBufferATI", "glCompileShader", "glShaderSource",
+        "glCompileShaderARB", "glShaderSourceARB"}
 
 INTEGER = {"GLint": "i", "GLsizei": "i", "GLshort": "i", "GLbyte": "i", "GLclampx": "i", "GLfixed": "i",
            "GLenum": "u", "GLuint": "u", "GLbitfield": "u", "GLboolean": "u", "GLubyte": "u", "GLushort": "u",
