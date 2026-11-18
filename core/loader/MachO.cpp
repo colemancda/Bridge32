@@ -408,8 +408,14 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
         auto own = defined.find(symbol);
         return own != defined.end() ? own->second : resolve_(symbol);
     };
+    // An import is one the image doesn't define itself.
+    auto noteImport = [&](const std::string &symbol, GuestAddr target, GuestAddr where, int64_t addend, bool jump) {
+        if (onImport && !defined.count(symbol)) onImport(symbol, target, where, addend, jump);
+    };
     auto bind = [&](GuestAddr where, const std::string &symbol, int64_t addend) {
-        mem_.write<uint32_t>(where, uint32_t(targetOf(symbol) + addend));
+        GuestAddr target = targetOf(symbol);
+        mem_.write<uint32_t>(where, uint32_t(target + addend));
+        noteImport(symbol, target, where, addend, false);
         image.bindCount++;
     };
 
@@ -436,8 +442,11 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                         std::memcpy(&indirect, slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4, 4);
                         if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
                         GuestAddr entry = sect.addr + slide + k * kJumpTableEntry;
+                        std::string symbol = symbolName(indirect);
+                        GuestAddr target = targetOf(symbol);
                         mem_.write<uint8_t>(entry, 0xE9);
-                        mem_.write<uint32_t>(entry + 1, targetOf(symbolName(indirect)) - (entry + kJumpTableEntry));
+                        mem_.write<uint32_t>(entry + 1, target - (entry + kJumpTableEntry));
+                        noteImport(symbol, target, entry, 0, true);
                         image.bindCount++;
                     }
                     continue;
