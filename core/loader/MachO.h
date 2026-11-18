@@ -66,6 +66,11 @@ public:
     // read and before anything is bound.
     std::function<void(const std::vector<std::string> &dylibs)> onDylibs;
 
+    // Called for each import as it is bound: the symbol, the address it got, and where that went, which is
+    // either a pointer (the address plus `addend`) or, with `jump`, an i386 jump table entry. Whoever
+    // listens can bind the place again when a better answer for the symbol turns up.
+    std::function<void(const std::string &symbol, GuestAddr target, GuestAddr where, int64_t addend, bool jump)> onImport;
+
 private:
     GuestMemory &mem_;
     Resolver resolve_;
