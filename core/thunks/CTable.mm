@@ -152,17 +152,24 @@ void cThunk(Call &c) {
     static const bool checkGL = getenv("B32_GL_ERRORS") != nullptr;
     bool isGL = checkGL && std::strncmp(c.name, "_gl", 3) == 0 && std::strcmp(c.name, "_glGetError") != 0;
     static auto getError = [] {
+#if defined(B32_GUEST_MAC)
+        // A Mac guest's GL is the desktop's.
+        void *gl = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_NOW);
+#else
         // OpenGL ES's, not macOS's own libGL (which RTLD_DEFAULT would find).
-        void *gles = dlopen("/System/iOSSupport/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW);
-        auto fn = reinterpret_cast<uint32_t (*)()>(dlsym(gles, "glGetError"));
+        void *gl = dlopen("/System/iOSSupport/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW);
+#endif
+        auto fn = reinterpret_cast<uint32_t (*)()>(dlsym(gl, "glGetError"));
         if (checkGL) log("checking GL errors (%s)", fn ? "on" : "glGetError not found");
         return fn;
     }();
     if (isGL && getError) {
         if (uint32_t error = getError()) log("GL error 0x%04x pending before %s", error, c.name + 1);
+#if !defined(B32_GUEST_MAC)
         static Class contextClass = objc_getClass("EAGLContext");
         if (!((id (*)(id, SEL))objc_msgSend)(contextClass, sel_registerName("currentContext")))
             log("%s called with no current GL context (thread %x)", c.name + 1, pthread_mach_thread_np(pthread_self()));
+#endif
     }
 
     alignas(16) uint8_t result[16] = {};
