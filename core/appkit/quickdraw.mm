@@ -1,19 +1,27 @@
 // QuickDraw's graphics model: the screen's GDevice, offscreen GWorlds with
 // pixel buffers of the guest's own memory, and the current port and device.
-// Drawing calls are no-ops — the games that come here draw their own pixels
-// into the buffers (a texture, a cursor) or draw through OpenGL — but the
+// Most drawing calls are no-ops — the games that come here draw their own
+// pixels into the buffers (a texture, a cursor) or draw through OpenGL — but the
 // structures they walk have to be there, in the guest's memory and byte order.
+// What a game draws text with is real: a port's pen, colors and font, EraseRect,
+// and the text itself (ATSUDrawText, in ats.mm), into a GWorld's pixels.
 
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/appkit/Carbon.h"
+#include "core/appkit/Fonts.h"
+#include "core/appkit/QuickDraw.h"
 #include "core/thunks/Thunks.h"
 
 #import <AppKit/AppKit.h>
+#include <CoreText/CoreText.h>
 
-#include <vector>
 #include <algorithm>
+#include <cmath>
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 using namespace b32;
 
@@ -86,12 +94,122 @@ GuestAddr qdDevice(Runtime &rt) { return currentDevice ?: screenDeviceHandle(rt)
 
 // --- offscreen GWorlds -------------------------------------------------------
 
+// The ports made here, which have pixels of their own (a window's port is a window, in carbon_ui.mm), and
+// what each draws with.
+std::mutex portsLock;
+std::unordered_set<GuestAddr> worldPorts;
+std::unordered_map<GuestAddr, b32::appkit::PortState> portStates;
+
 // CGrafPort: portPixMap 4, portRect 18 (the classic 32-bit layout; 100 bytes).
 GuestAddr newWorldPort(Runtime &rt, GuestAddr pixmapHandle, GuestAddr bounds) {
     GuestAddr port = rt.heap().calloc(1, 100);
     rt.mem().write<uint32_t>(port + 4, pixmapHandle);
     copyRect(rt, port + 18, bounds);
+    std::lock_guard guard(portsLock);
+    worldPorts.insert(port);
+    portStates[port] = {};
     return port;
+}
+
+b32::appkit::PortState &stateOf(GuestAddr port) {
+    return portStates[port];  // a window's port gets the defaults the first time it is asked about
+}
+
+}  // namespace
+
+namespace b32::appkit {
+
+GuestAddr currentQuickDrawPort() { return currentPort; }
+
+bool portPixels(Runtime &rt, GuestAddr port, PortPixels &out) {
+    {
+        std::lock_guard guard(portsLock);
+        if (!worldPorts.count(port)) return false;
+    }
+    GuestAddr handle = rt.mem().read<uint32_t>(port + 4);
+    if (!handle) return false;
+    GuestAddr map = rt.mem().read<uint32_t>(handle);
+    if (!map) return false;
+    out.base = rt.mem().read<uint32_t>(map);
+    out.rowBytes = rt.mem().read<uint16_t>(map + 4) & 0x3fff;
+    out.top = rt.mem().read<int16_t>(map + 6);
+    out.left = rt.mem().read<int16_t>(map + 8);
+    out.bottom = rt.mem().read<int16_t>(map + 10);
+    out.right = rt.mem().read<int16_t>(map + 12);
+    out.depth = rt.mem().read<int16_t>(map + 32);
+    return out.base && out.rowBytes && out.bottom > out.top && out.right > out.left;
+}
+
+PortState portState(GuestAddr port) {
+    std::lock_guard guard(portsLock);
+    return stateOf(port);
+}
+
+}  // namespace b32::appkit
+
+namespace {
+
+// Paints a rect of a port's pixels one color, clipped to them: how EraseRect clears a GWorld. 1-bit pixels
+// are ink (1) for a dark color and paper (0) for a light one, as QuickDraw mapped colors to black and white.
+void fillPixels(Runtime &rt, const b32::appkit::PortPixels &px, int16_t top, int16_t left, int16_t bottom, int16_t right,
+                b32::appkit::QDColor color) {
+    top = std::max(top, px.top);
+    left = std::max(left, px.left);
+    bottom = std::min(bottom, px.bottom);
+    right = std::min(right, px.right);
+    if (top >= bottom || left >= right) return;
+    uint8_t *pixels = rt.mem().ptr<uint8_t>(px.base);
+    for (int y = top; y < bottom; y++) {
+        uint8_t *row = pixels + uint32_t(y - px.top) * px.rowBytes;
+        for (int x = left; x < right; x++) {
+            uint32_t column = uint32_t(x - px.left);
+            switch (px.depth) {
+            case 1: {
+                bool ink = color.red * 0.299 + color.green * 0.587 + color.blue * 0.114 < 0x8000;
+                uint8_t bit = uint8_t(0x80 >> (column % 8));
+                row[column / 8] = ink ? row[column / 8] | bit : row[column / 8] & ~bit;
+                break;
+            }
+            case 16: {  // xRGB, five bits each, big-endian
+                uint16_t value = uint16_t((color.red >> 11) << 10 | (color.green >> 11) << 5 | color.blue >> 11);
+                row[column * 2] = uint8_t(value >> 8);
+                row[column * 2 + 1] = uint8_t(value);
+                break;
+            }
+            case 32: {  // xRGB, a byte each, in that order whatever the processor
+                uint8_t *p = row + column * 4;
+                p[0] = 0xff;
+                p[1] = uint8_t(color.red >> 8);
+                p[2] = uint8_t(color.green >> 8);
+                p[3] = uint8_t(color.blue >> 8);
+                break;
+            }
+            default:
+                return;
+            }
+        }
+    }
+}
+
+// The color a classic color constant (ForeColor, BackColor) names.
+b32::appkit::QDColor classicColor(int32_t constant) {
+    switch (constant) {
+    case 30: return {0xffff, 0xffff, 0xffff};  // whiteColor
+    case 205: return {0xffff, 0, 0};           // redColor
+    case 341: return {0, 0xffff, 0};           // greenColor
+    case 409: return {0, 0, 0xffff};           // blueColor
+    case 273: return {0, 0xffff, 0xffff};      // cyanColor
+    case 137: return {0xffff, 0, 0xffff};      // magentaColor
+    case 69: return {0xffff, 0xffff, 0};       // yellowColor
+    default: return {0, 0, 0};                 // blackColor, and anything else
+    }
+}
+b32::appkit::QDColor readColor(Call &c, GuestAddr rgb) {
+    return {c.mem.read<uint16_t>(rgb), c.mem.read<uint16_t>(rgb + 2), c.mem.read<uint16_t>(rgb + 4)};
+}
+void setPortColor(GuestAddr port, bool fore, b32::appkit::QDColor color) {
+    std::lock_guard guard(portsLock);
+    (fore ? stateOf(port).fore : stateOf(port).back) = color;
 }
 
 }  // namespace
@@ -215,9 +333,16 @@ B32_THUNK(_SectRect) {
     writeRect(c.rt, out, top, left, bottom, right);
     c.ret(top < bottom && left < right);
 }
+// void EraseRect(const Rect *): the current port's background color, in a GWorld's pixels.
+B32_THUNK(_EraseRect) {
+    GuestAddr rect = c.args.ptr();
+    b32::appkit::PortPixels px;
+    if (!rect || !b32::appkit::portPixels(c.rt, currentPort, px)) return;
+    fillPixels(c.rt, px, c.mem.read<int16_t>(rect), c.mem.read<int16_t>(rect + 2), c.mem.read<int16_t>(rect + 4),
+               c.mem.read<int16_t>(rect + 6), b32::appkit::portState(currentPort).back);
+}
 // The rest paint nothing: the guest's own blitter or OpenGL puts the pixels up.
 B32_THUNK(_PaintRect) { c.args.ptr(); }
-B32_THUNK(_EraseRect) { c.args.ptr(); }
 B32_THUNK(_FrameRect) { c.args.ptr(); }
 B32_THUNK(_InvalRect) { c.args.ptr(); }
 B32_THUNK(_ValidRect) { c.args.ptr(); }
@@ -225,10 +350,111 @@ B32_THUNK(_ClipRect) { c.args.ptr(); }
 B32_THUNK(_QDFlushPortBuffer) { c.args.ptr(); c.args.ptr(); }
 B32_THUNK(_PenNormal) {}
 B32_THUNK(_PenSize) { c.args.i32(); c.args.i32(); }
-B32_THUNK(_RGBForeColor) { c.args.ptr(); }
-B32_THUNK(_RGBBackColor) { c.args.ptr(); }
-B32_THUNK(_ForeColor) { c.args.i32(); }
-B32_THUNK(_BackColor) { c.args.i32(); }
+// The current port's colors: what text is drawn and a rect erased in.
+B32_THUNK(_RGBForeColor) { setPortColor(currentPort, true, readColor(c, c.args.ptr())); }
+B32_THUNK(_RGBBackColor) { setPortColor(currentPort, false, readColor(c, c.args.ptr())); }
+B32_THUNK(_ForeColor) { setPortColor(currentPort, true, classicColor(c.args.i32())); }
+B32_THUNK(_BackColor) { setPortColor(currentPort, false, classicColor(c.args.i32())); }
+// void GetForeColor(RGBColor *), GetBackColor(RGBColor *)
+B32_THUNK(_GetForeColor) {
+    b32::appkit::QDColor color = b32::appkit::portState(currentPort).fore;
+    const uint16_t rgb[3] = {color.red, color.green, color.blue};
+    c.mem.writeArray<uint16_t>(c.args.ptr(), rgb, 3);
+}
+B32_THUNK(_GetBackColor) {
+    b32::appkit::QDColor color = b32::appkit::portState(currentPort).back;
+    const uint16_t rgb[3] = {color.red, color.green, color.blue};
+    c.mem.writeArray<uint16_t>(c.args.ptr(), rgb, 3);
+}
+
+// --- the pen and the port's text settings ----------------------------------------------------------
+
+// void MoveTo(short h, short v), Move(short dh, short dv): where the pen is, which is where text is drawn.
+B32_THUNK(_MoveTo) {
+    int16_t h = int16_t(c.args.i32()), v = int16_t(c.args.i32());
+    std::lock_guard guard(portsLock);
+    stateOf(currentPort).penH = h;
+    stateOf(currentPort).penV = v;
+}
+B32_THUNK(_Move) {
+    int16_t dh = int16_t(c.args.i32()), dv = int16_t(c.args.i32());
+    std::lock_guard guard(portsLock);
+    stateOf(currentPort).penH = int16_t(stateOf(currentPort).penH + dh);
+    stateOf(currentPort).penV = int16_t(stateOf(currentPort).penV + dv);
+}
+// void TextFont(short family), TextFace(StyleParameter), TextSize(short)
+B32_THUNK(_TextFont) {
+    int16_t value = int16_t(c.args.i32());
+    std::lock_guard guard(portsLock);
+    stateOf(currentPort).textFont = value;
+}
+B32_THUNK(_TextFace) {
+    int16_t value = int16_t(c.args.i32());
+    std::lock_guard guard(portsLock);
+    stateOf(currentPort).textFace = value;
+}
+B32_THUNK(_TextSize) {
+    int16_t value = int16_t(c.args.i32());
+    std::lock_guard guard(portsLock);
+    stateOf(currentPort).textSize = value;
+}
+// short GetPortTextFont(CGrafPtr), Style GetPortTextFace(CGrafPtr), short GetPortTextSize(CGrafPtr)
+B32_THUNK(_GetPortTextFont) { c.ret(uint32_t(int32_t(b32::appkit::portState(c.args.ptr()).textFont))); }
+B32_THUNK(_GetPortTextFace) { c.ret(uint32_t(b32::appkit::portState(c.args.ptr()).textFace & 0xff)); }
+B32_THUNK(_GetPortTextSize) { c.ret(uint32_t(int32_t(b32::appkit::portState(c.args.ptr()).textSize))); }
+
+namespace {
+// The current port's font, as CoreText has it.
+CTFontRef portFont() {
+    b32::appkit::PortState state = b32::appkit::portState(currentPort);
+    return b32::appkit::copyQuickDrawFont(state.textFont, state.textSize, state.textFace);
+}
+}  // namespace
+// void GetFontInfo(FontInfo *): ascent, descent, widest character and leading of the port's font, in pixels.
+B32_THUNK(_GetFontInfo) {
+    GuestAddr out = c.args.ptr();
+    CTFontRef font = portFont();
+    const int16_t info[4] = {int16_t(std::lround(CTFontGetAscent(font))), int16_t(std::lround(CTFontGetDescent(font))),
+                             int16_t(std::lround(CGRectGetWidth(CTFontGetBoundingBox(font)))),
+                             int16_t(std::lround(CTFontGetLeading(font)))};
+    CFRelease(font);
+    if (out) c.mem.writeArray<int16_t>(out, info, 4);
+}
+// short TextWidth(const void *text, short firstByte, short byteCount): the Mac Roman text's width in the port's font.
+B32_THUNK(_TextWidth) {
+    GuestAddr text = c.args.ptr();
+    int16_t first = int16_t(c.args.i32()), count = int16_t(c.args.i32());
+    if (!text || count <= 0) {
+        c.ret(0);
+        return;
+    }
+    NSString *string = [[NSString alloc] initWithBytes:c.mem.ptr<char>(text + uint32_t(first)) length:NSUInteger(count) encoding:NSMacOSRomanStringEncoding];
+    CTFontRef font = portFont();
+    NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:string ?: @"" attributes:@{(id)kCTFontAttributeName : (__bridge id)font}];
+    CTLineRef line = CTLineCreateWithAttributedString((CFAttributedStringRef)attributed);
+    double width = CTLineGetTypographicBounds(line, nullptr, nullptr, nullptr);
+    CFRelease(line);
+    CFRelease(font);
+    [attributed release];
+    [string release];
+    c.ret(uint32_t(int32_t(std::lround(width))));
+}
+// void GetFontName(short family, Str255 name)
+B32_THUNK(_GetFontName) {
+    int16_t family = int16_t(c.args.i32());
+    GuestAddr out = c.args.ptr();
+    if (!out) return;
+    NSString *name = @(b32::appkit::quickDrawFamilyName(family).c_str());
+    NSData *bytes = [name dataUsingEncoding:NSMacOSRomanStringEncoding allowLossyConversion:YES];
+    uint8_t length = uint8_t(std::min<NSUInteger>(bytes.length, 255));
+    c.mem.write<uint8_t>(out, length);
+    c.mem.copyIn(out + 1, bytes.bytes, length);
+}
+// GDHandle GetGWorldDevice(GWorldPtr): the screen's, which every GWorld here is made for.
+B32_THUNK(_GetGWorldDevice) {
+    c.args.ptr();
+    c.ret(screenDeviceHandle(c.rt));
+}
 
 // The eight-byte pattern a guest is handed a pointer to.
 GuestAddr patternBytes(Call &c, uint8_t fill) {
@@ -357,6 +583,17 @@ B32_THUNK(_DisposePalette) { c.args.ptr(); }
 B32_THUNK(_QDRegisterNamedPixMapCursor) {
     c.args.ptr();
     c.args.ptr();
+    c.args.ptr();
+    c.ret(0);
+}
+
+// OSStatus QDSetNamedPixMapCursor(CFStringRef), QDUnregisterNamedPixMapCursur(CFStringRef) (sic): the
+// cursor stays the system's.
+B32_THUNK(_QDSetNamedPixMapCursor) {
+    c.args.ptr();
+    c.ret(0);
+}
+B32_THUNK(_QDUnregisterNamedPixMapCursur) {
     c.args.ptr();
     c.ret(0);
 }
