@@ -495,6 +495,19 @@ void timeToGuestTm(Call &c, bool local) {
 }  // namespace
 B32_THUNK(_localtime_r) { timeToGuestTm(c, true); }
 B32_THUNK(_gmtime_r) { timeToGuestTm(c, false); }
+// char *asctime(const struct tm *): "Thu Nov 16 20:57:54 2026\n" from the guest's tm.
+B32_THUNK(_asctime) {
+    GuestAddr tm = c.args.ptr();
+    struct ::tm host = {};
+    const int32_t ints[9] = {c.mem.read<int32_t>(tm),         c.mem.read<int32_t>(tm + 4), c.mem.read<int32_t>(tm + 8),
+                             c.mem.read<int32_t>(tm + 12),    c.mem.read<int32_t>(tm + 16), c.mem.read<int32_t>(tm + 20),
+                             c.mem.read<int32_t>(tm + 24) - 1900, c.mem.read<int32_t>(tm + 28), c.mem.read<int32_t>(tm + 32)};
+    host.tm_sec = ints[0];  host.tm_min = ints[1];  host.tm_hour = ints[2];  host.tm_mday = ints[3];
+    host.tm_mon = ints[4];  host.tm_year = ints[5]; host.tm_wday = ints[6];  host.tm_yday = ints[7];
+    host.tm_isdst = ints[8];
+    const char *text = ::asctime(&host);
+    c.ret(text ? c.rt.internString(text) : 0);
+}
 B32_THUNK(_modff) {
     float x = c.args.f32();
     GuestAddr ip = c.args.ptr();
