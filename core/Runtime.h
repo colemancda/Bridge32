@@ -60,6 +60,9 @@ public:
     // host can't stand in for, such as GCC's libstdc++: a library the guest
     // links that is found here is loaded and run as guest code.
     void addGuestLibraryDir(const std::string &dir) { guestLibraryDirs_.push_back(dir); }
+    // A function the app or a guest library loaded so far exports under this name, or 0: for an import that
+    // found nothing when its image was bound.
+    GuestAddr lateExport(const std::string &symbol);
 
     // Loads the executable and binds every import. Doesn't run anything.
     void load(const std::string &path);
@@ -125,6 +128,16 @@ private:
     std::unordered_map<std::string, size_t> librariesByPath_;  // index in libraries_
     std::recursive_mutex openLock_;
     std::unordered_map<std::string, GuestAddr> libraryExports_;
+    // Imports that found nothing when their image was bound, by symbol: where each went. A library built
+    // for a flat namespace names no dependencies and counts on whichever image loads later to define what
+    // it imports, so these are bound again as images arrive (bindPendingImports).
+    struct PendingImport {
+        GuestAddr where;
+        int64_t addend;
+        bool jump;  // an i386 jump table entry rather than a pointer
+    };
+    std::unordered_map<std::string, std::vector<PendingImport>> pendingImports_;
+    void bindPendingImports(const std::unordered_map<std::string, GuestAddr> &exports);
     std::unordered_map<GuestAddr, GuestAddr> thisShims_;  // library constructor -> shim returning this
     GuestAddr nextLibraryBase_;
     std::unordered_map<std::string, GuestAddr> data_;

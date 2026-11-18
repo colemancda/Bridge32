@@ -142,15 +142,21 @@ elseif(B32_GUEST_ARCH STREQUAL "ppc")
     # of the wide-character C++ (wstring, the locale facets): the Mac's
     # libSystem and libstdc++ thunks are shared with the i386 guest otherwise.
     # B32_GUEST_MAC is what both Mac guests have in common.
-    target_sources(b32core PRIVATE core/arch/ppc/PowerCpu.cpp core/thunks/crt.cpp core/thunks/curl.cpp core/thunks/macos.cpp core/thunks/Discs.mm core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp)
+    target_sources(b32core PRIVATE core/arch/ppc/PowerCpu.cpp core/thunks/crt.cpp core/thunks/curl.cpp core/thunks/macos.cpp core/thunks/Discs.mm core/thunks/libxml.cpp core/thunks/libcrypto.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_stream.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_PPC=1 B32_GUEST_BIG_ENDIAN=1 B32_GUEST_MAC=1)
     target_link_libraries(b32core PUBLIC "-framework IOKit")
 else()
-    target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/Discs.mm core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_wstring.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
+    target_sources(b32core PRIVATE core/arch/i386/X86Cpu.cpp core/objc/LegacyImage.mm core/objc/legacy_thunks.mm core/thunks/macos.cpp core/thunks/Discs.mm core/thunks/libxml.cpp core/thunks/libcrypto.cpp core/thunks/libstdcxx_string.cpp core/thunks/libstdcxx_wstring.cpp core/thunks/libstdcxx_stream.cpp core/thunks/libstdcxx_locale.cpp)
     target_compile_definitions(b32core PUBLIC B32_GUEST_I386=1 B32_GUEST_MAC=1)
     target_link_libraries(b32core PUBLIC "-framework IOKit")
 endif()
 target_include_directories(b32core PUBLIC "${CMAKE_SOURCE_DIR}")
+# The Mac guests' libxml2 is the host's (core/thunks/libxml.cpp).
+if(NOT B32_GUEST_ARCH STREQUAL "arm")
+    find_package(LibXml2 REQUIRED)
+    target_include_directories(b32core PRIVATE ${LIBXML2_INCLUDE_DIR})
+    target_link_libraries(b32core PUBLIC ${LIBXML2_LIBRARIES})
+endif()
 target_compile_options(b32core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # The bridge manages host object lifetimes by hand.
 target_compile_options(b32core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fno-objc-arc>)

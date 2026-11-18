@@ -80,12 +80,28 @@ GuestAddr ThunkTable::stubFor(const std::string &symbol) {
 void ThunkTable::dispatch(Runtime &rt, Cpu &cpu, uint32_t index) {
     ThunkFn fn;
     const char *name;
+    GuestAddr forward = 0;
     {
         std::lock_guard guard(lock_);
         if (index >= entries_.size()) fatal("trap #0x%x at 0x%08x is not a thunk", index, cpu.pc());
         // Deque elements never move, so the name stays valid after unlocking.
         fn = entries_[index].fn;
         name = entries_[index].name.c_str();
+        forward = entries_[index].forward;
+    }
+    // An import nothing served when it was bound may be a guest library's own function: libraries built
+    // for a flat namespace name no dependencies, and call into whichever of them loads later. The call
+    // goes on to that function, with the stack and registers as the caller left them.
+    if (!fn && !forward) {
+        forward = rt.lateExport(name);
+        if (forward) {
+            std::lock_guard guard(lock_);
+            entries_[index].forward = forward;
+        }
+    }
+    if (!fn && forward) {
+        cpu.jump(forward);
+        return;
     }
     if (!fn) {
         // B32_STUB_MISSING=1 logs an unimplemented import and returns 0, to see

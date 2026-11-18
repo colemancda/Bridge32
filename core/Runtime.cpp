@@ -185,6 +185,14 @@ GuestAddr Runtime::resolve(const std::string &symbol) {
     return thunks_->stubFor(symbol);
 }
 
+GuestAddr Runtime::lateExport(const std::string &symbol) {
+    std::lock_guard guard(openLock_);
+    if (auto it = libraryExports_.find(symbol); it != libraryExports_.end())
+        return isConstructorOrDestructor(symbol) ? thisReturning(it->second) : it->second;
+    if (auto it = image_.exports.find(symbol); it != image_.exports.end()) return it->second;
+    return 0;
+}
+
 GuestAddr Runtime::lookUp(const std::string &symbol, bool inApp) {
     if (auto it = image_.exports.find(symbol); inApp && it != image_.exports.end()) return it->second;
     if (libraryExports_.count(symbol) || dataSymbol(symbol) || ThunkRegistry::find(symbol)) return resolve(symbol);
@@ -235,7 +243,27 @@ std::string Runtime::findGuestLibrary(const std::string &installName) const {
 MachOLoader Runtime::makeLoader() {
     MachOLoader loader(*mem_, [this](const std::string &s) { return resolve(s); });
     loader.onDylibs = [this](const std::vector<std::string> &dylibs) { loadLinkedLibraries(dylibs); };
+    // An import that got a stub nothing stands behind is remembered, for the image that defines it.
+    loader.onImport = [this](const std::string &symbol, GuestAddr target, GuestAddr where, int64_t addend, bool jump) {
+        bool stub = target >= layout::kStubBase && target - layout::kStubBase < layout::kStubRegionSize;
+        if (stub && !ThunkRegistry::find(symbol)) pendingImports_[symbol].push_back({where, addend, jump});
+    };
     return loader;
+}
+
+void Runtime::bindPendingImports(const std::unordered_map<std::string, GuestAddr> &exports) {
+    if (pendingImports_.empty()) return;
+    for (const auto &[symbol, address] : exports) {
+        auto pending = pendingImports_.find(symbol);
+        if (pending == pendingImports_.end()) continue;
+        GuestAddr target = isConstructorOrDestructor(symbol) ? thisReturning(address) : address;
+        for (const PendingImport &import : pending->second) {
+            constexpr uint32_t kJumpTableEntry = 5;  // jmp rel32
+            if (import.jump) mem_->write<uint32_t>(import.where + 1, target - (import.where + kJumpTableEntry));
+            else mem_->write<uint32_t>(import.where, uint32_t(target + import.addend));
+        }
+        pendingImports_.erase(pending);
+    }
 }
 
 // Before an image is bound: host frameworks are loaded so their classes and
@@ -265,6 +293,7 @@ size_t Runtime::loadGuestLibrary(const std::string &path) {
     if (nextLibraryBase_ > layout::kHeapBase) fatal("guest libraries have used up their address space");
     Image lib = makeLoader().load(path, base);
     for (const auto &[name, addr] : lib.exports) libraryExports_.emplace(name, addr);
+    bindPendingImports(lib.exports);
     if (lib.dyldSection) {
         mem_->write<uint32_t>(lib.dyldSection, thunks_->stubFor("__dyld_lazy_symbol_binding_entry_point"));
         mem_->write<uint32_t>(lib.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
@@ -316,6 +345,7 @@ GuestAddr Runtime::librarySymbol(uint32_t handle, const std::string &symbol) {
 void Runtime::load(const std::string &path) {
     mainDir_ = path.substr(0, path.rfind('/'));
     image_ = makeLoader().load(path);
+    bindPendingImports(image_.exports);  // a library may call back into the program that loaded it
     // Old binaries reach dyld through two pointers at the start of __dyld:
     // the lazy binding entry point and _dyld_func_lookup.
     if (image_.dyldSection) {

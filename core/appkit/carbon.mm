@@ -116,8 +116,18 @@ B32_THUNK(_CFURLCreateCopyDeletingLastPathComponent) {
     c.args.ptr();
     c.ret(bridge(c).toGuest((id)CFBridgingRelease(CFURLCreateCopyDeletingLastPathComponent(nullptr, (CFURLRef)object(c)))));
 }
-// A bundle's functions are host code, which a guest can't call: 'no such function'.
-B32_THUNK(_CFBundleGetFunctionPointerForName) { c.ret(0); }
+// void *CFBundleGetFunctionPointerForName(CFBundleRef, CFStringRef name): how a program asks a framework
+// for a function it may not have (OpenGL's extensions, looked up one name at a time). A function with a
+// thunk is that thunk's stub, and the program's own is its export; anything else is "no such function".
+B32_THUNK(_CFBundleGetFunctionPointerForName) {
+    object(c);
+    NSString *name = object(c);
+    if (![name isKindOfClass:[NSString class]] || !name.length) {
+        c.ret(0);
+        return;
+    }
+    c.ret(c.rt.lookUp(std::string("_") + name.UTF8String, true));
+}
 
 // --- File Manager: FSRef is opaque and the same on both sides ------------------------------
 // The rest isn't for a big-endian guest: UTF-16 names, 64-bit outputs and the
@@ -132,9 +142,7 @@ const CFunction kFiles[] = {
     {"FSDeleteObject", "i:p"},
     {"FSCloseFork", "i:i"},
 #if !defined(B32_GUEST_BIG_ENDIAN)
-    {"FSSetCatalogInfo", "i:pup"},
     {"FSGetDataForkName", "i:p"},
-    {"FSCreateFileUnicode", "i:pzpuppp"},
     {"FSGetForkSize", "i:ip"},
     {"FSGetForkPosition", "i:ip"},
 #endif
@@ -173,17 +181,6 @@ B32_THUNK(_FSGetDataForkName) {
     c.ret(uint32_t(int32_t(error)));
 }
 // OSErr FSCreateFileUnicode(parent, UniCharCount, name, whichInfo, const FSCatalogInfo *, FSRef *, FSSpec *):
-// the catalog info (dates, permissions) isn't converted, so the file gets the defaults.
-B32_THUNK(_FSCreateFileUnicode) {
-    GuestAddr parent = c.args.ptr();
-    uint32_t length = c.args.u32();
-    GuestAddr name = c.args.ptr();
-    c.args.u32();
-    c.args.ptr();
-    GuestAddr out = c.args.ptr();
-    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
-    c.ret(uint32_t(int32_t(FSCreateFileUnicode(fsRef(c, parent), length, text.data(), 0, nullptr, out ? fsRef(c, out) : nullptr, nullptr))));
-}
 B32_THUNK(_FSGetForkSize) {
     FSIORefNum number = c.args.i32();
     SInt64 size = 0;
@@ -199,6 +196,86 @@ B32_THUNK(_FSGetForkPosition) {
     c.ret(uint32_t(int32_t(error)));
 }
 #endif
+
+// --- catalog info --------------------------------------------------------------------------------
+// A 32-bit program's FSCatalogInfo is 144 bytes; the host's is 148, its permissions holding a pointer where
+// the guest's has a reserved word, so everything after them sits four bytes further on. The record is
+// rebuilt field by field in either direction, never passed through.
+namespace {
+UTCDateTime guestDate(Call &c, GuestAddr p) {
+    return {c.mem.read<uint16_t>(p), c.mem.read<uint32_t>(p + 2), c.mem.read<uint16_t>(p + 6)};
+}
+// Finder info is sixteen bytes of fields, whose sizes depend on what it describes; `sizes` gives them.
+void finderFieldsFromGuest(Call &c, GuestAddr p, UInt8 *host, const char *sizes) {
+    for (uint32_t at = 0; *sizes; at += uint32_t(*sizes - '0'), sizes++) {
+        if (*sizes == '4') {
+            uint32_t value = c.mem.read<uint32_t>(p + at);
+            std::memcpy(host + at, &value, 4);
+        } else {
+            uint16_t value = c.mem.read<uint16_t>(p + at);
+            std::memcpy(host + at, &value, 2);
+        }
+    }
+}
+FSCatalogInfo catalogInfoFromGuest(Call &c, GuestAddr p, bool directory) {
+    FSCatalogInfo info = {};
+    info.nodeFlags = c.mem.read<uint16_t>(p);
+    info.sharingFlags = c.mem.read<uint8_t>(p + 12);
+    info.userPrivileges = c.mem.read<uint8_t>(p + 13);
+    info.createDate = guestDate(c, p + 16);
+    info.contentModDate = guestDate(c, p + 24);
+    info.attributeModDate = guestDate(c, p + 32);
+    info.accessDate = guestDate(c, p + 40);
+    info.backupDate = guestDate(c, p + 48);
+    info.permissions.userID = c.mem.read<uint32_t>(p + 56);
+    info.permissions.groupID = c.mem.read<uint32_t>(p + 60);
+    info.permissions.userAccess = c.mem.read<uint8_t>(p + 65);
+    info.permissions.mode = c.mem.read<uint16_t>(p + 66);
+    // A file's: type, creator, flags, location (two shorts), a reserved short. A folder's: its window's
+    // rectangle (four shorts), flags, location, a reserved short.
+    finderFieldsFromGuest(c, p + 72, info.finderInfo, directory ? "22222222" : "442222");
+    // A file's: four reserved shorts, extended flags, a reserved short, the put-away folder. A folder's:
+    // a scroll position (two shorts), a reserved long, extended flags, a reserved short, the put-away folder.
+    finderFieldsFromGuest(c, p + 88, info.extFinderInfo, directory ? "224224" : "2222224");
+    info.textEncodingHint = c.mem.read<uint32_t>(p + 140);
+    return info;
+}
+// The fields a program may set on creating or changing an item; the rest of the bitmap is what the file
+// system decides (sizes, IDs), which the host refuses to be told.
+constexpr FSCatalogInfoBitmap kSettableInfo = kFSCatInfoNodeFlags | kFSCatInfoCreateDate | kFSCatInfoContentMod | kFSCatInfoAttrMod |
+                                              kFSCatInfoAccessDate | kFSCatInfoBackupDate | kFSCatInfoPermissions | kFSCatInfoFinderInfo |
+                                              kFSCatInfoFinderXInfo | kFSCatInfoTextEncoding;
+}  // namespace
+
+// OSErr FSSetCatalogInfo(const FSRef *, FSCatalogInfoBitmap whichInfo, const FSCatalogInfo *)
+B32_THUNK(_FSSetCatalogInfo) {
+    FSRef *ref = fsRef(c, c.args.ptr());
+    FSCatalogInfoBitmap which = c.args.u32() & kSettableInfo;
+    GuestAddr guest = c.args.ptr();
+    if (!guest || !which) {
+        c.ret(0);
+        return;
+    }
+    FSCatalogInfo current = {};
+    bool directory = FSGetCatalogInfo(ref, kFSCatInfoNodeFlags, &current, nullptr, nullptr, nullptr) == noErr && (current.nodeFlags & kFSNodeIsDirectoryMask);
+    FSCatalogInfo info = catalogInfoFromGuest(c, guest, directory);
+    c.ret(uint32_t(int32_t(FSSetCatalogInfo(ref, which, &info))));
+}
+
+// OSErr FSCreateFileUnicode(parent, UniCharCount, name, whichInfo, const FSCatalogInfo *, FSRef *, FSSpec *)
+B32_THUNK(_FSCreateFileUnicode) {
+    GuestAddr parent = c.args.ptr();
+    uint32_t length = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    FSCatalogInfoBitmap which = c.args.u32() & kSettableInfo;
+    GuestAddr guest = c.args.ptr();
+    GuestAddr out = c.args.ptr();
+    std::vector<UniChar> text = c.mem.readArray<UniChar>(name, length);
+    FSCatalogInfo info = {};
+    if (guest && which) info = catalogInfoFromGuest(c, guest, false);
+    else which = kFSCatInfoNone;
+    c.ret(uint32_t(int32_t(FSCreateFileUnicode(fsRef(c, parent), length, text.data(), which, which ? &info : nullptr, out ? fsRef(c, out) : nullptr, nullptr))));
+}
 
 // OSErr FSCreateDirectoryUnicode(parent, UniCharCount, name, whichInfo, const FSCatalogInfo *, FSRef *,
 //                                FSSpec *, UInt32 *newDirID): the catalog info isn't converted.
@@ -238,6 +315,54 @@ B32_THUNK(_FSOpenFork) {
     FSIORefNum number = 0;
     OSErr error = FSOpenFork(ref, nameLength, name.data(), permissions, &number);
     if (out) c.mem.write<int16_t>(out, int16_t(number));
+    c.ret(uint32_t(int32_t(error)));
+}
+// OSErr FSFlushFork(FSIORefNum)
+B32_THUNK(_FSFlushFork) { c.ret(uint32_t(int32_t(FSFlushFork(FSIORefNum(c.args.i32()))))); }
+// OSErr FSCreateFork(const FSRef *, UniCharCount nameLength, const UniChar *name)
+B32_THUNK(_FSCreateFork) {
+    const FSRef *ref = fsRef(c, c.args.ptr());
+    uint32_t nameLength = c.args.u32();
+    std::vector<UniChar> name = c.mem.readArray<UniChar>(c.args.ptr(), nameLength);
+    c.ret(uint32_t(int32_t(FSCreateFork(ref, nameLength, name.data()))));
+}
+// OSErr FSAllocateFork(FSIORefNum, FSAllocationFlags, UInt16 positionMode, SInt64 positionOffset,
+//                      UInt64 requestCount, UInt64 *actualCount)
+B32_THUNK(_FSAllocateFork) {
+    FSIORefNum number = c.args.i32();
+    FSAllocationFlags flags = FSAllocationFlags(c.args.u32());
+    UInt16 mode = UInt16(c.args.u32());
+    SInt64 offset = SInt64(c.args.u64());
+    UInt64 request = c.args.u64();
+    GuestAddr actualOut = c.args.ptr();
+    UInt64 actual = 0;
+    OSErr error = FSAllocateFork(number, flags, mode, offset, request, &actual);
+    if (actualOut) c.mem.write<uint64_t>(actualOut, actual);
+    c.ret(uint32_t(int32_t(error)));
+}
+// OSErr FSIterateForks(const FSRef *, CatPositionRec *iterator, HFSUniStr255 *forkName, SInt64 *forkSize,
+//                      UInt64 *forkPhysicalSize): the iterator is a long that starts at 0 and six shorts the
+// file system keeps its place in.
+B32_THUNK(_FSIterateForks) {
+    const FSRef *ref = fsRef(c, c.args.ptr());
+    GuestAddr position = c.args.ptr(), nameOut = c.args.ptr(), sizeOut = c.args.ptr(), physicalOut = c.args.ptr();
+    CatPositionRec iterator = {};
+    iterator.initialize = c.mem.read<int32_t>(position);
+    for (int i = 0; i < 6; i++) iterator.priv[i] = c.mem.read<int16_t>(position + 4 + uint32_t(i) * 2);
+    HFSUniStr255 name = {};
+    SInt64 size = 0;
+    UInt64 physical = 0;
+    OSErr error = FSIterateForks(ref, &iterator, &name, &size, &physical);
+    c.mem.write<int32_t>(position, int32_t(iterator.initialize));
+    for (int i = 0; i < 6; i++) c.mem.write<int16_t>(position + 4 + uint32_t(i) * 2, iterator.priv[i]);
+    if (error == noErr) {
+        if (nameOut) {
+            c.mem.write<uint16_t>(nameOut, name.length);
+            c.mem.writeArray<UniChar>(nameOut + 2, name.unicode, name.length);
+        }
+        if (sizeOut) c.mem.write<int64_t>(sizeOut, size);
+        if (physicalOut) c.mem.write<uint64_t>(physicalOut, physical);
+    }
     c.ret(uint32_t(int32_t(error)));
 }
 namespace {
@@ -357,6 +482,53 @@ B32_THUNK(_GetTime) {
     c.mem.writeArray<int16_t>(out, fields, 7);
 }
 
+// Classic dates count seconds from the start of 1904, in local time.
+namespace {
+constexpr int64_t kSecondsFrom1904To1970 = 2082844800;
+struct tm classicDate(int64_t seconds) {
+    time_t unixTime = time_t(seconds - kSecondsFrom1904To1970);
+    struct tm t;
+    gmtime_r(&unixTime, &t);  // the count is local already
+    return t;
+}
+}  // namespace
+// void SecondsToDate(UInt32 seconds, DateTimeRec *): the seven shorts GetTime gives.
+B32_THUNK(_SecondsToDate) {
+    struct tm t = classicDate(c.args.u32());
+    const int16_t fields[7] = {int16_t(t.tm_year + 1900), int16_t(t.tm_mon + 1), int16_t(t.tm_mday), int16_t(t.tm_hour),
+                               int16_t(t.tm_min), int16_t(t.tm_sec), int16_t(t.tm_wday + 1)};
+    c.mem.writeArray<int16_t>(c.args.ptr(), fields, 7);
+}
+// void LongSecondsToDate(const LongDateTime *seconds (64 bits), LongDateRec *): era, year, month, day, hour,
+// minute, second, day of week, day of year, week of year, pm, and three reserved, as shorts.
+B32_THUNK(_LongSecondsToDate) {
+    struct tm t = classicDate(c.mem.read<int64_t>(c.args.ptr()));
+    const int16_t fields[14] = {0, int16_t(t.tm_year + 1900), int16_t(t.tm_mon + 1), int16_t(t.tm_mday), int16_t(t.tm_hour),
+                                int16_t(t.tm_min), int16_t(t.tm_sec), int16_t(t.tm_wday + 1), int16_t(t.tm_yday + 1),
+                                int16_t(t.tm_yday / 7 + 1), int16_t(t.tm_hour >= 12), 0, 0, 0};
+    c.mem.writeArray<int16_t>(c.args.ptr(), fields, 14);
+}
+// void ReadLocation(MachineLocation *): latitude and longitude (not known: 0), then the offset from GMT in
+// seconds in the low three bytes, under a byte that is 0x80 during daylight saving time.
+B32_THUNK(_ReadLocation) {
+    GuestAddr out = c.args.ptr();
+    time_t now = time(nullptr);
+    struct tm t;
+    localtime_r(&now, &t);
+    c.mem.write<int32_t>(out, 0);
+    c.mem.write<int32_t>(out + 4, 0);
+    c.mem.write<uint32_t>(out + 8, (t.tm_isdst > 0 ? 0x80000000u : 0) | (uint32_t(t.tm_gmtoff) & 0x00FFFFFF));
+}
+// void CFBundleGetPackageInfo(bundle, UInt32 *type, UInt32 *creator)
+B32_THUNK(_CFBundleGetPackageInfo) {
+    id bundle = object(c);
+    GuestAddr type = c.args.ptr(), creator = c.args.ptr();
+    UInt32 hostType = 0, hostCreator = 0;
+    if (bundle) CFBundleGetPackageInfo((CFBundleRef)bundle, &hostType, &hostCreator);
+    if (type) c.mem.write<uint32_t>(type, hostType);
+    if (creator) c.mem.write<uint32_t>(creator, hostCreator);
+}
+
 // --- standard alerts: the one piece of Carbon UI games need to say what's wrong ------------
 
 B32_THUNK(_GetStandardAlertDefaultParams) { c.ret(0); }
@@ -389,6 +561,9 @@ B32_THUNK(_RunStandardAlert) {
     if (hit) c.mem.write<uint16_t>(hit, 1);
     c.ret(0);
 }
+
+// WindowRef GetDialogWindow(DialogRef): a standard alert is the host's, with no Carbon window behind it.
+B32_THUNK(_GetDialogWindow) { c.ret(0); }
 
 B32_THUNK(_IntlScript) { c.ret(0); }  // smRoman
 // short IdenticalString(ConstStr255Param, ConstStr255Param, Handle): 0 if equal.

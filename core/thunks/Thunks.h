@@ -187,6 +187,7 @@ private:
     struct Entry {
         std::string name;
         ThunkFn fn;
+        GuestAddr forward = 0;  // a guest function found for it after it was bound (see dispatch)
     };
     GuestMemory &mem_;
     mutable std::mutex lock_;  // guest threads bind (dlsym) and dispatch concurrently
