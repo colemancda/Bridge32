@@ -600,3 +600,28 @@ B32_THUNK(_num2dec) {
     c.mem.write<uint8_t>(out + 4, uint8_t(digits.size()));
     c.mem.copyIn(out + 5, digits.data(), digits.size());
 }
+
+// char *strsep(char **stringp, const char *delim): the token at *stringp, ended at the first delimiter (which
+// becomes a NUL), and *stringp moved past it, or to NULL after the last token.
+B32_THUNK(_strsep) {
+    GuestAddr stringp = c.args.ptr(), delim = c.args.ptr();
+    GuestAddr token = stringp ? c.mem.read<uint32_t>(stringp) : 0;
+    if (!token) {
+        c.ret(0);
+        return;
+    }
+    const char *delimiters = delim ? c.mem.cstr(delim) : "";
+    GuestAddr p = token;
+    for (;; p++) {
+        char ch = char(c.mem.read<uint8_t>(p));
+        if (ch && !std::strchr(delimiters, ch)) continue;
+        if (ch) {
+            c.mem.write<uint8_t>(p, 0);
+            c.mem.write<uint32_t>(stringp, p + 1);
+        } else {
+            c.mem.write<uint32_t>(stringp, 0);
+        }
+        break;
+    }
+    c.ret(token);
+}

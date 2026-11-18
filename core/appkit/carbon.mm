@@ -58,8 +58,31 @@ B32_THUNK(_CFStringFindAndReplace) {
     c.ret(uint32_t(CFStringFindAndReplace((CFMutableStringRef)string, (CFStringRef)find, (CFStringRef)replace, range, c.args.u32())));
 }
 
-// A guest pointer can't back a host string the way the NoCopy form wants, so it
-// holds a copy. Callers fill the buffer first and then read the string.
+// Strings over the caller's own characters. A program can keep a string over a buffer of its own, have CF
+// edit the string, and read the result in its buffer, as a string class over a fixed buffer does.
+#if !defined(B32_GUEST_BIG_ENDIAN)
+// Guest memory is the host's, and its UniChars are in the host's order, so the host string uses the buffer
+// itself. It is never the string's to free (whatever deallocator the guest named is the guest's), and an
+// edit that outgrows it moves the string to CF's own storage, as one past the buffer's capacity did.
+B32_THUNK(_CFStringCreateMutableWithExternalCharactersNoCopy) {
+    c.args.ptr();
+    GuestAddr chars = c.args.ptr();
+    int32_t length = c.args.i32(), capacity = c.args.i32();
+    UniChar *buffer = chars ? c.mem.ptr<UniChar>(chars) : nullptr;
+    CFMutableStringRef string = CFStringCreateMutableWithExternalCharactersNoCopy(nullptr, buffer, buffer ? length : 0, buffer ? capacity : 0, kCFAllocatorNull);
+    c.ret(bridge(c).toGuest((id)CFBridgingRelease(string)));
+}
+// void CFStringSetExternalCharactersNoCopy(CFMutableStringRef, UniChar *, CFIndex length, CFIndex capacity)
+B32_THUNK(_CFStringSetExternalCharactersNoCopy) {
+    CFMutableStringRef string = (CFMutableStringRef)object(c);
+    GuestAddr chars = c.args.ptr();
+    int32_t length = c.args.i32(), capacity = c.args.i32();
+    UniChar *buffer = chars ? c.mem.ptr<UniChar>(chars) : nullptr;
+    CFStringSetExternalCharactersNoCopy(string, buffer, buffer ? length : 0, buffer ? capacity : 0);
+}
+#else
+// A big-endian guest's UniChars are the other way round, so its string holds a copy: callers fill the
+// buffer first and then read the string, and edits don't reach the buffer.
 B32_THUNK(_CFStringCreateMutableWithExternalCharactersNoCopy) {
     c.args.ptr();
     GuestAddr chars = c.args.ptr();
@@ -71,9 +94,8 @@ B32_THUNK(_CFStringCreateMutableWithExternalCharactersNoCopy) {
     }
     c.ret(bridge(c).toGuest((id)CFBridgingRelease(string)));
 }
-// void CFStringSetExternalCharactersNoCopy(CFMutableStringRef, UniChar *, CFIndex, CFIndex):
-// the same copy, replacing what the string holds — a caller fills its buffer after
-// creating the string, then points the string at it.
+// void CFStringSetExternalCharactersNoCopy(CFMutableStringRef, UniChar *, CFIndex, CFIndex): the same copy,
+// replacing what the string holds.
 B32_THUNK(_CFStringSetExternalCharactersNoCopy) {
     CFMutableStringRef string = (CFMutableStringRef)object(c);
     GuestAddr chars = c.args.ptr();
@@ -84,6 +106,17 @@ B32_THUNK(_CFStringSetExternalCharactersNoCopy) {
         std::vector<UniChar> text = c.mem.readArray<UniChar>(chars, size_t(length));
         CFStringAppendCharacters(string, text.data(), length);
     }
+}
+#endif
+// void CFStringDelete(CFMutableStringRef, CFRange): the range by value, location then length.
+B32_THUNK(_CFStringDelete) {
+    CFMutableStringRef string = (CFMutableStringRef)object(c);
+    CFRange range;
+    range.location = c.args.i32();
+    range.length = c.args.i32();
+    CFIndex length = CFStringGetLength(string);
+    if (range.location < 0 || range.length < 0 || range.location + range.length > length) return;
+    CFStringDelete(string, range);
 }
 
 // Pascal string out of a CFString: buffer holds length then bytes.

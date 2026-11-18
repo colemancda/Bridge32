@@ -206,14 +206,27 @@ B32_THUNK(_aglSetCurrentContext) {
 }
 B32_THUNK(_aglGetCurrentContext) { c.ret(currentHandle); }
 // GLboolean aglSetDrawable(ctx, AGLDrawable port)
+// The port each context draws in, for aglGetDrawable: a game that detaches its context for a moment puts back
+// what that answered.
+std::unordered_map<uint32_t, GuestAddr> drawables;
 B32_THUNK(_aglSetDrawable) {
-    NSOpenGLContext *context = contextOf(c.args.u32());
+    uint32_t handle = c.args.u32();
+    NSOpenGLContext *context = contextOf(handle);
     GuestAddr port = c.args.ptr();
-    if (!port) [context clearDrawable];
-    else if (NSView *view = b32::appkit::carbonViewForPort(port)) context.view = view;
+    if (!port) {
+        [context clearDrawable];
+        drawables.erase(handle);
+    } else if (NSView *view = b32::appkit::carbonViewForPort(port)) {
+        context.view = view;
+        drawables[handle] = port;
+    }
     c.ret(1);
 }
-B32_THUNK(_aglGetDrawable) { c.ret(0); }
+// AGLDrawable aglGetDrawable(AGLContext): the port it was given, or 0.
+B32_THUNK(_aglGetDrawable) {
+    auto it = drawables.find(c.args.u32());
+    c.ret(it == drawables.end() ? 0 : it->second);
+}
 // GLboolean aglSetFullScreen(ctx, width, height, freq, device): the picture is
 // scaled to the display rather than changing the display's mode. A size of 0 is
 // the mode the display is in, which comes back as the size the game asked it for.

@@ -11,6 +11,7 @@
 
 #import <AppKit/AppKit.h>
 
+#include <vector>
 #include <algorithm>
 #include <unordered_map>
 
@@ -362,11 +363,129 @@ B32_THUNK(_QDRegisterNamedPixMapCursor) {
 
 // --- the Display Manager's names for the device -------------------------------
 
+// The one display's Display Manager ID. Not 1: games start a "same display as the last one" check at 1,
+// since the IDs of the time never were.
+constexpr uint32_t kDisplayID = 0x100;
+
 // OSStatus DMGetDisplayIDByGDevice(GDHandle, DisplayIDType *out, Boolean)
 B32_THUNK(_DMGetDisplayIDByGDevice) {
     c.args.ptr();
     GuestAddr out = c.args.ptr();
     c.args.u32();
-    if (out) c.mem.write<uint32_t>(out, 1);  // the main display
+    if (out) c.mem.write<uint32_t>(out, kDisplayID);
     c.ret(0);
 }
+
+// --- the Display Manager's mode lists ------------------------------------------------------------
+// A game asks for the display's modes and is called back with each. The screen is never switched (a game's
+// picture is scaled to it), so the list is the resolutions games of the time chose from, and the screen's
+// own, each in 16 and 32-bit color at 60 Hz.
+namespace {
+// One mode's records, laid out as a 32-bit program has them: Displays.h's in their natural alignment, and
+// the video driver's (IOMacOSVideo.h, Video.h) packed to two bytes:
+//   DMDisplayModeListEntryRec 32: flags 0, switch info 4, resolution info 8, timing info 12, depth block 16,
+//                                 version 20, name 24, display info 28
+//   VDResolutionInfoRec 30:       previous mode 0, this mode 4, width 8, height 12, refresh rate (Fixed) 16,
+//                                 deepest depth mode 20, flags 22
+//   VDSwitchInfoRec 16:           depth mode 0, display mode 2, page 6, base address 8
+//   DMDepthInfoBlockRec 20:       count 0, depths 4, flags 8
+//   DMDepthInfoRec 20:            switch info 0, VPBlock 4, flags 8
+//   VPBlock 42:                   row bytes 4, bounds 6, version 14, horizontal and vertical resolution
+//                                 22 and 26, pixel type 30, pixel size 32, components 34, component size 36
+constexpr uint32_t kEntrySize = 32, kResolutionSize = 32, kSwitchSize = 16, kDepthBlockSize = 20, kDepthSize = 20,
+                   kVPBlockSize = 44;
+constexpr uint16_t kDepths[] = {16, 32};
+constexpr uint32_t kDepthCount = sizeof kDepths / sizeof kDepths[0];
+constexpr uint32_t kModeSize = kEntrySize + kResolutionSize + kSwitchSize + kDepthBlockSize +
+                               kDepthCount * (kDepthSize + kSwitchSize + kVPBlockSize);
+// A list: its count, then each mode's records.
+constexpr uint32_t kListHeader = 4;
+
+std::vector<std::pair<uint32_t, uint32_t>> displayModes() {
+    std::vector<std::pair<uint32_t, uint32_t>> modes = {{640, 480},   {800, 600},   {1024, 768},  {1152, 864},
+                                                        {1280, 960},  {1280, 1024}, {1440, 900},  {1600, 1200},
+                                                        {1680, 1050}, {1920, 1080}, {1920, 1200}};
+    NSSize screen = NSScreen.mainScreen.frame.size;
+    modes.emplace_back(uint32_t(screen.width), uint32_t(screen.height));
+    std::sort(modes.begin(), modes.end());
+    modes.erase(std::unique(modes.begin(), modes.end()), modes.end());
+    return modes;
+}
+
+void writeMode(Call &c, GuestAddr at, uint32_t index, uint32_t width, uint32_t height) {
+    GuestAddr entry = at, resolution = entry + kEntrySize, modeSwitch = resolution + kResolutionSize,
+              block = modeSwitch + kSwitchSize, depths = block + kDepthBlockSize;
+    uint32_t mode = 0x80 + index;  // a DisplayModeID
+    c.mem.write<uint32_t>(entry + 4, modeSwitch);
+    c.mem.write<uint32_t>(entry + 8, resolution);
+    c.mem.write<uint32_t>(entry + 16, block);
+    c.mem.write<uint32_t>(resolution + 4, mode);
+    c.mem.write<uint32_t>(resolution + 8, width);
+    c.mem.write<uint32_t>(resolution + 12, height);
+    c.mem.write<uint32_t>(resolution + 16, 60u << 16);
+    c.mem.write<uint16_t>(resolution + 20, uint16_t(0x80 + kDepthCount - 1));  // the deepest depth mode
+    c.mem.write<uint16_t>(modeSwitch + 0, 0x80);
+    c.mem.write<uint32_t>(modeSwitch + 2, mode);
+    c.mem.write<uint32_t>(block + 0, kDepthCount);
+    c.mem.write<uint32_t>(block + 4, depths);
+    for (uint32_t d = 0; d < kDepthCount; d++) {
+        GuestAddr depth = depths + d * kDepthSize;
+        GuestAddr depthSwitch = depths + kDepthCount * kDepthSize + d * (kSwitchSize + kVPBlockSize);
+        GuestAddr vp = depthSwitch + kSwitchSize;
+        uint16_t bits = kDepths[d];
+        c.mem.write<uint32_t>(depth + 0, depthSwitch);
+        c.mem.write<uint32_t>(depth + 4, vp);
+        c.mem.write<uint16_t>(depthSwitch + 0, uint16_t(0x80 + d));
+        c.mem.write<uint32_t>(depthSwitch + 2, mode);
+        c.mem.write<uint16_t>(vp + 4, uint16_t(width * bits / 8));
+        const int16_t bounds[4] = {0, 0, int16_t(height), int16_t(width)};
+        c.mem.writeArray<int16_t>(vp + 6, bounds, 4);
+        c.mem.write<uint32_t>(vp + 22, 72u << 16);
+        c.mem.write<uint32_t>(vp + 26, 72u << 16);
+        c.mem.write<uint16_t>(vp + 30, 16);  // RGBDirect
+        c.mem.write<uint16_t>(vp + 32, bits);
+        c.mem.write<uint16_t>(vp + 34, 3);
+        c.mem.write<uint16_t>(vp + 36, bits == 16 ? 5 : 8);
+    }
+}
+}  // namespace
+
+// OSErr DMNewDisplayModeList(DisplayIDType, UInt32 flags, UInt32 reserved, DMListIndexType *count, DMListType *list)
+B32_THUNK(_DMNewDisplayModeList) {
+    c.args.u32();
+    c.args.u32();
+    c.args.u32();
+    GuestAddr countOut = c.args.ptr(), listOut = c.args.ptr();
+    std::vector<std::pair<uint32_t, uint32_t>> modes = displayModes();
+    uint32_t count = uint32_t(modes.size());
+    GuestAddr list = c.heap.calloc(1, kListHeader + count * kModeSize);
+    c.mem.write<uint32_t>(list, count);
+    for (uint32_t i = 0; i < count; i++) writeMode(c, list + kListHeader + i * kModeSize, i, modes[i].first, modes[i].second);
+    if (countOut) c.mem.write<uint32_t>(countOut, count);
+    if (listOut) c.mem.write<uint32_t>(listOut, list);
+    c.ret(0);
+}
+// OSErr DMGetIndexedDisplayModeFromList(DMListType, DMListIndexType index, UInt32 options,
+//                                       DMDisplayModeListIteratorUPP, void *userData): the iterator is called
+// with (userData, index, the mode's DMDisplayModeListEntryRec).
+B32_THUNK(_DMGetIndexedDisplayModeFromList) {
+    GuestAddr list = c.args.ptr();
+    uint32_t index = c.args.u32();
+    c.args.u32();
+    GuestAddr iterator = c.args.ptr(), user = c.args.u32();
+    constexpr int32_t kParamErr = -50;
+    if (!list || index >= c.mem.read<uint32_t>(list)) {
+        c.ret(uint32_t(kParamErr));
+        return;
+    }
+    if (iterator) c.cpu.call(iterator, {user, index, list + kListHeader + index * kModeSize});
+    c.ret(0);
+}
+// OSErr DMDisposeList(DMListType)
+B32_THUNK(_DMDisposeList) {
+    if (GuestAddr list = c.args.ptr()) c.heap.free(list);
+    c.ret(0);
+}
+// On Mac OS X a UPP is the function itself.
+B32_THUNK(_NewDMDisplayModeListIteratorUPP) { c.ret(c.args.ptr()); }
+B32_THUNK(_DisposeDMDisplayModeListIteratorUPP) { c.args.ptr(); }

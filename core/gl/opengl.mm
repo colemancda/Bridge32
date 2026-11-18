@@ -12,8 +12,10 @@
 #import <AppKit/AppKit.h>
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
+#include <OpenGL/glext.h>
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cstring>
 #include <regex>
 #include <string>
@@ -77,6 +79,39 @@ void swapGuestPixels() {
 #endif
 }
 }  // namespace b32::gl
+
+// --- the limits an ARB program may have --------------------------------------------------------------
+// Programs of the AGL era tell a card's generation by these: a renderer that says it runs vertex programs of
+// any length is, to them, a card newer than the data they shipped with, which some then refuse. The host's
+// are far beyond any card of the time (262,144 instructions), so a vertex program's limits stop at a
+// GeForce 6800's, the Shader Model 3 card most of those games list (512 instructions, 256 parameters,
+// 32 temporaries). Their own programs fit well within them.
+namespace {
+GLint eraLimit(GLenum target, GLenum name, GLint value) {
+    if (target != GL_VERTEX_PROGRAM_ARB) return value;
+    switch (name) {
+    case GL_MAX_PROGRAM_INSTRUCTIONS_ARB:
+    case GL_MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB:
+        return std::min(value, 512);
+    case GL_MAX_PROGRAM_PARAMETERS_ARB:
+    case GL_MAX_PROGRAM_NATIVE_PARAMETERS_ARB:
+        return std::min(value, 256);
+    case GL_MAX_PROGRAM_TEMPORARIES_ARB:
+    case GL_MAX_PROGRAM_NATIVE_TEMPORARIES_ARB:
+        return std::min(value, 32);
+    default:
+        return value;
+    }
+}
+}  // namespace
+// void glGetProgramivARB(target, pname, GLint *params): one value for the names this is asked.
+B32_THUNK(_glGetProgramivARB) {
+    GLenum target = c.args.u32(), name = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    GLint value = 0;
+    glGetProgramivARB(target, name, &value);
+    if (out) c.mem.write<int32_t>(out, eraLimit(target, name, value));
+}
 
 // --- big-endian guests ------------------------------------------------------------------------
 // The table hands a pointer argument to the host as it is, which suits bytes and nothing else: a PowerPC
