@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 #include <CoreServices/CoreServices.h>
 #include <CoreText/CoreText.h>
+#include <CoreText/CoreText.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mount.h>
@@ -260,25 +261,41 @@ std::mutex directoryIteratorLock;
 std::unordered_map<uint32_t, DirectoryIterator> directoryIterators;
 uint32_t nextDirectoryIterator = 0x30000000;
 
+// A 32-bit program's FSCatalogInfo, 144 bytes with 2-byte packing: nodeFlags 0, volume 2, parentDirID 4,
+// nodeID 8, sharingFlags 12, userPrivileges 13, then five UTCDateTimes (create 16, content change 24,
+// attribute change 32, access 40, backup 48), permissions 56 (user, group, a reserved byte, userAccess,
+// mode, and a reserved word), finderInfo 72, extFinderInfo 88, the data fork's logical and physical sizes
+// 104 and 112, the resource fork's 120 and 128, valence 136, textEncodingHint 140. (The host's own is four
+// bytes longer from the permissions on, which hold a pointer there.)
+constexpr uint32_t kCatalogInfoSize = 144;
 void writeCatalogInfo(Call &c, GuestAddr info, const std::string &path, const struct stat &st) {
     if (!info) return;
-    c.mem.write<uint16_t>(info + 0, S_ISDIR(st.st_mode) ? 0x10 : 0);  // kFSNodeIsDirectoryMask
+    bool directory = S_ISDIR(st.st_mode);
+    c.mem.write<uint16_t>(info + 0, directory ? 0x10 : 0);  // kFSNodeIsDirectoryMask
     c.mem.write<int16_t>(info + 2, kVolume);
     c.mem.write<int32_t>(info + 4, isVolumeRoot(path) ? kRootParent : idForPath(parentOf(path)));
     c.mem.write<int32_t>(info + 8, idForPath(path));
-    auto date = [&](uint32_t at, time_t when) {  // UTCDateTime: high then low half of seconds since 1904
+    auto date = [&](uint32_t at, time_t when) {  // UTCDateTime: high then low half of seconds since 1904, then a fraction
         uint64_t seconds = uint64_t(when) + 2082844800;
         c.mem.write<uint16_t>(info + at, uint16_t(seconds >> 32));
         c.mem.write<uint32_t>(info + at + 2, uint32_t(seconds));
+        c.mem.write<uint16_t>(info + at + 6, 0);
     };
-    date(56, st.st_birthtimespec.tv_sec);
-    date(62, st.st_mtimespec.tv_sec);
-    date(68, st.st_mtimespec.tv_sec);
-    date(74, st.st_atimespec.tv_sec);
-    c.mem.write<uint32_t>(info + 86, st.st_uid);
-    c.mem.write<uint32_t>(info + 90, st.st_gid);
-    c.mem.write<uint32_t>(info + 94, st.st_mode);
-    c.mem.write<uint32_t>(info + 102, uint32_t(std::min<uint64_t>(st.st_size, 0x7fffffff)));
+    date(16, st.st_birthtimespec.tv_sec);
+    date(24, st.st_mtimespec.tv_sec);
+    date(32, st.st_ctimespec.tv_sec);
+    date(40, st.st_atimespec.tv_sec);
+    c.mem.write<uint32_t>(info + 56, st.st_uid);
+    c.mem.write<uint32_t>(info + 60, st.st_gid);
+    c.mem.write<uint8_t>(info + 65, 0);  // userAccess
+    c.mem.write<uint16_t>(info + 66, uint16_t(st.st_mode));
+    if (directory) {
+        NSArray *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:@(path.c_str()) error:nil];
+        c.mem.write<uint32_t>(info + 136, uint32_t(entries.count));  // valence: how many items it holds
+    } else {
+        c.mem.write<uint64_t>(info + 104, uint64_t(st.st_size));
+        c.mem.write<uint64_t>(info + 112, uint64_t(st.st_blocks) * 512);
+    }
 }
 }  // namespace
 
@@ -316,16 +333,17 @@ B32_THUNK(_FSCloseIterator) {
     }
     c.ret(0);
 }
-// OSErr FSGetCatalogInfoBulk(FSIterator, ItemCount maximum, ItemCount *actual, FSCatalogInfoBitmap,
-//                            FSCatalogInfo[] infos, HFSUniStr255[] names, FSRef[] refs, FSSpec[] specs,
-//                            Boolean *changes): one stride each — FSCatalogInfo 128, HFSUniStr255 512,
-//                            FSRef 80, FSSpec 70.
+// OSErr FSGetCatalogInfoBulk(FSIterator, ItemCount maximum, ItemCount *actual, Boolean *containerChanged,
+//                            FSCatalogInfoBitmap, FSCatalogInfo[] infos, FSRef[] refs, FSSpec[] specs,
+//                            HFSUniStr255[] names): one stride each — FSCatalogInfo 144, FSRef 80, FSSpec 70,
+//                            HFSUniStr255 512. Past the last item the answer is errFSNoMoreItems, with
+//                            however many there were, which is how callers stop.
 B32_THUNK(_FSGetCatalogInfoBulk) {
     uint32_t handle = c.args.u32();
     uint32_t maximum = c.args.u32();
-    GuestAddr actual = c.args.ptr();
+    GuestAddr actual = c.args.ptr(), changes = c.args.ptr();
     c.args.u32();  // whichInfo: the fields it asked for are the ones filled
-    GuestAddr infos = c.args.ptr(), names = c.args.ptr(), refs = c.args.ptr(), specs = c.args.ptr(), changes = c.args.ptr();
+    GuestAddr infos = c.args.ptr(), refs = c.args.ptr(), specs = c.args.ptr(), names = c.args.ptr();
     uint32_t count = 0;
     {
         std::lock_guard guard(directoryIteratorLock);
@@ -340,7 +358,7 @@ B32_THUNK(_FSGetCatalogInfoBulk) {
             std::string path = (it.base == "/" ? "" : it.base) + "/" + leaf;
             struct stat st;
             ::stat(path.c_str(), &st);
-            writeCatalogInfo(c, infos ? infos + uint32_t(count) * 128 : 0, path, st);
+            writeCatalogInfo(c, infos ? infos + uint32_t(count) * kCatalogInfoSize : 0, path, st);
             if (names) {
                 NSString *name = @(leaf.c_str());
                 NSUInteger length = MIN(name.length, NSUInteger(255));
@@ -358,11 +376,12 @@ B32_THUNK(_FSGetCatalogInfoBulk) {
                     c.mem.write<uint32_t>(refs + uint32_t(count) * 80, 0);
             }
             if (specs) writeSpec(c, specs + uint32_t(count) * 70, path);
-            if (changes) c.mem.write<uint8_t>(changes, 0);
         }
     }
+    constexpr int32_t kNoMoreItems = -1417;
+    if (changes) c.mem.write<uint8_t>(changes, 0);
     if (actual) c.mem.write<uint32_t>(actual, count);
-    c.ret(0);
+    c.ret(uint32_t(count < maximum ? kNoMoreItems : kNoErr));
 }
 
 // OSErr FindFolder(vRefNum, folderType, createFolder, short *foundVRefNum, long *foundDirID)
@@ -572,6 +591,11 @@ B32_THUNK(_PBHGetVInfoSync) {
         total = uint64_t(st.f_blocks) * st.f_bsize;
         free = uint64_t(st.f_bavail) * st.f_bsize;
     }
+    // The sizes this call reports stop at 2 GB, as they always did for the programs that multiply the block
+    // counts out in 32 bits: with more than that free, such a sum wraps round to something small.
+    constexpr uint64_t kMostReported = 0x7FFFFFFF;
+    total = std::min(total, kMostReported);
+    free = std::min(free, total);
     uint32_t blockSize = uint32_t(std::max<uint64_t>(total / 65535 + 1, 512));
     if (GuestAddr name = c.mem.read<uint32_t>(pb + 18)) writePascal(c, name, volume.name, 27);
     c.mem.write<int16_t>(pb + 22, int16_t(-(position + 1)));
@@ -626,6 +650,44 @@ B32_THUNK(_PBHGetVolParmsSync) {
     uint32_t written = std::min(count, kInfoSize);
     if (buffer && written) c.mem.copyIn(buffer, info, written);
     c.mem.write<uint32_t>(pb + 40, written);
+    c.ret(0);
+}
+
+// OSErr PBHGetDirAccessSync(HParmBlkPtr): who may do what in a directory. ioACUser 31 (what the caller is
+// denied: nothing), ioACOwnerID 36, ioACGroupID 40, ioACAccess 44 (see, read and write for owner, group
+// and everyone, as the directory's own mode bits say).
+B32_THUNK(_PBHGetDirAccessSync) {
+    GuestAddr pb = c.args.ptr();
+    int32_t dir = directoryOn(c.mem.read<int16_t>(pb + 22), c.mem.read<int32_t>(pb + 48));
+    GuestAddr namePtr = c.mem.read<uint32_t>(pb + 18);
+    std::string path = namePtr ? resolve(dir, pascalString(c, namePtr)) : pathForId(dir);
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+        c.ret(uint32_t(kDirNFErr));
+        return;
+    }
+    // Each byte: search 1, read 2, write 4. Unix has one bit for search and read's listing both.
+    auto rights = [](mode_t bits) { return uint32_t((bits & 1 ? 1 : 0) | (bits & 4 ? 2 : 0) | (bits & 2 ? 4 : 0)); };
+    uint32_t access = rights(st.st_mode >> 6) << 24 | rights(st.st_mode >> 6) << 16 | rights(st.st_mode >> 3) << 8 | rights(st.st_mode);
+    c.mem.write<uint8_t>(pb + 31, 0);
+    c.mem.write<int32_t>(pb + 36, int32_t(st.st_uid));
+    c.mem.write<int32_t>(pb + 40, int32_t(st.st_gid));
+    c.mem.write<uint32_t>(pb + 44, access);
+    c.ret(0);
+}
+
+// OSStatus FMActivateFonts(const FSSpec *container, const FSFilter *, void *refCon, OptionBits): a game's own
+// font file, made available to this process alone. FMDeactivateFonts takes the same arguments.
+B32_THUNK(_FMActivateFonts) {
+    std::string path = specPath(c, c.args.ptr());
+    NSURL *url = [NSURL fileURLWithPath:@(path.c_str())];
+    CTFontManagerRegisterFontsForURL((CFURLRef)url, kCTFontManagerScopeProcess, nullptr);
+    c.ret(0);
+}
+B32_THUNK(_FMDeactivateFonts) {
+    std::string path = specPath(c, c.args.ptr());
+    NSURL *url = [NSURL fileURLWithPath:@(path.c_str())];
+    CTFontManagerUnregisterFontsForURL((CFURLRef)url, kCTFontManagerScopeProcess, nullptr);
     c.ret(0);
 }
 
