@@ -95,12 +95,12 @@ B32_THUNK(_CGDisplayScreenSize) {
 }
 B32_THUNK(_CGWarpMouseCursorPosition) {
     float x = c.args.structFloat();  // a CGPoint passed by value
-    c.ret(CGWarpMouseCursorPosition(CGPointMake(x, c.args.structFloat())));
+    c.ret(CGWarpMouseCursorPosition(appkit::gameScreenPoint(CGPointMake(x, c.args.structFloat()))));
 }
 B32_THUNK(_CGDisplayMoveCursorToPoint) {
     uint32_t display = c.args.u32();
     float x = c.args.structFloat();
-    c.ret(CGDisplayMoveCursorToPoint(display, CGPointMake(x, c.args.structFloat())));
+    c.ret(CGDisplayMoveCursorToPoint(display, appkit::gameScreenPoint(CGPointMake(x, c.args.structFloat()))));
 }
 
 #if defined(B32_GUEST_BIG_ENDIAN)
