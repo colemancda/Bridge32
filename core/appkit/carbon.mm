@@ -413,6 +413,41 @@ B32_THUNK(_GetFrontProcess) { c.ret(0); }
 B32_THUNK(_SetFrontProcess) { c.ret(0); }
 B32_THUNK(_GetProcessInformation) { c.ret(uint32_t(-600)); }  // procNotFound
 B32_THUNK(_EnterMovies) { c.ret(0); }
+// The movie toolbox: nothing plays, and a movie that isn't found is skipped
+// where one that fails to open gets retried.
+// OSErr OpenMovieFile(const FSSpec *, short *refNum, SInt8 permission)
+B32_THUNK(_OpenMovieFile) {
+    c.args.ptr();
+    c.args.ptr();
+    c.args.u32();
+    c.ret(uint32_t(-43));  // fnfErr
+}
+// OSErr CloseMovieFile(short refNum)
+B32_THUNK(_CloseMovieFile) { c.args.u32(); c.ret(0); }
+// OSErr NewMovieFromFile(Movie *, short refNum, short *id, StringPtr, short flags, Boolean *changed)
+B32_THUNK(_NewMovieFromFile) {
+    c.args.ptr();
+    c.args.u32();
+    c.args.ptr();
+    c.args.ptr();
+    c.args.u32();
+    c.args.ptr();
+    c.ret(uint32_t(-2010));  // invalidMovie
+}
+// TimeValue GetMovieDuration(Movie) / void GetMovieBox(Movie, Rect *) / void SetMovieBox(Movie, const Rect *)
+B32_THUNK(_GetMovieDuration) {
+    c.args.ptr();
+    c.ret(0);
+}
+B32_THUNK(_GetMovieBox) {
+    c.args.ptr();
+    GuestAddr box = c.args.ptr();
+    for (int i = 0; i < 8; i++) c.mem.write<uint8_t>(box + i, 0);
+}
+B32_THUNK(_SetMovieBox) {
+    c.args.ptr();
+    c.args.ptr();
+}
 // Sound Manager channels exist but are silent so far.
 B32_THUNK(_SndNewChannel) {
     GuestAddr out = c.args.ptr();
