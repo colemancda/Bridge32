@@ -86,6 +86,14 @@ if [ -d "$input/Contents" ]; then
     clone "$guest/Contents/MacOS/." "$out/Contents/B32Guest/MacOS/"
     [ -d "$guest/Contents/Resources" ] && clone "$guest/Contents/Resources/." "$out/Contents/Resources/"
     [ -d "$guest/Contents/Frameworks" ] && clone "$guest/Contents/Frameworks" "$out/Contents/B32Guest/Frameworks"
+    # Whatever else sits beside the executable's folder goes with it: a game may keep its libraries in a
+    # folder of its own (Contents/PhysX) and load them by a path relative to the executable.
+    for dir in "$guest/Contents"/*/; do
+        case "$(basename "$dir")" in
+        MacOS | Resources | Frameworks | _CodeSignature) ;;
+        *) clone "${dir%/}" "$out/Contents/B32Guest/$(basename "$dir")" ;;
+        esac
+    done
     python3 -I "$here/merge-mac-plist.py" "$guest/Contents/Info.plist" "$root/app/mac/Info.plist" "$out/Contents/Info.plist" "$executable"
     [ -n "$chdir_flag" ] && /usr/libexec/PlistBuddy -c "Add :B32GuestChdir bool true" "$out/Contents/Info.plist"
     # Resource forks go alongside as plain files, since signing can't take them.
