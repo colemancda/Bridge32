@@ -565,10 +565,13 @@ B32_FF(_FFEffectStart)
 B32_FF(_FFEffectStop)
 B32_FF(_FFReleaseDevice)
 
-// Old Component Manager: SDL's audio fallback, unused when CoreAudio works.
+// Old Component Manager: on the big-endian guest, which has no AudioUnits yet, nothing is found (SDL's audio
+// fallback, unused when CoreAudio works). The little-endian guest's are AudioUnits (core/audio/audiounit.mm).
+#if defined(B32_GUEST_BIG_ENDIAN)
 B32_NOTHING(_FindNextComponent)
 B32_NOTHING(_OpenAComponent)
 B32_NOTHING(_CloseComponent)
+#endif
 
 // --- HAL properties and converters: not reached by playback through AudioUnit ----------
 
