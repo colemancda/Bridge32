@@ -83,6 +83,7 @@ struct CWindow {
 struct CEvent {
     uint32_t cls, kind;
     double when;
+    int references = 1;  // the creator's; RetainEvent and the event queue add their own
     std::map<uint32_t, std::vector<uint8_t>> params;
 };
 
@@ -139,6 +140,11 @@ void freeEvent(Runtime &rt, GuestAddr handle) {
     events.erase(handle);
     rt.heap().free(handle);
 }
+// Drops one reference, and the event with its last.
+void releaseEvent(Runtime &rt, GuestAddr handle) {
+    auto it = events.find(handle);
+    if (it != events.end() && --it->second->references <= 0) freeEvent(rt, handle);
+}
 
 // Runs the guest's handlers for an event at `target`, then up its chain.
 int32_t dispatchTo(GuestAddr handle, GuestAddr target) {
@@ -171,7 +177,7 @@ void sendCommand(Runtime &rt, uint32_t command, GuestAddr target, GuestAddr menu
     std::memcpy(hc + 12, &itemGuest, 2);
     setParamBytes(event, kDirectObject, hc, sizeof hc);
     dispatchTo(event, target);
-    freeEvent(rt, event);
+    releaseEvent(rt, event);
 }
 
 CControl *controlOf(GuestAddr handle) {
@@ -206,7 +212,7 @@ Runtime &runtime() { return Bridge::shared()->runtime(); }
             GuestAddr event = makeEvent(runtime(), kClassWindow, kWindowClose);
             setParam<uint32_t>(event, kDirectObject, handle);
             int32_t result = dispatchTo(event, window->target);
-            freeEvent(runtime(), event);
+            releaseEvent(runtime(), event);
             return result == kEventNotHandled;
         }
     return YES;
@@ -1155,7 +1161,13 @@ B32_THUNK(_SendEventToEventTarget) {
 }
 B32_THUNK(_ReleaseEvent) {
     GuestAddr event = c.args.ptr();
-    if (events.count(event)) freeEvent(c.rt, event);
+    releaseEvent(c.rt, event);
+}
+// EventRef RetainEvent(EventRef)
+B32_THUNK(_RetainEvent) {
+    GuestAddr event = c.args.ptr();
+    if (auto it = events.find(event); it != events.end()) it->second->references++;
+    c.ret(event);
 }
 B32_THUNK(_CallNextEventHandler) { c.ret(uint32_t(kEventNotHandled)); }
 B32_THUNK(_GetCurrentEventLoop) { c.ret(1); }
@@ -1320,15 +1332,27 @@ B32_THUNK(_SetMouseCoalescingEnabled) {
 B32_THUNK(_SetThemeCursor) { c.ret(0); }
 // EventQueueRef GetMainEventQueue(): the one queue.
 B32_THUNK(_GetMainEventQueue) { c.ret(1); }
-// OSStatus PostEventToQueue(queue, event, priority): delivered to the application's handlers; the
-// queue owns the event afterwards.
+// OSStatus PostEventToQueue(queue, event, priority): the queue keeps its own reference and the event reaches
+// the application's handlers when the event loop next runs, not before. A game that pumps the loop once a
+// frame posts an event, runs the loop, and has that event's handler quit it: delivered on the spot, the quit
+// would come before the loop it is meant to end.
 B32_THUNK(_PostEventToQueue) {
     c.args.u32();
     GuestAddr event = c.args.ptr();
-    if (events.count(event)) {
-        dispatchTo(event, appTarget(c));
-        freeEvent(c.rt, event);
+    auto it = events.find(event);
+    if (it == events.end()) {
+        c.ret(0);
+        return;
     }
+    it->second->references++;
+    GuestAddr target = appTarget(c);
+    Runtime *rt = &c.rt;
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+        if (!events.count(event)) return;
+        dispatchTo(event, target);
+        releaseEvent(*rt, event);
+    });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
     c.ret(0);
 }
 B32_THUNK(_HIAboutBox) {
