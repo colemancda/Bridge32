@@ -4,12 +4,18 @@
 #include "Thunks.h"
 
 #include "Discs.h"
+#include "Threads.h"
 
 #include "core/Log.h"
 #include "core/Runtime.h"
 
 #include <cmath>
 #include <string>
+#include <array>
+#include <deque>
+#include <thread>
+#include <vector>
+#include <functional>
 #include <grp.h>
 #include <iconv.h>
 #include <mach/mach.h>
@@ -533,6 +539,209 @@ B32_THUNK(_MPWaitOnSemaphore) {
     c.ret(0);
 }
 
+// --- Multiprocessing Services: tasks, message queues, events and aligned memory -----------------------
+
+namespace {
+struct Queue {
+    std::mutex lock;
+    std::condition_variable changed;
+    std::deque<std::array<uint32_t, 3>> messages;
+};
+struct Event {
+    std::mutex lock;
+    std::condition_variable changed;
+    uint32_t flags = 0;
+};
+std::unordered_map<uint32_t, Queue *> mpQueues;
+std::unordered_map<uint32_t, Event *> mpEvents;
+thread_local uint32_t currentTask = 0;
+// The task each thread MPCreateTask started is, by its pthread_t, for MPCurrentTaskID.
+std::unordered_map<GuestAddr, uint32_t> &taskOfThread() {
+    static std::unordered_map<GuestAddr, uint32_t> map;
+    return map;
+}
+
+Queue *queue(uint32_t id) {
+    std::lock_guard guard(mpLock);
+    auto it = mpQueues.find(id);
+    return it == mpQueues.end() ? nullptr : it->second;
+}
+Event *event(uint32_t id) {
+    std::lock_guard guard(mpLock);
+    auto it = mpEvents.find(id);
+    return it == mpEvents.end() ? nullptr : it->second;
+}
+void notify(Queue *q, uint32_t a, uint32_t b, uint32_t c) {
+    std::lock_guard guard(q->lock);
+    q->messages.push_back({a, b, c});
+    q->changed.notify_one();
+}
+}  // namespace
+
+// OSStatus MPCreateQueue(MPQueueID *), MPDeleteQueue(MPQueueID)
+B32_THUNK(_MPCreateQueue) {
+    GuestAddr out = c.args.ptr();
+    std::lock_guard guard(mpLock);
+    uint32_t id = nextMpId++;
+    mpQueues[id] = new Queue;
+    c.mem.write<uint32_t>(out, id);
+    c.ret(0);
+}
+B32_THUNK(_MPDeleteQueue) {
+    uint32_t id = c.args.u32();
+    std::lock_guard guard(mpLock);
+    // Kept: a task blocked on it would wake to freed memory. A deleted queue is an unknown one.
+    c.ret(mpQueues.erase(id) ? 0 : kMPInvalidIDErr);
+}
+// OSStatus MPNotifyQueue(MPQueueID, void *param1, void *param2, void *param3)
+B32_THUNK(_MPNotifyQueue) {
+    Queue *q = queue(c.args.u32());
+    uint32_t a = c.args.u32(), b = c.args.u32(), d = c.args.u32();
+    if (!q) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    notify(q, a, b, d);
+    c.ret(0);
+}
+// OSStatus MPWaitOnQueue(MPQueueID, void **param1, void **param2, void **param3, Duration)
+B32_THUNK(_MPWaitOnQueue) {
+    Queue *q = queue(c.args.u32());
+    GuestAddr out[3] = {c.args.ptr(), c.args.ptr(), c.args.ptr()};
+    int32_t timeout = c.args.i32();
+    if (!q) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    std::unique_lock guard(q->lock);
+    auto ready = [&] { return !q->messages.empty(); };
+    if (timeout == kDurationForever)
+        q->changed.wait(guard, ready);
+    else if (timeout == kDurationImmediate ? !ready() : !q->changed.wait_for(guard, waitFor(timeout), ready)) {
+        c.ret(kMPTimeoutErr);
+        return;
+    }
+    std::array<uint32_t, 3> message = q->messages.front();
+    q->messages.pop_front();
+    for (int i = 0; i < 3; i++)
+        if (out[i]) c.mem.write<uint32_t>(out[i], message[size_t(i)]);
+    c.ret(0);
+}
+
+// OSStatus MPCreateEvent(MPEventID *), MPDeleteEvent(MPEventID)
+B32_THUNK(_MPCreateEvent) {
+    GuestAddr out = c.args.ptr();
+    std::lock_guard guard(mpLock);
+    uint32_t id = nextMpId++;
+    mpEvents[id] = new Event;
+    c.mem.write<uint32_t>(out, id);
+    c.ret(0);
+}
+B32_THUNK(_MPDeleteEvent) {
+    uint32_t id = c.args.u32();
+    std::lock_guard guard(mpLock);
+    c.ret(mpEvents.erase(id) ? 0 : kMPInvalidIDErr);
+}
+// OSStatus MPSetEvent(MPEventID, MPEventFlags): the flags are added to the event's.
+B32_THUNK(_MPSetEvent) {
+    Event *e = event(c.args.u32());
+    uint32_t flags = c.args.u32();
+    if (!e) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    std::lock_guard guard(e->lock);
+    e->flags |= flags;
+    e->changed.notify_all();
+    c.ret(0);
+}
+// OSStatus MPWaitForEvent(MPEventID, MPEventFlags *flags, Duration): until some flag is set, which are then
+// the caller's and cleared.
+B32_THUNK(_MPWaitForEvent) {
+    Event *e = event(c.args.u32());
+    GuestAddr out = c.args.ptr();
+    int32_t timeout = c.args.i32();
+    if (!e) {
+        c.ret(kMPInvalidIDErr);
+        return;
+    }
+    std::unique_lock guard(e->lock);
+    auto ready = [&] { return e->flags != 0; };
+    if (timeout == kDurationForever)
+        e->changed.wait(guard, ready);
+    else if (timeout == kDurationImmediate ? !ready() : !e->changed.wait_for(guard, waitFor(timeout), ready)) {
+        c.ret(kMPTimeoutErr);
+        return;
+    }
+    if (out) c.mem.write<uint32_t>(out, e->flags);
+    e->flags = 0;
+    c.ret(0);
+}
+
+// OSStatus MPCreateTask(TaskProc entry, void *parameter, ByteCount stackSize, MPQueueID notifyQueue,
+//                       void *terminationParameter1, void *terminationParameter2, MPTaskOptions, MPTaskID *):
+// a guest thread running entry(parameter). When it ends, the notify queue (if any) gets the two termination
+// parameters and what entry returned (or MPExit was given).
+B32_THUNK(_MPCreateTask) {
+    GuestAddr entry = c.args.ptr();
+    uint32_t parameter = c.args.u32();
+    c.args.u32();  // stack size: a guest thread's stack is the runtime's to size
+    uint32_t notifyQueue = c.args.u32(), term1 = c.args.u32(), term2 = c.args.u32();
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    uint32_t id;
+    {
+        std::lock_guard guard(mpLock);
+        id = nextMpId++;
+    }
+    if (out) c.mem.write<uint32_t>(out, id);  // before it runs, as the task may look itself up
+    Queue *q = notifyQueue ? queue(notifyQueue) : nullptr;
+    GuestAddr thread = startGuestThread(c.rt, entry, parameter, [q, term1, term2](uint32_t result) {
+        if (q) notify(q, term1, term2, result);
+    });
+    std::lock_guard guard(mpLock);
+    taskOfThread()[thread] = id;
+    c.ret(0);
+}
+// MPTaskID MPCurrentTaskID(void): the task a thread is; a thread MPCreateTask didn't start is a task too,
+// numbered the first time it asks.
+B32_THUNK(_MPCurrentTaskID) {
+    if (!currentTask) {
+        GuestAddr self = startedGuestThread();
+        std::lock_guard guard(mpLock);
+        auto it = taskOfThread().find(self);
+        currentTask = it != taskOfThread().end() ? it->second : nextMpId++;
+    }
+    c.ret(currentTask);
+}
+// void MPExit(OSStatus status): the task ends here, with that status for its notify queue.
+B32_THUNK(_MPExit) { throw Runtime::ThreadExit{c.args.u32()}; }
+// OSStatus MPSetTaskWeight(MPTaskID, MPTaskWeight): the host schedules its threads as it sees fit.
+B32_THUNK(_MPSetTaskWeight) {
+    c.args.u32();
+    c.args.u32();
+    c.ret(0);
+}
+// void MPYield(void)
+B32_THUNK(_MPYield) { std::this_thread::yield(); }
+
+// LogicalAddress MPAllocateAligned(ByteCount size, UInt8 alignment, MPOpaqueID options): alignment is a power
+// of two by its exponent (kMPAllocateDefaultAligned, 0, being eight bytes), and the clear option (1) zeroes it.
+B32_THUNK(_MPAllocateAligned) {
+    uint32_t size = c.args.u32(), exponent = c.args.u32() & 0xff, options = c.args.u32();
+    uint32_t alignment = 1u << std::clamp<uint32_t>(exponent ? exponent : 3, 3, 12);
+    GuestAddr block = c.heap.alloc(std::max<uint32_t>(size, 1), std::max<uint32_t>(alignment, 16));
+    if (block && (options & 1)) {
+        std::vector<uint8_t> zeros(size, 0);
+        c.mem.copyIn(block, zeros.data(), size);
+    }
+    c.ret(block);
+}
+// void MPFree(LogicalAddress)
+B32_THUNK(_MPFree) {
+    if (GuestAddr block = c.args.ptr()) c.heap.free(block);
+}
+
 // --- launchd and the bootstrap server ------------------------------------------------
 // A guest can't reach host services by Mach message, so it finds none of them.
 
@@ -545,6 +754,75 @@ B32_THUNK(_launch_data_new_string) { c.ret(0); }
 B32_THUNK(_launch_data_dict_insert) { c.ret(0); }
 B32_THUNK(_launch_data_free) {}
 B32_THUNK(_launch_msg) { c.ret(0); }
+
+// --- CarbonCore's atomic arithmetic (DriverSynchronization.h) ----------------------------------------
+// Each answers the value from before.
+
+// SInt32 IncrementAtomic(SInt32 *), DecrementAtomic(SInt32 *), AddAtomic(SInt32 amount, SInt32 *)
+B32_THUNK(_IncrementAtomic) { c.ret(uint32_t(c.mem.atomicUpdate<int32_t>(c.args.ptr(), [](int32_t v) { return v + 1; }))); }
+B32_THUNK(_DecrementAtomic) { c.ret(uint32_t(c.mem.atomicUpdate<int32_t>(c.args.ptr(), [](int32_t v) { return v - 1; }))); }
+B32_THUNK(_AddAtomic) {
+    int32_t amount = c.args.i32();
+    c.ret(uint32_t(c.mem.atomicUpdate<int32_t>(c.args.ptr(), [amount](int32_t v) { return v + amount; })));
+}
+
+// Boolean CompareAndSwap(UInt32 old, UInt32 new, UInt32 *value): the swap, if the value was still the old one.
+B32_THUNK(_CompareAndSwap) {
+    uint32_t expected = c.args.u32(), desired = c.args.u32();
+    c.ret(c.mem.atomicCompareExchange<uint32_t>(c.args.ptr(), expected, desired) ? 1 : 0);
+}
+// Boolean TestAndSet(UInt32 bit, void *start), TestAndClear: the bit numbered from the first byte's high bit;
+// the answer is whether it was set before.
+namespace {
+// Atomically, on the aligned word that holds the byte: the mask is laid out as the byte's place in memory.
+bool changeBit(Call &c, bool set) {
+    uint32_t bit = c.args.u32();
+    GuestAddr byte = c.args.ptr() + bit / 8;
+    uint8_t layout[4] = {0, 0, 0, 0};
+    layout[byte % 4] = uint8_t(0x80 >> (bit % 8));
+    uint32_t raw;
+    std::memcpy(&raw, layout, 4);
+    uint32_t mask = GuestMemory::inGuestOrder(raw);
+    uint32_t before = c.mem.atomicUpdate<uint32_t>(byte & ~3u, [&](uint32_t v) { return set ? v | mask : v & ~mask; });
+    return before & mask;
+}
+}  // namespace
+B32_THUNK(_TestAndSet) { c.ret(changeBit(c, true)); }
+B32_THUNK(_TestAndClear) { c.ret(changeBit(c, false)); }
+
+// --- the 80-bit extended (fp.h's extended80: an exponent word, then the mantissa in four words) ------------
+
+// void dtox80(const double *x, extended80 *out): the double exactly, with the 64-bit mantissa's integer bit.
+B32_THUNK(_dtox80) {
+    GuestAddr in = c.args.ptr(), out = c.args.ptr();
+    double x = c.mem.read<double>(in);
+    uint16_t sign = std::signbit(x) ? 0x8000 : 0, exponent = 0;
+    uint64_t mantissa = 0;
+    if (std::isnan(x)) {
+        exponent = 0x7fff;
+        mantissa = 0xC000000000000000ull;
+    } else if (std::isinf(x)) {
+        exponent = 0x7fff;
+        mantissa = 0x8000000000000000ull;
+    } else if (x != 0) {
+        int e = 0;
+        double fraction = std::frexp(std::fabs(x), &e);  // [0.5, 1)
+        exponent = uint16_t(e - 1 + 16383);
+        mantissa = uint64_t(std::ldexp(fraction, 64));
+    }
+    const uint16_t words[5] = {uint16_t(sign | exponent), uint16_t(mantissa >> 48), uint16_t(mantissa >> 32), uint16_t(mantissa >> 16),
+                               uint16_t(mantissa)};
+    c.mem.writeArray<uint16_t>(out, words, 5);
+}
+// double x80tod(const extended80 *)
+B32_THUNK(_x80tod) {
+    GuestAddr in = c.args.ptr();
+    std::vector<uint16_t> words = c.mem.readArray<uint16_t>(in, 5);
+    int exponent = words[0] & 0x7fff;
+    uint64_t mantissa = uint64_t(words[1]) << 48 | uint64_t(words[2]) << 32 | uint64_t(words[3]) << 16 | words[4];
+    double x = exponent == 0x7fff ? (mantissa << 1 ? NAN : INFINITY) : std::ldexp(double(mantissa), exponent - 16383 - 63);
+    c.retF64((words[0] & 0x8000) ? -x : x);
+}
 
 // --- fp.h's decimal conversions (the old SANE interface, still in libSystem) --------------------------------
 

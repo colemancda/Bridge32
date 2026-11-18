@@ -466,6 +466,19 @@ B32_THUNK(_ExtAudioFileOpenURL) {
     c.ret(uint32_t(status));
 }
 
+// OSStatus ExtAudioFileOpen(const FSRef *, ExtAudioFileRef *): the FSRef is the host's (see carbon.mm), so
+// it names the file as it is.
+B32_THUNK(_ExtAudioFileOpen) {
+    GuestAddr ref = c.args.ptr();
+    GuestAddr out = c.args.ptr();
+    CFURLRef url = ref ? CFURLCreateFromFSRef(nullptr, c.mem.ptr<FSRef>(ref)) : nullptr;
+    ExtAudioFileRef file = nullptr;
+    OSStatus status = url ? ExtAudioFileOpenURL(url, &file) : OSStatus(-43);
+    if (url) CFRelease(url);
+    if (out) c.mem.write<uint32_t>(out, file ? hostHandle(file) : 0);
+    c.ret(uint32_t(status));
+}
+
 B32_THUNK(_ExtAudioFileDispose) {
     ExtAudioFileRef file = extAudioFile(c.args.u32());
     OSStatus status = ExtAudioFileDispose(file);
@@ -480,6 +493,19 @@ B32_THUNK(_ExtAudioFileGetProperty) {
     GuestAddr size = c.args.ptr(), data = c.args.ptr();
     c.ret(uint32_t(ExtAudioFileGetProperty(file, property, size ? c.mem.ptr<UInt32>(size) : nullptr,
                                            data ? c.mem.ptr<void>(data) : nullptr)));
+}
+
+// OSStatus ExtAudioFileGetPropertyInfo(ExtAudioFileRef, ExtAudioFilePropertyID, UInt32 *size, Boolean *writable)
+B32_THUNK(_ExtAudioFileGetPropertyInfo) {
+    ExtAudioFileRef file = extAudioFile(c.args.u32());
+    ExtAudioFilePropertyID property = c.args.u32();
+    GuestAddr sizeOut = c.args.ptr(), writableOut = c.args.ptr();
+    UInt32 size = 0;
+    Boolean writable = false;
+    OSStatus status = ExtAudioFileGetPropertyInfo(file, property, &size, &writable);
+    if (sizeOut) c.mem.write<uint32_t>(sizeOut, size);
+    if (writableOut) c.mem.write<uint8_t>(writableOut, writable);
+    c.ret(uint32_t(status));
 }
 
 // OSStatus ExtAudioFileSetProperty(ExtAudioFileRef, ExtAudioFilePropertyID, UInt32 size, const void *data)

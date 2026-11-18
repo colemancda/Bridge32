@@ -21,13 +21,16 @@ ARRAY = {"glVertexPointer", "glNormalPointer", "glColorPointer", "glIndexPointer
 ELEMENT = {"glDrawElements", "glDrawRangeElements", "glDrawRangeElementsEXT", "glDrawElementsBaseVertex",
            "glDrawRangeElementsBaseVertex", "glDrawElementsInstancedBaseVertex", "glDrawElementsInstancedARB",
            "glDrawElementsInstancedEXT", "glDrawElementsInstanced"}
-SKIP = {"glMapBuffer", "glMapBufferARB", "glMapBufferRange", "glMapObjectBufferATI", "glCompileShader", "glShaderSource"}
+SKIP = {"glMapBuffer", "glMapBufferARB", "glMapBufferRange", "glMapObjectBufferATI", "glCompileShader", "glShaderSource",
+        "glCompileShaderARB", "glShaderSourceARB"}
 
 INTEGER = {"GLint": "i", "GLsizei": "i", "GLshort": "i", "GLbyte": "i", "GLclampx": "i", "GLfixed": "i",
            "GLenum": "u", "GLuint": "u", "GLbitfield": "u", "GLboolean": "u", "GLubyte": "u", "GLushort": "u",
            "GLfloat": "f", "GLclampf": "f", "GLdouble": "d", "GLclampd": "d",
            "GLintptr": "z", "GLsizeiptr": "z", "GLintptrARB": "z", "GLsizeiptrARB": "z",
-           "GLhandleARB": "h"}
+           # On the Mac a GLhandleARB is a pointer whose value is the object's name, so a program can make
+           # a shader with the ARB calls and use it with the core ones: the guest's 32-bit value, widened.
+           "GLhandleARB": "z"}
 RETURNS = dict(INTEGER, GLboolean="B", void="v")
 
 

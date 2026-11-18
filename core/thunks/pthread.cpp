@@ -3,6 +3,7 @@
 // host ones, looked up by guest address. That covers objects set up with
 // static initializers (PTHREAD_MUTEX_INITIALIZER) as well as *_init.
 
+#include "core/thunks/Threads.h"
 #include "Thunks.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
@@ -177,6 +178,26 @@ B32_THUNK(_pthread_create) {
     c.mem.write<uint32_t>(out, handle);
     c.ret(0);
 }
+
+namespace b32 {
+GuestAddr startedGuestThread() { return selfHandle; }
+GuestAddr startGuestThread(Runtime &rt, GuestAddr fn, GuestAddr arg, std::function<void(uint32_t result)> finished) {
+    GuestAddr handle = rt.heap().calloc(1, 16);
+    uint32_t slot = takeSlot();
+    std::lock_guard guard(threadsLock);
+    std::thread host([&rt, handle, slot, fn, arg, finished = std::move(finished)] {
+        selfHandle = handle;
+        uint32_t result = rt.runThread(slot, fn, arg);
+        if (finished) finished(result);
+        std::lock_guard guard(threadsLock);
+        slotsUsed[slot] = false;
+        ports.erase(handle);
+    });
+    ports[handle] = pthread_mach_thread_np(host.native_handle());
+    host.detach();
+    return handle;
+}
+}  // namespace b32
 
 // int pthread_join(pthread_t thread, void **value)
 B32_THUNK(_pthread_join) {

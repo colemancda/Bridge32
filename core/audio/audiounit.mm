@@ -145,6 +145,29 @@ B32_THUNK(_AudioComponentInstanceDispose) {
     c.ret(uint32_t(status));
 }
 
+// The old Component Manager's names for the same thing, with the same shapes: Component
+// FindNextComponent(Component, ComponentDescription *) (whose description is AudioComponentDescription's),
+// OSErr OpenAComponent(Component, ComponentInstance *), OSErr CloseComponent(ComponentInstance).
+B32_THUNK(_FindNextComponent) { thunk__AudioComponentFindNext(c); }
+B32_THUNK(_OpenAComponent) { thunk__AudioComponentInstanceNew(c); }
+B32_THUNK(_CloseComponent) { thunk__AudioComponentInstanceDispose(c); }
+// OSErr GetComponentInfo(Component, ComponentDescription *, Handle name, Handle info, Handle icon): the
+// description; the handles are left as they are.
+B32_THUNK(_GetComponentInfo) {
+    auto component = static_cast<AudioComponent>(hostPointer(c.args.u32()));
+    GuestAddr out = c.args.ptr();
+    AudioComponentDescription desc = {};
+    OSStatus status = component ? AudioComponentGetDescription(component, &desc) : OSStatus(kAudio_ParamError);
+    if (out && status == noErr) c.mem.copyIn(out, &desc, sizeof desc);
+    c.ret(uint32_t(status));
+}
+// Handle GetComponentInstanceStorage(ComponentInstance): what a component implementation keeps, which no
+// unit here has.
+B32_THUNK(_GetComponentInstanceStorage) {
+    c.args.u32();
+    c.ret(0);
+}
+
 B32_THUNK(_AudioUnitInitialize) {
     if (Unit *unit = unitFor(c, c.args.u32())) c.ret(uint32_t(AudioUnitInitialize(unit->host)));
 }
@@ -193,6 +216,27 @@ B32_THUNK(_AudioUnitSetProperty) {
 
 // OSStatus AudioUnitGetProperty(AudioUnit, AudioUnitPropertyID, AudioUnitScope,
 //     AudioUnitElement, void *outData, UInt32 *ioSize)
+// OSStatus AudioUnitGetPropertyInfo(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement,
+//                                   UInt32 *size, Boolean *writable)
+B32_THUNK(_AudioUnitGetPropertyInfo) {
+    Unit *unit = unitFor(c, c.args.u32());
+    if (!unit) return;
+    AudioUnitPropertyID property = c.args.u32();
+    AudioUnitScope scope = c.args.u32();
+    AudioUnitElement element = c.args.u32();
+    GuestAddr sizeOut = c.args.ptr(), writableOut = c.args.ptr();
+    UInt32 size = 0;
+    Boolean writable = false;
+    OSStatus status = AudioUnitGetPropertyInfo(unit->host, property, scope, element, &size, &writable);
+    // A property holding a CF object is a 4-byte reference here (see AudioUnitGetProperty).
+    if (property == kAudioUnitProperty_ClassInfo || property == kAudioUnitProperty_ElementName ||
+        property == kAudioUnitProperty_ParameterValueStrings || property == kAudioUnitProperty_FactoryPresets)
+        size = 4;
+    if (sizeOut) c.mem.write<uint32_t>(sizeOut, size);
+    if (writableOut) c.mem.write<uint8_t>(writableOut, writable);
+    c.ret(uint32_t(status));
+}
+
 B32_THUNK(_AudioUnitGetProperty) {
     Unit *unit = unitFor(c, c.args.u32());
     if (!unit) return;
@@ -436,4 +480,29 @@ B32_THUNK(_AUGraphSetNodeInputCallback) {
     auto *callback = new Callback{data ? c.mem.read<uint32_t>(data) : 0, data ? c.mem.read<uint32_t>(data + 4) : 0};
     AURenderCallbackStruct host = {callback->proc ? callGuest : nullptr, callback};
     c.ret(uint32_t(AUGraphSetNodeInputCallback(graph, node, input, &host)));
+}
+
+// --- AudioFormat: what the system knows about formats ------------------------------------------
+// The specifiers and answers games ask about (an AudioStreamBasicDescription, a format ID, a list of them)
+// have the same layout in both ABIs.
+
+// OSStatus AudioFormatGetPropertyInfo(AudioFormatPropertyID, UInt32 specifierSize, const void *specifier,
+//                                     UInt32 *size)
+B32_THUNK(_AudioFormatGetPropertyInfo) {
+    AudioFormatPropertyID property = c.args.u32();
+    UInt32 specifierSize = c.args.u32();
+    GuestAddr specifier = c.args.ptr(), sizeOut = c.args.ptr();
+    UInt32 size = 0;
+    OSStatus status = AudioFormatGetPropertyInfo(property, specifierSize, specifier ? c.mem.ptr<void>(specifier) : nullptr, &size);
+    if (sizeOut) c.mem.write<uint32_t>(sizeOut, size);
+    c.ret(uint32_t(status));
+}
+// OSStatus AudioFormatGetProperty(AudioFormatPropertyID, UInt32 specifierSize, const void *specifier,
+//                                 UInt32 *ioSize, void *data)
+B32_THUNK(_AudioFormatGetProperty) {
+    AudioFormatPropertyID property = c.args.u32();
+    UInt32 specifierSize = c.args.u32();
+    GuestAddr specifier = c.args.ptr(), size = c.args.ptr(), data = c.args.ptr();
+    c.ret(uint32_t(AudioFormatGetProperty(property, specifierSize, specifier ? c.mem.ptr<void>(specifier) : nullptr,
+                                          size ? c.mem.ptr<UInt32>(size) : nullptr, data ? c.mem.ptr<void>(data) : nullptr)));
 }

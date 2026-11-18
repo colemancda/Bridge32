@@ -300,12 +300,18 @@ void snapshotIfAsked() {
     log("frame %d: viewport %dx%d, error 0x%x, framebuffer %d status 0x%x, context %p view %s window %p layer %p renderer %s", frames, w, h, glGetError(),
         binding, glCheckFramebufferStatus(GL_FRAMEBUFFER), current, object_getClassName(current.view), current.view.window, current.view.layer, glGetString(GL_RENDERER));
     if (w <= 0 || h <= 0) return;
+    // Opaque, as the screen shows it: what a game leaves in alpha (a glow's strength, nothing at all) isn't
+    // part of the picture.
     NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:w pixelsHigh:h bitsPerSample:8
-        samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 4 bitsPerPixel:32];
-    std::vector<uint8_t> flipped(size_t(w) * h * 4);
+        samplesPerPixel:3 hasAlpha:NO isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:w * 3 bitsPerPixel:24];
+    std::vector<uint8_t> flipped(size_t(w) * h * 3);
     glReadBuffer(GL_BACK);
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, flipped.data());
-    for (int y = 0; y < h; y++) std::memcpy(rep.bitmapData + y * w * 4, flipped.data() + (h - 1 - y) * w * 4, size_t(w) * 4);
+    GLint alignment = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &alignment);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, flipped.data());
+    glPixelStorei(GL_PACK_ALIGNMENT, alignment);
+    for (int y = 0; y < h; y++) std::memcpy(rep.bitmapData + y * w * 3, flipped.data() + (h - 1 - y) * w * 3, size_t(w) * 3);
     [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:@(path) atomically:YES];
     [rep release];
 }
@@ -340,6 +346,10 @@ B32_THUNK(_glCompileShader) {
     glGetShaderInfoLog(shader, GLsizei(info.size()), nullptr, info.data());
     log("shader %u compiled %s\n%s\n--- log:\n%s", shader, status ? "ok" : "FAILED", source.c_str(), info.c_str());
 }
+// The ARB names for the same calls: on the Mac a GLhandleARB is the object's name, so a shader made with
+// either set of calls takes the other's.
+B32_THUNK(_glShaderSourceARB) { thunk__glShaderSource(c); }
+B32_THUNK(_glCompileShaderARB) { thunk__glCompileShader(c); }
 
 // void *glMapBuffer returns host memory no guest pointer can reach.
 B32_THUNK(_glMapBuffer) {
