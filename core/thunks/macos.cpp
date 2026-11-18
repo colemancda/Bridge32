@@ -8,6 +8,8 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <cmath>
+#include <string>
 #include <grp.h>
 #include <iconv.h>
 #include <mach/mach.h>
@@ -543,3 +545,58 @@ B32_THUNK(_launch_data_new_string) { c.ret(0); }
 B32_THUNK(_launch_data_dict_insert) { c.ret(0); }
 B32_THUNK(_launch_data_free) {}
 B32_THUNK(_launch_msg) { c.ret(0); }
+
+// --- fp.h's decimal conversions (the old SANE interface, still in libSystem) --------------------------------
+
+// void num2dec(const decform *format, double_t x, decimal *out).
+// decform: a style byte (0 for a count of significant digits, 1 for a count of digits after the point), a
+// spare byte, the count as a short. decimal: a sign byte, a spare byte, the exponent as a short, then the
+// digits as a length byte and up to 36 characters. The value is the digits read as a whole number, times
+// ten to the exponent. Zero is the one digit "0", an infinity is "I" and a NaN is "N".
+B32_THUNK(_num2dec) {
+    constexpr int kMostDigits = 36;
+    GuestAddr format = c.args.ptr();
+    double x = c.args.f64();
+    GuestAddr out = c.args.ptr();
+    bool fixed = c.mem.read<uint8_t>(format) == 1;
+    int count = c.mem.read<int16_t>(format + 2);
+    std::string digits;
+    int exponent = 0;
+    double magnitude = std::fabs(x);
+    if (std::isnan(x)) {
+        digits = "N";
+    } else if (std::isinf(x)) {
+        digits = "I";
+    } else if (magnitude == 0) {
+        digits = "0";
+    } else {
+        char text[512];
+        if (fixed) {
+            int places = std::max(0, std::min(count, 100));
+            std::snprintf(text, sizeof text, "%.*f", places, magnitude);
+            for (const char *p = text; *p; p++)
+                if (*p != '.') digits += *p;
+            digits.erase(0, std::min(digits.find_first_not_of('0'), digits.size()));
+            exponent = -places;
+            if (digits.empty()) {
+                digits = "0";
+                exponent = 0;
+            }
+        }
+        // That many significant digits, which is also what a fixed form too long to hold comes down to.
+        if (!fixed || int(digits.size()) > kMostDigits) {
+            int significant = fixed ? kMostDigits : std::max(1, std::min(count, kMostDigits));
+            std::snprintf(text, sizeof text, "%.*e", significant - 1, magnitude);
+            digits.clear();
+            const char *p = text;
+            for (; *p && *p != 'e'; p++)
+                if (*p != '.') digits += *p;
+            exponent = std::atoi(p + 1) - (significant - 1);
+        }
+    }
+    c.mem.write<uint8_t>(out, std::signbit(x) ? 1 : 0);
+    c.mem.write<uint8_t>(out + 1, 0);
+    c.mem.write<int16_t>(out + 2, int16_t(exponent));
+    c.mem.write<uint8_t>(out + 4, uint8_t(digits.size()));
+    c.mem.copyIn(out + 5, digits.data(), digits.size());
+}
