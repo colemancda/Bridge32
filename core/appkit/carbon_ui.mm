@@ -46,6 +46,12 @@ constexpr uint32_t kDirectObject = fourCC("----"), kKeyCodeParam = fourCC("kcod"
 constexpr uint32_t kCommandProcess = 1, kWindowClose = 72;
 constexpr uint32_t kKeyDown = 1, kKeyRepeat = 2, kKeyUp = 3, kModifiersChanged = 4;
 constexpr uint32_t kMouseDown = 1, kMouseUp = 2, kMouseMoved = 5, kMouseDragged = 6;
+constexpr uint32_t kMouseWheelMoved = 10;
+constexpr uint32_t kClassTextInput = fourCC("text"), kTextInputUnicodeForKeyEvent = 2;
+constexpr uint32_t kTextInputTextParam = fourCC("tstx"), kTextInputKeyEventParam = fourCC("tsky");
+constexpr uint32_t kMouseDeltaParam = fourCC("mdta"), kWindowMouseLocationParam = fourCC("wmou"), kClickCountParam = fourCC("ccnt"),
+                   kMouseChordParam = fourCC("chor"), kWheelAxisParam = fourCC("mwax"), kWheelDeltaParam = fourCC("mwdl");
+constexpr uint32_t kTypeHIPoint = fourCC("hipt"), kTypeQDPoint = fourCC("QDpt");
 
 enum class Kind { Button, CheckBox, StaticText, EditText, Popup, Box, Separator, Bar, Arrows, Pane, Image };
 
@@ -83,6 +89,7 @@ struct CWindow {
 struct CEvent {
     uint32_t cls, kind;
     double when;
+    int references = 1;  // the creator's; RetainEvent and the event queue add their own
     std::map<uint32_t, std::vector<uint8_t>> params;
 };
 
@@ -140,6 +147,11 @@ void freeEvent(Runtime &rt, GuestAddr handle) {
     events.erase(handle);
     rt.heap().free(handle);
 }
+// Drops one reference, and the event with its last.
+void releaseEvent(Runtime &rt, GuestAddr handle) {
+    auto it = events.find(handle);
+    if (it != events.end() && --it->second->references <= 0) freeEvent(rt, handle);
+}
 
 // Runs the guest's handlers for an event at `target`, then up its chain.
 int32_t dispatchTo(GuestAddr handle, GuestAddr target) {
@@ -172,7 +184,7 @@ void sendCommand(Runtime &rt, uint32_t command, GuestAddr target, GuestAddr menu
     std::memcpy(hc + 12, &itemGuest, 2);
     setParamBytes(event, kDirectObject, hc, sizeof hc);
     dispatchTo(event, target);
-    freeEvent(rt, event);
+    releaseEvent(rt, event);
 }
 
 CControl *controlOf(GuestAddr handle) {
@@ -185,6 +197,18 @@ CWindow *windowOf(GuestAddr handle) {
 }
 Runtime &runtime() { return Bridge::shared()->runtime(); }
 
+}  // namespace
+
+namespace {
+// The view a game's full-screen picture is in, and the resolution the game believes the screen has: its
+// mouse positions are in that screen's coordinates, wherever the view really is.
+NSView *gameView = nil;
+NSSize gameSize = NSZeroSize;
+// Set while an event is being pulled for ReceiveNextEvent or WaitNextEvent, which hand it to the guest
+// themselves: then the view doesn't also send it to the handlers.
+bool handingEventToGuest = false;
+void deliverMouse(NSView *view, NSEvent *event, uint32_t kind);
+void deliverKey(NSView *view, NSEvent *event, uint32_t kind);
 }  // namespace
 
 // AppKit sends a control's action and a window's close here.
@@ -207,11 +231,19 @@ Runtime &runtime() { return Bridge::shared()->runtime(); }
             GuestAddr event = makeEvent(runtime(), kClassWindow, kWindowClose);
             setParam<uint32_t>(event, kDirectObject, handle);
             int32_t result = dispatchTo(event, window->target);
-            freeEvent(runtime(), event);
+            releaseEvent(runtime(), event);
             return result == kEventNotHandled;
         }
     return YES;
 }
+@end
+
+// A borderless window refuses the keyboard unless it says otherwise, and a full-screen game needs it.
+@interface B32GameWindow : NSWindow
+@end
+@implementation B32GameWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return YES; }
 @end
 
 @interface B32CarbonContent : NSView
@@ -219,8 +251,21 @@ Runtime &runtime() { return Bridge::shared()->runtime(); }
 @implementation B32CarbonContent
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return YES; }
-- (void)keyDown:(NSEvent *)event {}  // tracked at the queue; no beep
-- (void)keyUp:(NSEvent *)event {}
+// Keys are tracked at the queue for GetKeys; here they go to the handlers of a guest that has an event
+// loop run rather than pulling events itself. No beep either way.
+- (void)keyDown:(NSEvent *)event { deliverKey(self, event, event.isARepeat ? kKeyRepeat : kKeyDown); }
+- (void)keyUp:(NSEvent *)event { deliverKey(self, event, kKeyUp); }
+- (void)mouseDown:(NSEvent *)event { deliverMouse(self, event, kMouseDown); }
+- (void)mouseUp:(NSEvent *)event { deliverMouse(self, event, kMouseUp); }
+- (void)rightMouseDown:(NSEvent *)event { deliverMouse(self, event, kMouseDown); }
+- (void)rightMouseUp:(NSEvent *)event { deliverMouse(self, event, kMouseUp); }
+- (void)otherMouseDown:(NSEvent *)event { deliverMouse(self, event, kMouseDown); }
+- (void)otherMouseUp:(NSEvent *)event { deliverMouse(self, event, kMouseUp); }
+- (void)mouseMoved:(NSEvent *)event { deliverMouse(self, event, kMouseMoved); }
+- (void)mouseDragged:(NSEvent *)event { deliverMouse(self, event, kMouseDragged); }
+- (void)rightMouseDragged:(NSEvent *)event { deliverMouse(self, event, kMouseDragged); }
+- (void)otherMouseDragged:(NSEvent *)event { deliverMouse(self, event, kMouseDragged); }
+- (void)scrollWheel:(NSEvent *)event { deliverMouse(self, event, kMouseWheelMoved); }
 @end
 
 namespace {
@@ -495,7 +540,7 @@ NSPoint globalMouse() {
     return NSMakePoint(p.x, NSScreen.screens.firstObject.frame.size.height - p.y);
 }
 
-PumpedEvent pumpOne(double seconds) {
+PumpedEvent pumpOne(double seconds, bool handedToGuest = true) {
     b32::appkit::ensureCarbonApplication();
     PumpedEvent out;
     @autoreleasepool {
@@ -533,10 +578,103 @@ PumpedEvent pumpOne(double seconds) {
             break;
         default: break;
         }
+        handingEventToGuest = handedToGuest;
         [NSApp sendEvent:event];
+        handingEventToGuest = false;
         [NSApp updateWindows];
     }
     return out;
+}
+
+// --- events for a guest whose handlers wait on an event loop ---------------------------------------
+
+// The target an event in `view` starts at: its window's, or the application's for the game view.
+GuestAddr targetOf(NSView *view) {
+    for (auto &[handle, window] : windows)
+        if (window->window == view.window) return window->target;
+    return applicationTarget;
+}
+// An HIPoint: two floats, kept in the guest's byte order.
+void setPoint(GuestAddr event, uint32_t name, double x, double y) {
+    const float values[2] = {float(x), float(y)};
+    uint32_t words[2];
+    std::memcpy(words, values, sizeof words);
+    for (uint32_t &word : words) word = GuestMemory::inGuestOrder(word);
+    setParamBytes(event, name, words, sizeof words);
+}
+void deliverMouse(NSView *view, NSEvent *event, uint32_t kind) {
+    GuestAddr target = targetOf(view);
+    if (handingEventToGuest || !target) return;
+    Runtime &rt = runtime();
+    GuestAddr carbon = makeEvent(rt, kClassMouse, kind);
+    // Where in the view, from its top left; for the game view, in the screen the game believes in.
+    NSPoint local = [view convertPoint:event.locationInWindow fromView:nil];
+    NSPoint where = globalMouse();
+    double scaleX = 1, scaleY = 1;
+    if (view == gameView && gameSize.width > 0 && view.bounds.size.width > 0) {
+        scaleX = gameSize.width / view.bounds.size.width;
+        scaleY = gameSize.height / view.bounds.size.height;
+        local = NSMakePoint(local.x * scaleX, local.y * scaleY);
+        where = local;
+    }
+    setPoint(carbon, kMouseLocationParam, where.x, where.y);
+    setPoint(carbon, kWindowMouseLocationParam, local.x, local.y);
+    setParam<uint32_t>(carbon, kModifiersParam, carbonModifiers(event.modifierFlags));
+    setParam<uint32_t>(carbon, kMouseChordParam, uint32_t(NSEvent.pressedMouseButtons));
+    if (kind == kMouseWheelMoved) {
+        bool vertical = event.scrollingDeltaY != 0 || event.scrollingDeltaX == 0;
+        double delta = vertical ? event.scrollingDeltaY : event.scrollingDeltaX;
+        setParam<uint16_t>(carbon, kWheelAxisParam, vertical ? 1 : 0);
+        setParam<int32_t>(carbon, kWheelDeltaParam, delta > 0 ? 1 : delta < 0 ? -1 : 0);
+    } else {
+        // Carbon numbers the buttons left, right, middle; AppKit left, right, then the others.
+        setParam<uint16_t>(carbon, kMouseButtonParam, uint16_t(event.buttonNumber + 1));
+        setPoint(carbon, kMouseDeltaParam, event.deltaX * scaleX, event.deltaY * scaleY);
+        if (kind == kMouseDown || kind == kMouseUp) setParam<uint32_t>(carbon, kClickCountParam, uint32_t(event.clickCount));
+    }
+    dispatchTo(carbon, target);
+    releaseEvent(rt, carbon);
+}
+// The character Carbon gives for a key: AppKit's function-key code points and its delete are the old
+// control characters there.
+unichar carbonCharacter(unichar c) {
+    switch (c) {
+    case NSDeleteCharacter: return 0x08;
+    case NSUpArrowFunctionKey: return 0x1E;
+    case NSDownArrowFunctionKey: return 0x1F;
+    case NSLeftArrowFunctionKey: return 0x1C;
+    case NSRightArrowFunctionKey: return 0x1D;
+    case NSDeleteFunctionKey: return 0x7F;
+    case NSHomeFunctionKey: return 0x01;
+    case NSEndFunctionKey: return 0x04;
+    case NSPageUpFunctionKey: return 0x0B;
+    case NSPageDownFunctionKey: return 0x0C;
+    default: return c;
+    }
+}
+void deliverKey(NSView *view, NSEvent *event, uint32_t kind) {
+    GuestAddr target = targetOf(view);
+    if (handingEventToGuest || !target) return;
+    Runtime &rt = runtime();
+    GuestAddr carbon = makeEvent(rt, kClassKeyboard, kind);
+    NSString *chars = event.charactersIgnoringModifiers;
+    setParam<uint32_t>(carbon, kKeyCodeParam, event.keyCode);
+    setParam<uint8_t>(carbon, kMacCharParam, chars.length ? uint8_t(carbonCharacter([chars characterAtIndex:0])) : 0);
+    setParam<uint32_t>(carbon, kModifiersParam, carbonModifiers(event.modifierFlags));
+    int32_t result = dispatchTo(carbon, target);
+    // A key press nobody took as a key becomes text: the characters typed, with the key event they came from.
+    NSString *typed = event.characters;
+    if (result == kEventNotHandled && kind != kKeyUp && typed.length && !(event.modifierFlags & NSEventModifierFlagCommand)) {
+        GuestAddr text = makeEvent(rt, kClassTextInput, kTextInputUnicodeForKeyEvent);
+        std::vector<unichar> units(typed.length);
+        [typed getCharacters:units.data() range:NSMakeRange(0, typed.length)];
+        for (unichar &unit : units) unit = GuestMemory::inGuestOrder(carbonCharacter(unit));
+        setParamBytes(text, kTextInputTextParam, units.data(), units.size() * sizeof(unichar));
+        setParam<uint32_t>(text, kTextInputKeyEventParam, carbon);
+        dispatchTo(text, target);
+        releaseEvent(rt, text);
+    }
+    releaseEvent(rt, carbon);
 }
 }  // namespace
 
@@ -578,17 +716,54 @@ NSView *carbonFullScreenView(int &width, int &height) {
             window.releasedWhenClosed = NO;
             [window center];
             window.contentView = [[B32CarbonContent alloc] initWithFrame:window.contentView.bounds];
+            window.acceptsMouseMovedEvents = YES;
             [window makeKeyAndOrderFront:nil];
+            [window makeFirstResponder:window.contentView];
+            gameView = window.contentView;
+            gameSize = NSMakeSize(width, height);
             return window.contentView;
         }
-        window = [[NSWindow alloc] initWithContentRect:NSScreen.mainScreen.frame styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+        // Full screen as it was before Lion gave it a space of its own: a borderless window over the whole
+        // display, above the menu bar, with the menu bar and the Dock put away. The screen the game believes
+        // in is the mode it asked for (or else the one there is), and its picture is scaled to the display
+        // at that shape, with black beside it where the display's shape differs.
+        NSRect screen = NSScreen.mainScreen.frame;
+        if (width <= 0 || height <= 0) {
+            width = requestedWidth > 0 ? requestedWidth : int(screen.size.width);
+            height = requestedHeight > 0 ? requestedHeight : int(screen.size.height);
+        }
+        window = [[B32GameWindow alloc] initWithContentRect:screen styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
         window.level = NSMainMenuWindowLevel + 1;
-        window.contentView = [[B32CarbonContent alloc] initWithFrame:window.contentView.bounds];
+        window.backgroundColor = NSColor.blackColor;
+        window.releasedWhenClosed = NO;
+        window.acceptsMouseMovedEvents = YES;
+        double scale = std::min(screen.size.width / width, screen.size.height / height);
+        NSSize fitted = NSMakeSize(std::floor(width * scale), std::floor(height * scale));
+        NSRect frame = NSMakeRect(std::floor((screen.size.width - fitted.width) / 2), std::floor((screen.size.height - fitted.height) / 2),
+                                  fitted.width, fitted.height);
+        gameView = [[B32CarbonContent alloc] initWithFrame:frame];
+        gameSize = NSMakeSize(width, height);
+        [window.contentView addSubview:gameView];
+        NSApp.presentationOptions = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
         [window makeKeyAndOrderFront:nil];
+        [window makeFirstResponder:gameView];
+    } else {
+        width = int(gameSize.width);
+        height = int(gameSize.height);
     }
-    return window.contentView;
+    return gameView;
 }
-void pumpCarbonEvents(double seconds) { pumpOne(seconds); }
+// These events go to the guest's handlers, as nothing here hands them to it.
+void pumpCarbonEvents(double seconds) { pumpOne(seconds, false); }
+
+CGPoint gameScreenPoint(CGPoint point) {
+    if (!gameView || gameSize.width <= 0 || gameSize.height <= 0) return point;
+    NSSize bounds = gameView.bounds.size;
+    NSPoint inView = NSMakePoint(point.x * bounds.width / gameSize.width, point.y * bounds.height / gameSize.height);
+    NSPoint onScreen = [gameView.window convertPointToScreen:[gameView convertPoint:inView toView:nil]];
+    // Quartz measures down from the top of the first screen.
+    return CGPointMake(onScreen.x, NSScreen.screens.firstObject.frame.size.height - onScreen.y);
+}
 
 }  // namespace b32::appkit
 
@@ -1211,7 +1386,28 @@ B32_THUNK(_GetEventParameter) {
         c.ret(uint32_t(kEventParamNotFound));
         return;
     }
-    auto &bytes = it->second->params[name];
+    auto &stored = it->second->params[name];
+    // A point comes as the type asked for: an HIPoint's two floats or a QDPoint's two shorts, vertical first.
+    std::vector<uint8_t> bytes = stored;
+    if ((desired == kTypeQDPoint && stored.size() == 8) || (desired == kTypeHIPoint && stored.size() == 4)) {
+        if (stored.size() == 8) {
+            uint32_t words[2];
+            std::memcpy(words, stored.data(), 8);
+            float values[2];
+            for (uint32_t &word : words) word = GuestMemory::inGuestOrder(word);
+            std::memcpy(values, words, 8);
+            const int16_t point[2] = {GuestMemory::inGuestOrder(int16_t(values[1])), GuestMemory::inGuestOrder(int16_t(values[0]))};
+            bytes.assign(reinterpret_cast<const uint8_t *>(point), reinterpret_cast<const uint8_t *>(point) + 4);
+        } else {
+            int16_t point[2];
+            std::memcpy(point, stored.data(), 4);
+            const float values[2] = {float(GuestMemory::inGuestOrder(point[1])), float(GuestMemory::inGuestOrder(point[0]))};
+            uint32_t words[2];
+            std::memcpy(words, values, 8);
+            for (uint32_t &word : words) word = GuestMemory::inGuestOrder(word);
+            bytes.assign(reinterpret_cast<const uint8_t *>(words), reinterpret_cast<const uint8_t *>(words) + 8);
+        }
+    }
     if (actualType) c.mem.write<uint32_t>(actualType, desired);
     if (actualSize) c.mem.write<uint32_t>(actualSize, uint32_t(bytes.size()));
     if (data) c.mem.copyIn(data, bytes.data(), std::min(uint32_t(bytes.size()), size));
@@ -1232,7 +1428,13 @@ B32_THUNK(_SendEventToEventTarget) {
 }
 B32_THUNK(_ReleaseEvent) {
     GuestAddr event = c.args.ptr();
-    if (events.count(event)) freeEvent(c.rt, event);
+    releaseEvent(c.rt, event);
+}
+// EventRef RetainEvent(EventRef)
+B32_THUNK(_RetainEvent) {
+    GuestAddr event = c.args.ptr();
+    if (auto it = events.find(event); it != events.end()) it->second->references++;
+    c.ret(event);
 }
 B32_THUNK(_CallNextEventHandler) { c.ret(uint32_t(kEventNotHandled)); }
 B32_THUNK(_GetCurrentEventLoop) { c.ret(1); }
@@ -1397,15 +1599,27 @@ B32_THUNK(_SetMouseCoalescingEnabled) {
 B32_THUNK(_SetThemeCursor) { c.ret(0); }
 // EventQueueRef GetMainEventQueue(): the one queue.
 B32_THUNK(_GetMainEventQueue) { c.ret(1); }
-// OSStatus PostEventToQueue(queue, event, priority): delivered to the application's handlers; the
-// queue owns the event afterwards.
+// OSStatus PostEventToQueue(queue, event, priority): the queue keeps its own reference and the event reaches
+// the application's handlers when the event loop next runs, not before. A game that pumps the loop once a
+// frame posts an event, runs the loop, and has that event's handler quit it: delivered on the spot, the quit
+// would come before the loop it is meant to end.
 B32_THUNK(_PostEventToQueue) {
     c.args.u32();
     GuestAddr event = c.args.ptr();
-    if (events.count(event)) {
-        dispatchTo(event, appTarget(c));
-        freeEvent(c.rt, event);
+    auto it = events.find(event);
+    if (it == events.end()) {
+        c.ret(0);
+        return;
     }
+    it->second->references++;
+    GuestAddr target = appTarget(c);
+    Runtime *rt = &c.rt;
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, ^{
+        if (!events.count(event)) return;
+        dispatchTo(event, target);
+        releaseEvent(*rt, event);
+    });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
     c.ret(0);
 }
 B32_THUNK(_HIAboutBox) {

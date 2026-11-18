@@ -12,11 +12,18 @@
 
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 using namespace b32;
+
+namespace b32::gl {
+// core/gl/opengl.mm
+void swapGuestPixels();
+void snapshotPresented();
+}
 
 namespace {
 // AGL attribute numbers.
@@ -144,8 +151,14 @@ B32_THUNK(_aglDestroyContext) {
 B32_THUNK(_aglSetCurrentContext) {
     uint32_t handle = c.args.u32();
     currentHandle = handle;
-    if (NSOpenGLContext *context = contextOf(handle)) [context makeCurrentContext];
-    else [NSOpenGLContext clearCurrentContext];
+    if (NSOpenGLContext *context = contextOf(handle)) {
+        [context makeCurrentContext];
+        // Pixel store state is the context's own, so each is told once which byte order its pixels are in.
+        static std::unordered_set<uint32_t> prepared;
+        if (prepared.insert(handle).second) b32::gl::swapGuestPixels();
+    } else {
+        [NSOpenGLContext clearCurrentContext];
+    }
     c.ret(1);
 }
 B32_THUNK(_aglGetCurrentContext) { c.ret(currentHandle); }
@@ -159,7 +172,8 @@ B32_THUNK(_aglSetDrawable) {
 }
 B32_THUNK(_aglGetDrawable) { c.ret(0); }
 // GLboolean aglSetFullScreen(ctx, width, height, freq, device): the picture is
-// scaled to the display rather than changing the display's mode.
+// scaled to the display rather than changing the display's mode. A size of 0 is
+// the mode the display is in, which comes back as the size the game asked it for.
 B32_THUNK(_aglSetFullScreen) {
     NSOpenGLContext *context = contextOf(c.args.u32());
     GLint size[2] = {c.args.i32(), c.args.i32()};
@@ -175,6 +189,7 @@ B32_THUNK(_aglUpdateContext) {
     c.ret(1);
 }
 B32_THUNK(_aglSwapBuffers) {
+    b32::gl::snapshotPresented();
     [contextOf(c.args.u32()) flushBuffer];
     b32::appkit::pumpCarbonEvents(0);
 }

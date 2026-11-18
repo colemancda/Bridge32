@@ -4,6 +4,8 @@
 
 #include "core/mem/GuestMemory.h"
 
+#include <CoreGraphics/CoreGraphics.h>
+
 @class NSView;
 @class NSWindow;
 
@@ -30,6 +32,9 @@ NSView *carbonViewForPort(GuestAddr port);
 NSView *carbonFullScreenView(int &width, int &height);
 // Remembers the resolution a guest asked for, as CGDisplayBestModeForParameters is given it.
 void setRequestedDisplaySize(int width, int height);
+// A point on the screen a game believes it fills, as the point of the real screen that shows it: where the
+// cursor goes when the game moves it. The point itself when no game has a full-screen picture.
+CGPoint gameScreenPoint(CGPoint point);
 // Runs the Cocoa event queue, tracking key and mouse state, until something
 // arrives or `seconds` pass.
 void pumpCarbonEvents(double seconds);
