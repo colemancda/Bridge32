@@ -68,6 +68,148 @@ const CFunction kCGL[] = {
 };
 }  // namespace
 
+namespace b32::gl {
+// Tells the current context the pixels it is handed, and hands back, are in the guest's byte order.
+void swapGuestPixels() {
+#if defined(B32_GUEST_BIG_ENDIAN)
+    glPixelStorei(GL_UNPACK_SWAP_BYTES, GL_TRUE);
+    glPixelStorei(GL_PACK_SWAP_BYTES, GL_TRUE);
+#endif
+}
+}  // namespace b32::gl
+
+// --- big-endian guests ------------------------------------------------------------------------
+// The table hands a pointer argument to the host as it is, which suits bytes and nothing else: a PowerPC
+// guest's floats, doubles and ints behind a pointer are in its byte order. These are the fixed-function
+// calls that carry such values, converted on the way in or out; being registered before the table, they
+// are the ones called. Pixel data is left to GL itself (see glPixelStorei below). Client vertex arrays
+// aren't converted yet.
+#if defined(B32_GUEST_BIG_ENDIAN)
+namespace {
+// How many values a parameter of glFog, glLight, glMaterial, glLightModel, glTexEnv or glTexParameter has.
+size_t valueCount(GLenum name) {
+    switch (name) {
+    case GL_AMBIENT: case GL_DIFFUSE: case GL_SPECULAR: case GL_EMISSION: case GL_POSITION:
+    case GL_AMBIENT_AND_DIFFUSE: case GL_FOG_COLOR: case GL_LIGHT_MODEL_AMBIENT: case GL_TEXTURE_ENV_COLOR:
+    case GL_TEXTURE_BORDER_COLOR:
+        return 4;
+    case GL_SPOT_DIRECTION: case GL_COLOR_INDEXES:
+        return 3;
+    default:
+        return 1;
+    }
+}
+// A glGet's answer has as many values as its name says, which the host knows and this doesn't: the values
+// it wrote are the ones that no longer hold the filler.
+template <typename T, typename Get> void getValues(Call &c, Get get) {
+    GLenum name = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    constexpr size_t kMost = 32;
+    T values[kMost];
+    uint8_t filler[sizeof(T)];
+    std::memset(filler, 0xA5, sizeof filler);
+    for (T &value : values) std::memcpy(&value, filler, sizeof(T));
+    get(name, values);
+    size_t count = kMost;
+    while (count > 0 && std::memcmp(&values[count - 1], filler, sizeof(T)) == 0) count--;
+    if (out && count) c.mem.writeArray<T>(out, values, count);
+}
+}  // namespace
+
+#define B32_GL_FLOATS(name, count) \
+    B32_THUNK(_##name) { name(c.mem.readArray<GLfloat>(c.args.ptr(), count).data()); }
+#define B32_GL_DOUBLES(name, count) \
+    B32_THUNK(_##name) { name(c.mem.readArray<GLdouble>(c.args.ptr(), count).data()); }
+B32_GL_FLOATS(glLoadMatrixf, 16)
+B32_GL_FLOATS(glMultMatrixf, 16)
+B32_GL_DOUBLES(glLoadMatrixd, 16)
+B32_GL_DOUBLES(glMultMatrixd, 16)
+B32_GL_FLOATS(glColor3fv, 3)
+B32_GL_FLOATS(glColor4fv, 4)
+B32_GL_FLOATS(glVertex2fv, 2)
+B32_GL_FLOATS(glVertex3fv, 3)
+B32_GL_FLOATS(glVertex4fv, 4)
+B32_GL_FLOATS(glNormal3fv, 3)
+B32_GL_FLOATS(glTexCoord2fv, 2)
+B32_GL_FLOATS(glTexCoord3fv, 3)
+B32_GL_FLOATS(glRasterPos2fv, 2)
+
+// void glFogfv(pname, params), glLightModelfv(pname, params)
+B32_THUNK(_glFogfv) {
+    GLenum name = c.args.u32();
+    glFogfv(name, c.mem.readArray<GLfloat>(c.args.ptr(), valueCount(name)).data());
+}
+B32_THUNK(_glLightModelfv) {
+    GLenum name = c.args.u32();
+    glLightModelfv(name, c.mem.readArray<GLfloat>(c.args.ptr(), valueCount(name)).data());
+}
+// void glLightfv(light, pname, params), and the others with a target before the name.
+#define B32_GL_TARGET_FLOATS(function) \
+    B32_THUNK(_##function) { \
+        GLenum target = c.args.u32(), name = c.args.u32(); \
+        function(target, name, c.mem.readArray<GLfloat>(c.args.ptr(), valueCount(name)).data()); \
+    }
+B32_GL_TARGET_FLOATS(glLightfv)
+B32_GL_TARGET_FLOATS(glMaterialfv)
+B32_GL_TARGET_FLOATS(glTexEnvfv)
+B32_GL_TARGET_FLOATS(glTexParameterfv)
+B32_THUNK(_glTexParameteriv) {
+    GLenum target = c.args.u32(), name = c.args.u32();
+    glTexParameteriv(target, name, c.mem.readArray<GLint>(c.args.ptr(), valueCount(name)).data());
+}
+// void glClipPlane(plane, const GLdouble equation[4])
+B32_THUNK(_glClipPlane) {
+    GLenum plane = c.args.u32();
+    glClipPlane(plane, c.mem.readArray<GLdouble>(c.args.ptr(), 4).data());
+}
+
+B32_THUNK(_glGetFloatv) { getValues<GLfloat>(c, [](GLenum name, GLfloat *out) { glGetFloatv(name, out); }); }
+B32_THUNK(_glGetDoublev) { getValues<GLdouble>(c, [](GLenum name, GLdouble *out) { glGetDoublev(name, out); }); }
+B32_THUNK(_glGetIntegerv) { getValues<GLint>(c, [](GLenum name, GLint *out) { glGetIntegerv(name, out); }); }
+// void glGetTexParameteriv(target, pname, params), glGetTexLevelParameteriv(target, level, pname, params)
+B32_THUNK(_glGetTexParameteriv) {
+    GLenum target = c.args.u32(), name = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    GLint value = 0;
+    glGetTexParameteriv(target, name, &value);
+    if (out) c.mem.write<int32_t>(out, value);
+}
+B32_THUNK(_glGetTexLevelParameteriv) {
+    GLenum target = c.args.u32();
+    GLint level = c.args.i32();
+    GLenum name = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    GLint value = 0;
+    glGetTexLevelParameteriv(target, level, name, &value);
+    if (out) c.mem.write<int32_t>(out, value);
+}
+
+// void glGenTextures(n, GLuint *names), glDeleteTextures(n, const GLuint *names)
+B32_THUNK(_glGenTextures) {
+    GLsizei count = c.args.i32();
+    GuestAddr out = c.args.ptr();
+    if (count <= 0) return;
+    std::vector<GLuint> names(size_t(count), 0);
+    glGenTextures(count, names.data());
+    c.mem.writeArray<GLuint>(out, names.data(), names.size());
+}
+B32_THUNK(_glDeleteTextures) {
+    GLsizei count = c.args.i32();
+    GuestAddr names = c.args.ptr();
+    if (count > 0) glDeleteTextures(count, c.mem.readArray<GLuint>(names, size_t(count)).data());
+}
+
+// Pixels are the guest's too: its 16 and 32-bit components are swapped by GL, which a context is told to
+// do when it is first made current (b32::gl::swapGuestPixels), so a guest asking for swapped bytes is
+// asking for the host's own order.
+B32_THUNK(_glPixelStorei) {
+    GLenum name = c.args.u32();
+    GLint value = c.args.i32();
+    if (name == GL_UNPACK_SWAP_BYTES || name == GL_PACK_SWAP_BYTES) value = !value;
+    glPixelStorei(name, value);
+}
+#endif
+
 B32_C_FUNCTIONS(kFunctions, library);
 B32_C_FUNCTIONS(kCGL, library);
 
@@ -134,6 +276,11 @@ void snapshotIfAsked() {
 }
 bool isOpenGLContext(id receiver) { return [receiver isKindOfClass:[NSOpenGLContext class]]; }
 }  // namespace
+
+namespace b32::gl {
+// For the presents that don't come through here (AGL's).
+void snapshotPresented() { snapshotIfAsked(); }
+}  // namespace b32::gl
 
 B32_OVERRIDE_WHEN(isOpenGLContext, "flushBuffer") {
     snapshotIfAsked();
