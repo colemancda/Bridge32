@@ -182,6 +182,18 @@ B32_THUNK(_aglSetFullScreen) {
     if (size[0] > 0 && size[1] > 0) CGLSetParameter(context.CGLContextObj, kCGLCPSurfaceBackingSize, size);
     if (size[0] > 0 && size[1] > 0) CGLEnable(context.CGLContextObj, kCGLCESurfaceBackingSize);
     [context update];
+    // A context's first viewport is its drawable, which was the view at its own size until just now; a
+    // game that never sets one counts on it being the screen it asked for.
+    if (size[0] > 0 && size[1] > 0) {
+        NSOpenGLContext *previous = [NSOpenGLContext currentContext];
+        [context makeCurrentContext];
+        glViewport(0, 0, size[0], size[1]);
+        glScissor(0, 0, size[0], size[1]);
+        if (previous != context) {
+            if (previous) [previous makeCurrentContext];
+            else [NSOpenGLContext clearCurrentContext];
+        }
+    }
     c.ret(1);
 }
 B32_THUNK(_aglUpdateContext) {
