@@ -33,6 +33,7 @@ struct Image {
     uint32_t cpuSubtype = 0;
     std::vector<Section> sections;
     std::vector<std::string> dylibs;
+    std::vector<std::string> rpaths;  // LC_RPATH, as written (@loader_path and @executable_path unresolved)
     // LC_MAIN binaries are entered at main(argc, argv, envp, apple); older
     // ones at crt1's start with the argc/argv block on the stack.
     bool hasMain = false;
@@ -63,8 +64,9 @@ public:
     static uint32_t span(const std::string &path);
 
     // Called with the image's linked libraries after its load commands are
-    // read and before anything is bound.
-    std::function<void(const std::vector<std::string> &dylibs)> onDylibs;
+    // read and before anything is bound, with the image's run-path search
+    // paths and its own path (what @loader_path is relative to).
+    std::function<void(const std::vector<std::string> &dylibs, const std::vector<std::string> &rpaths, const std::string &path)> onDylibs;
 
     // Called for each import as it is bound: the symbol, the address it got, and where that went, which is
     // either a pointer (the address plus `addend`) or, with `jump`, an i386 jump table entry. Whoever
