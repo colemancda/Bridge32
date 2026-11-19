@@ -92,7 +92,7 @@ void raiseFormatted(OverrideCall &o, NSString *name, NSString *format, Args &arg
     NSException *e = [static_cast<Class>(o.receiver) exceptionWithName:name
                                                               reason:[NSString stringWithUTF8String:reason.c_str()]
                                                             userInfo:nil];
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
     ExceptionDelivery delivery = deliverGuestException(o.c.cpu, o.bridge.toGuest(e));
     if (delivery == ExceptionDelivery::Delivered) return;
     if (delivery == ExceptionDelivery::OuterFrame) @throw e;
