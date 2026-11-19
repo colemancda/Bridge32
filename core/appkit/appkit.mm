@@ -13,6 +13,7 @@
 #include "core/thunks/Format.h"
 
 #import <AppKit/AppKit.h>
+#include <objc/runtime.h>
 #include <crt_externs.h>
 
 using namespace b32;
@@ -60,9 +61,38 @@ B32_OVERRIDE_WHEN(isApplicationClass, "sharedApplication") {
     o.c.ret(o.bridge.toGuest(application));
 }
 
+// B32_DUMP_WINDOW=1: every 5 seconds the app's frontmost visible window is drawn into
+// $TMPDIR/b32-window.png, so a Mac app can be checked without a screen (or a window the system won't
+// capture), as UIKit apps can.
+namespace {
+void startWindowDumps() {
+    if (!getenv("B32_DUMP_WINDOW")) return;
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"b32-window.png"];
+    NSTimer *timer = [NSTimer timerWithTimeInterval:5 repeats:YES block:^(NSTimer *) {
+        NSWindow *window = nil;
+        for (NSWindow *w in NSApp.orderedWindows)
+            if (w.isVisible) {
+                window = w;
+                break;
+            }
+        NSView *frame = window.contentView.superview ?: window.contentView;
+        if (!frame) return;
+        NSBitmapImageRep *rep = [frame bitmapImageRepForCachingDisplayInRect:frame.bounds];
+        @try {
+            [frame cacheDisplayInRect:frame.bounds toBitmapImageRep:rep];
+        } @catch (NSException *e) {
+            log("window dump: drawing threw %s", e.reason.UTF8String);
+        }
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
+}
+}  // namespace
+
 // int NSApplicationMain(int argc, const char *argv[]): the host's, on the
 // host's arguments; the Info.plist it reads is the guest's.
 B32_THUNK(_NSApplicationMain) {
+    startWindowDumps();
     NSString *principal = [NSBundle.mainBundle objectForInfoDictionaryKey:@"NSPrincipalClass"];
     Class cls = principal ? NSClassFromString(principal) : Nil;
     [cls ?: [NSApplication class] sharedApplication];
@@ -77,6 +107,56 @@ B32_THUNK(_NSApplicationLoad) {
 }
 
 B32_THUNK(_NSBeep) { NSBeep(); }
+
+// NSImage *_NSGetThemePartImages(int part, int state, int flags): AppKit's private artwork for a part of
+// the Aqua theme, which this AppKit no longer has. A plain light strip stands in, so the guest has an
+// image of some size to draw with (Xcode's status bars).
+B32_THUNK(__NSGetThemePartImages) {
+    c.args.i32();
+    c.args.i32();
+    c.args.i32();
+    static NSImage *image = [[NSImage imageWithSize:NSMakeSize(1, 22) flipped:NO drawingHandler:^BOOL(NSRect rect) {
+        [[NSColor colorWithCalibratedWhite:0.88 alpha:1] setFill];
+        NSRectFill(rect);
+        return YES;
+    }] retain];
+    c.ret(bridge(c).toGuest(image));
+}
+
+// -[NSImage lockFocus] throws for an image it can't draw into (one of size zero), and a guest that
+// carries on then sends -unlockFocus, which pops a graphics context that was never pushed and stops
+// the app. An image the guest couldn't lock isn't unlocked.
+namespace {
+char lockedFocusKey;
+bool isImage(id receiver) { return [receiver isKindOfClass:[NSImage class]]; }
+}  // namespace
+B32_OVERRIDE_WHEN(isImage, "lockFocus") {
+    NSImage *image = o.receiver;
+    @try {
+        [image lockFocus];
+    } @catch (NSException *e) {
+        log("-[NSImage lockFocus] threw %s: %s; the guest draws nowhere", e.name.UTF8String, e.reason.UTF8String);
+        return;
+    }
+    NSUInteger depth = [objc_getAssociatedObject(image, &lockedFocusKey) unsignedIntegerValue];
+    objc_setAssociatedObject(image, &lockedFocusKey, @(depth + 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+B32_OVERRIDE_WHEN(isImage, "unlockFocus") {
+    NSImage *image = o.receiver;
+    NSUInteger depth = [objc_getAssociatedObject(image, &lockedFocusKey) unsignedIntegerValue];
+    if (!depth) return;
+    objc_setAssociatedObject(image, &lockedFocusKey, depth > 1 ? @(depth - 1) : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [image unlockFocus];
+}
+
+// -[NSGraphicsContext graphicsPort] is declared void *; it's the context's CGContext, which the guest's
+// Quartz calls take as the object it is.
+namespace {
+bool isGraphicsContext(id receiver) { return [receiver isKindOfClass:[NSGraphicsContext class]]; }
+}  // namespace
+B32_OVERRIDE_WHEN(isGraphicsContext, "graphicsPort") {
+    o.c.ret(o.bridge.toGuest((id)static_cast<NSGraphicsContext *>(o.receiver).CGContext));
+}
 
 // void NSCountWindows(NSInteger *count) and void NSWindowList(NSInteger size, NSInteger list[]):
 // the app's windows, front to back, by number.
