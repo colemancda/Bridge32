@@ -62,12 +62,14 @@ constexpr bool kFloatResultsInFpu = true;
 constexpr bool kHighWordFirst = false;
 // long double is the x87's 80 bits, in 16 bytes of argument words.
 constexpr uint32_t kLongDoubleWords = 4;
+// sizeof(jmp_buf): 18 words (_JBLEN).
+constexpr uint32_t kJmpBufBytes = 72;
 #elif defined(B32_GUEST_PPC)
-// Darwin's PowerPC ABI, from GCC's rule for it (rs6000_return_in_memory, with
-// AIX's struct return off): an aggregate of up to 8 bytes comes back in
-// r3:r4, a larger one through a hidden pointer in r3. Not yet checked against
-// a real binary (docs/ppc-mac-plan.md, Phase 1).
-inline bool structReturnedInMemory(uint32_t size) { return size > 8; }
+// Darwin's PowerPC ABI returns every aggregate through a hidden pointer in r3,
+// whatever its size: GCC turns on AIX's struct return for every ABI but SysV's
+// (rs6000_return_in_memory), and Apple's runtime sends any struct-returning
+// message with objc_msgSend_stret.
+inline bool structReturnedInMemory(uint32_t size) { return size != 0; }
 // float and double come back in f1 (a float widened to a double).
 constexpr bool kFloatResultsInFpu = true;
 // A 64-bit argument or result is its high word first (r3:r4).
@@ -75,6 +77,8 @@ constexpr bool kHighWordFirst = true;
 // long double from Mac OS X 10.4 (the $LDBL128 symbols) is a pair of doubles
 // in 16 bytes of argument words; older ones are a plain double.
 constexpr uint32_t kLongDoubleWords = 4;
+// sizeof(jmp_buf): 192 words (_JBLEN, room for the vector registers).
+constexpr uint32_t kJmpBufBytes = 768;
 #else
 // armv7: anything over a word goes through r0.
 inline bool structReturnedInMemory(uint32_t size) { return size > 4; }

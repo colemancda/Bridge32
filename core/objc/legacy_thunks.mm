@@ -14,7 +14,7 @@
 
 #include "core/Log.h"
 #include "core/Runtime.h"
-#include "core/arch/i386/X86Cpu.h"
+#include "core/arch/Arch.h"
 
 #include <cstring>
 
@@ -27,9 +27,10 @@ using namespace b32::objc;
 namespace {
 Bridge &bridge(Call &c) { return c.rt.bridge(); }
 
-// struct _objc_exception_data { int buf[18]; void *pointers[4]; }: where the
-// throw leaves the exception for objc_exception_extract.
-constexpr uint32_t kExceptionSlot = 72;
+// struct _objc_exception_data { jmp_buf buf; void *pointers[4]; }: where the
+// throw leaves the exception for objc_exception_extract. Foundation's older
+// NSHandler2 { jmp_buf _state; NSException *_exception; ... } has it there too.
+constexpr uint32_t kExceptionSlot = arch::kJmpBufBytes;
 
 struct TryFrame {
     GuestAddr data;
@@ -46,13 +47,13 @@ ExceptionDelivery b32::objc::deliverGuestException(Cpu &cpu, GuestAddr exception
     GuestAddr data = tryFrames.back().data;
     tryFrames.pop_back();
     cpu.mem().write<uint32_t>(data + kExceptionSlot, exception);
-    static_cast<X86Cpu &>(cpu).longjmpTo(data, 1);
+    cpu.longjmpTo(data, 1);
     return ExceptionDelivery::Delivered;
 }
 
-B32_THUNK(_objc_exception_try_enter) { tryFrames.push_back({c.args.ptr(), c.cpu.runDepth()}); }
-
-B32_THUNK(_objc_exception_try_exit) {
+namespace {
+void enterTry(Call &c) { tryFrames.push_back({c.args.ptr(), c.cpu.runDepth()}); }
+void exitTry(Call &c) {
     GuestAddr data = c.args.ptr();
     while (!tryFrames.empty()) {
         bool found = tryFrames.back().data == data;
@@ -60,8 +61,16 @@ B32_THUNK(_objc_exception_try_exit) {
         if (found) break;
     }
 }
+void extractException(Call &c) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + kExceptionSlot)); }
+}  // namespace
 
-B32_THUNK(_objc_exception_extract) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + kExceptionSlot)); }
+B32_THUNK(_objc_exception_try_enter) { enterTry(c); }
+B32_THUNK(_objc_exception_try_exit) { exitTry(c); }
+B32_THUNK(_objc_exception_extract) { extractException(c); }
+
+// void _objcInit(void): crt1 from before Mac OS X 10.4 starts the runtime itself; the bridge
+// has set up the guest's classes by then.
+B32_THUNK(__objcInit) {}
 
 B32_THUNK(_objc_exception_throw) {
     GuestAddr exception = c.args.ptr();

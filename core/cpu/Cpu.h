@@ -106,6 +106,16 @@ public:
     // into the guest. Everything but the result is as it was afterwards.
     uint64_t call(GuestAddr fn, std::initializer_list<uint32_t> args) { return call(fn, std::vector<uint32_t>(args)); }
     virtual uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args) = 0;
+    // The same for an ABI with registers of its own for floating-point arguments (PowerPC's
+    // f1-f13): `floats` fills them in order, while `args` still holds every argument's words.
+    // Where floats travel in the words, they're ignored.
+    virtual uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args, const std::vector<double> &floats) {
+        return call(fn, args);
+    }
+
+    // Resumes where the architecture's setjmp thunk saved its caller in the guest jmp_buf `buf`,
+    // with setjmp returning `value` (1 in place of 0): a longjmp, from inside a thunk.
+    virtual void longjmpTo(GuestAddr buf, uint32_t value);
 
     // Ends the current run() as if the sentinel were reached (exit()).
     void stop() { stopRequested_ = true; }

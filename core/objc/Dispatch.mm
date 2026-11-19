@@ -243,48 +243,49 @@ void Bridge::returnToGuest(Call &c, const Type &r, const uint8_t *guest, GuestAd
         c.cpu.popStructPointer();
         return;
     case ReturnClass::Floating:
-        if (size == 4) {
-            float value;
-            std::memcpy(&value, guest, 4);
-            c.cpu.setFloatResult(value);
-        } else {
-            double value;
-            std::memcpy(&value, guest, 8);
-            c.cpu.setDoubleResult(value);
-        }
+        if (size == 4)
+            c.cpu.setFloatResult(gload<float>(guest));
+        else
+            c.cpu.setDoubleResult(gload<double>(guest));
         return;
     case ReturnClass::Integer: break;
     }
-    uint32_t lo;
+    if (size > 4) {  // the first word in the first result register (setResult64's high half on PowerPC)
+        uint32_t first = gload<uint32_t>(guest), second = gload<uint32_t>(guest + 4);
+        c.cpu.setResult64(arch::kHighWordFirst ? uint64_t(first) << 32 | second : first | uint64_t(second) << 32);
+        return;
+    }
+    uint32_t value;
     switch (r.code) {
-    case 'c': lo = uint32_t(int32_t(int8_t(guest[0]))); break;
-    case 's': lo = uint32_t(int32_t(int16_t(guest[0] | guest[1] << 8))); break;
-    case 'C': case 'B': lo = guest[0]; break;
-    case 'S': lo = uint32_t(guest[0] | guest[1] << 8); break;
-    default: std::memcpy(&lo, guest, 4); break;
+    case 'c': value = uint32_t(int32_t(int8_t(guest[0]))); break;
+    case 's': value = uint32_t(int32_t(gload<int16_t>(guest))); break;
+    case 'C': case 'B': value = guest[0]; break;
+    case 'S': value = gload<uint16_t>(guest); break;
+    default: value = gload<uint32_t>(guest); break;
     }
-    if (size > 4) {
-        uint32_t hi;
-        std::memcpy(&hi, guest + 4, 4);
-        c.cpu.setResult64(lo | (uint64_t(hi) << 32));
-    } else {
-        c.cpu.setResult(lo);
-    }
+    c.cpu.setResult(value);
 }
 
 void Bridge::resultFromGuest(Cpu &cpu, const Type &r, uint64_t words, uint8_t *guest) {
     if (guestReturnClass(r) != ReturnClass::Floating) {
-        std::memcpy(guest, &words, 8);
+        // The first result register's word, then the second's; a narrower scalar is the low end of the first.
+        uint32_t first = uint32_t(words), second = uint32_t(words >> 32);
+        switch (r.guestSize()) {
+        case 1: guest[0] = uint8_t(first); break;
+        case 2: gstore<uint16_t>(guest, uint16_t(first)); break;
+        default:
+            gstore<uint32_t>(guest, first);
+            gstore<uint32_t>(guest + 4, second);
+            break;
+        }
         return;
     }
     bool isFloat = r.guestSize() == 4;
     double value = cpu.floatingResult(isFloat);
-    if (isFloat) {
-        float f = float(value);
-        std::memcpy(guest, &f, 4);
-    } else {
-        std::memcpy(guest, &value, 8);
-    }
+    if (isFloat)
+        gstore<float>(guest, float(value));
+    else
+        gstore<double>(guest, value);
 }
 
 void Bridge::msgSend(Call &c, bool stret, SuperKind kind, bool fpret) {
@@ -369,7 +370,7 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind, bool fpret) {
         if (!start->initialized && start->isGuest) ensureInitialized(start);
     }
 
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
     // Cocoa bindings depend on a setter passing through the NSKVONotifying_
     // subclass the host made for an observed object, and a guest-to-guest
     // send would skip it: such objects go by way of the host, which ends up
@@ -482,16 +483,28 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     for (size_t i = 2; i < sig.args.size(); i++) {
         const Type &t = sig.args[i];
         std::vector<uint32_t> words(wordsFor(t.guestSize()));
-        for (auto &w : words) w = args.u32();
+        const uint8_t *bytes;
+        if (c.cpu.floatArgsInRegisters() && isFloatArgument(t)) {  // in f1-f13, its words only reserved
+            uint8_t *out = argumentBuffer(t, words);
+            if (t.guestSize() == 4)
+                gstore<float>(out, args.f32());
+            else
+                gstore<double>(out, args.f64());
+            bytes = out;
+        } else {
+            for (auto &w : words) w = args.u32();
+            bytes = nullptr;
+        }
         if (trace) {
             std::string hex;
             for (size_t k = 0; k < words.size() && k < 4; k++) hex += (k ? " " : "") + std::to_string(int32_t(words[k])) + "/" + floatText(words[k]);
             log("    arg %zu '%c'%s: %zu word(s): %s", i, t.code, t.cgfloat ? " (CGFloat)" : "", words.size(), hex.c_str());
         }
         storage[i].resize(std::max<size_t>(t.hostSize(), 8));
+        if (!bytes) bytes = argumentBytes(t, words);
         if (t.code == '^' && !passesThrough(t) && !isCFRef(t)) {
             // Copy in/out through a host temporary laid out for the host.
-            GuestAddr p = words[0];
+            GuestAddr p = gload<uint32_t>(bytes);
             uint8_t *temp = nullptr;
             if (p) {
                 outStorage.emplace_back(std::max<size_t>(t.pointee->hostSize(), 8));
@@ -502,12 +515,12 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
             }
             std::memcpy(storage[i].data(), &temp, sizeof temp);
         } else {
-            toHostValue(t, reinterpret_cast<const uint8_t *>(words.data()), storage[i].data());
+            toHostValue(t, bytes, storage[i].data());
             // B32_TRACE_RAW_POINTERS: pointers into a guest stack the host
             // gets as they are (void *, or a pointee laid out the same), once
             // per selector, to find host writes of host-sized values there.
             static const bool rawTrace = getenv("B32_TRACE_RAW_POINTERS") != nullptr;
-            if (rawTrace && (t.code == '^' || t.code == '*') && words[0] >= layout::kStackBase) {
+            if (rawTrace && (t.code == '^' || t.code == '*') && gload<uint32_t>(bytes) >= layout::kStackBase) {
                 static std::mutex seenLock;
                 static std::set<std::string> seen;
                 std::lock_guard guard(seenLock);
@@ -528,7 +541,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         ffi_call(&hc.cif, direct ? FFI_FN(direct) : superInfo ? FFI_FN(objc_msgSendSuper) : FFI_FN(objc_msgSend),
                  result, values.data());
     } @catch (id thrown) {
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
         // Legacy-runtime guests do catch: a @try in the guest code that made
         // this call resumes, and one further out is reached by unwinding.
         ExceptionDelivery delivery = deliverGuestException(c.cpu, toGuest(thrown));
@@ -576,8 +589,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     if (trace && r.isStruct()) {
         std::string text;
         for (uint32_t k = 0; k < size / 4 && k < 4; k++) {
-            uint32_t w;
-            std::memcpy(&w, guest + k * 4, 4);
+            uint32_t w = gload<uint32_t>(guest + k * 4);
             text += (k ? " " : "") + floatText(w);
         }
         log("    returned {%s}", text.c_str());
@@ -767,6 +779,7 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
     words.push_back(self);
     words.push_back(t->sel);
     std::vector<Bounce> bounces;
+    std::vector<double> floats;  // for a guest with registers for them
     for (size_t i = 2; i < sig.args.size(); i++) {
         const Type &type = sig.args[i];
         if (GuestAddr buffer = bounceIn(bridge, t->sel, sig, args, i, bounces)) {
@@ -774,7 +787,10 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
             continue;
         }
         std::vector<uint32_t> w(wordsFor(type.guestSize()));
-        bridge.toGuestValue(type, static_cast<const uint8_t *>(args[i]), reinterpret_cast<uint8_t *>(w.data()));
+        bridge.toGuestValue(type, static_cast<const uint8_t *>(args[i]), argumentBuffer(type, w));
+        argumentWords(w);
+        if (isFloatArgument(type))
+            floats.push_back(type.code == 'f' ? double(*static_cast<const float *>(args[i])) : *static_cast<const double *>(args[i]));
         // A guest argument bigger than the host's gets the rest as zeros, rather than reaching past the
         // words pushed into its caller's frame.
         if (i - 2 < t->guestArgWords.size() && sig.args.size() == t->guestArgWords.size() + 2 &&
@@ -793,7 +809,7 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
         log("    imp 0x%08x, types %s, words%s", t->imp, t->guestTypes.c_str(), text.c_str());
     }
     if (mirrorsHostIvars(bridge, *static_cast<id *>(args[0]), self)) mirrorHostIvars(bridge, *static_cast<id *>(args[0]), self);
-    uint64_t r = cpu->call(t->imp, words);
+    uint64_t r = cpu->call(t->imp, words, floats);
     bounceOut(bridge, bounces);
 
     const Type &rt_ = sig.ret;
@@ -810,8 +826,7 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
     // setter the caller ignores) leaves whatever was in r0; that can't be
     // converted, and the host caller has no use for it, so it gets nil.
     if (rt_.code == '@' && !guestStret) {
-        uint32_t value;
-        std::memcpy(&value, guest, 4);
+        uint32_t value = gload<uint32_t>(guest);
         if (value && !rt.mem().isMapped(value)) {
             static std::atomic<int> logged{0};
             if (logged++ < 5)

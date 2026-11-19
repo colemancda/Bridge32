@@ -293,7 +293,7 @@ template <typename Fn> void hookInstanceMethod(SEL sel, Fn replacement, Fn &orig
 }();
 }  // namespace
 
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 namespace {
 // AppKit connects a nib's outlet through a setter or a real ivar, and never
 // asks KVC, so an outlet that's only a guest ivar gets a made-up setter on the
@@ -312,7 +312,7 @@ void shadowOutletSetter(id self, SEL _cmd, id value) {
 }  // namespace
 #endif
 
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 namespace {
 // AppKit stopped calling -lockFocus when it draws a view (10.14), and OpenGL
 // views of the era override it to attach their context (Apple's own samples
@@ -581,13 +581,30 @@ void Bridge::setupImage(const Image &image) {
     GuestMemory &mem = rt_.mem();
     settingUp_ = true;
 
+    bool hasCfstrings = false;
     for (const auto &s : image.sections) {
-        if (s.name == "__cfstring") cfstringSections_.push_back({s.addr, s.addr + s.size});
+        if (s.name == "__cfstring") {
+            cfstringSections_.push_back({s.addr, s.addr + s.size});
+            hasCfstrings = true;
+        }
         // Unique selector references: each points at a name string.
         if (s.name == "__objc_selrefs")
             for (uint32_t off = 0; off < s.size; off += 4)
                 mem.write<uint32_t>(s.addr + off, guestSel(mem.cstr(mem.read<uint32_t>(s.addr + off))));
     }
+
+    // An older compiler left @"..." among the image's other data: a 16-byte { isa, flags, bytes,
+    // length } whose isa the loader bound to ___CFConstantStringClassReference, with 0x7c8 (bytes)
+    // or 0x7d0 (UTF-16) for flags.
+    if (!hasCfstrings)
+        for (const auto &s : image.sections) {
+            if (s.segment != "__DATA" || s.name == "__bss" || s.name == "__common") continue;
+            for (uint32_t off = 0; off + 16 <= s.size; off += 4) {
+                if (mem.read<uint32_t>(s.addr + off) != cfstringIsa_) continue;
+                uint32_t flags = mem.read<uint32_t>(s.addr + off + 4);
+                if (flags == 0x7c8 || flags == 0x7d0) looseCfstrings_.insert(s.addr + off);
+            }
+        }
 
     // Protocols (protocol_t { isa, name, ... }): by address, for converting
     // @protocol(...) to the host's protocol of the same name.
@@ -614,7 +631,7 @@ void Bridge::setupImage(const Image &image) {
         }
     }
 
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
     setupLegacyImage(image);
 #endif
 
@@ -868,7 +885,7 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr ro) {
         if (selName(sel) != std::string("initialize")) installTrampoline(object_getClass(shadow), sel, method, cls->meta);
     if (cls->methods.count(guestSel("forwardInvocation:")) && !cls->methods.count(guestSel("methodSignatureForSelector:")))
         class_addMethod(shadow, @selector(methodSignatureForSelector:), reinterpret_cast<IMP>(shadowMethodSignature), "@@::");
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
     if (Class view = NSClassFromString(@"NSView"); view && [shadow isSubclassOfClass:view] && cls->methods.count(guestSel("lockFocus")) &&
                                                    !cls->methods.count(guestSel("viewWillDraw")))
         class_addMethod(shadow, sel_registerName("viewWillDraw"), reinterpret_cast<IMP>(shadowViewWillDraw), "v@:");
@@ -1224,7 +1241,7 @@ GuestAddr Bridge::toGuest(id object) {
 bool Bridge::isConstantString(GuestAddr object) const {
     for (auto [begin, end] : cfstringSections_)
         if (object >= begin && object < end) return true;
-    return false;
+    return looseCfstrings_.count(object) != 0;
 }
 
 // The host side of one of the guest's constant strings (@"..."): an object of its own, never
@@ -1399,6 +1416,7 @@ id Bridge::toHost(GuestAddr addr) {
     }
     for (auto [begin, end] : cfstringSections_)
         if (addr >= begin && addr < end) return cfstringToHost(addr);
+    if (looseCfstrings_.count(addr)) return cfstringToHost(addr);
 
     auto it = handleByGuest_.find(addr);
     if (it == handleByGuest_.end()) {
@@ -1525,35 +1543,55 @@ template <typename T> T load(const uint8_t *p) {
 }
 template <typename T> void store(uint8_t *p, T v) { std::memcpy(p, &v, sizeof v); }
 uint32_t alignTo(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
+
+// Where in its word a scalar narrower than a word is.
+uint32_t narrowOffset(const Type &type) {
+#if defined(B32_GUEST_BIG_ENDIAN)
+    uint32_t size = type.guestSize();
+    if (size < 4 && !type.isStruct() && type.code != '[') return 4 - size;
+#endif
+    return 0;
+}
 }  // namespace
+
+const uint8_t *b32::objc::argumentBytes(const Type &type, std::vector<uint32_t> &words) {
+    for (uint32_t &w : words) w = GuestMemory::inGuestOrder(w);
+    return reinterpret_cast<const uint8_t *>(words.data()) + narrowOffset(type);
+}
+uint8_t *b32::objc::argumentBuffer(const Type &type, std::vector<uint32_t> &words) {
+    return reinterpret_cast<uint8_t *>(words.data()) + narrowOffset(type);
+}
+void b32::objc::argumentWords(std::vector<uint32_t> &words) {
+    for (uint32_t &w : words) w = GuestMemory::inGuestOrder(w);
+}
 
 void Bridge::toHostValue(const Type &t, const uint8_t *g, uint8_t *h) {
     GuestMemory &mem = rt_.mem();
     switch (t.code) {
     case 'c': case 'C': case 'B': *h = *g; break;
-    case 's': case 'S': std::memcpy(h, g, 2); break;
-    case 'i': case 'I': case 'f': std::memcpy(h, g, 4); break;
+    case 's': case 'S': store<uint16_t>(h, gload<uint16_t>(g)); break;
+    case 'i': case 'I': case 'f': store<uint32_t>(h, gload<uint32_t>(g)); break;
     // NSNotFound and NSIntegerMax are 0x7fffffff in the guest; the host's are
     // its own 64-bit maximum (indexOfObject:, NSRange locations).
     case 'l': case 'q': {
-        int64_t v = t.wide ? load<int64_t>(g) : load<int32_t>(g);
+        int64_t v = t.wide ? gload<int64_t>(g) : gload<int32_t>(g);
         store<int64_t>(h, !t.wide && v == INT32_MAX ? INT64_MAX : v);
         break;
     }
     case 'L': case 'Q': {
-        uint64_t v = t.wide ? load<uint64_t>(g) : load<uint32_t>(g);
+        uint64_t v = t.wide ? gload<uint64_t>(g) : gload<uint32_t>(g);
         store<uint64_t>(h, !t.wide && v == uint64_t(INT32_MAX) ? uint64_t(INT64_MAX) : v);
         break;
     }
-    case 'd': store<double>(h, t.cgfloat ? double(load<float>(g)) : load<double>(g)); break;
-    case '@': case '#': store<id>(h, toHost(load<uint32_t>(g))); break;
+    case 'd': store<double>(h, t.cgfloat ? double(gload<float>(g)) : gload<double>(g)); break;
+    case '@': case '#': store<id>(h, toHost(gload<uint32_t>(g))); break;
     case ':': {
-        GuestAddr sel = load<uint32_t>(g);
+        GuestAddr sel = gload<uint32_t>(g);
         store<SEL>(h, sel ? hostSel(sel) : nullptr);
         break;
     }
     case '*': case '^': case '?': {
-        GuestAddr p = load<uint32_t>(g);
+        GuestAddr p = gload<uint32_t>(g);
         store<void *>(h, p ? mem.ptr<void>(p) : nullptr);
         break;
     }
@@ -1581,37 +1619,37 @@ void Bridge::toGuestValue(const Type &t, const uint8_t *h, uint8_t *g) {
     GuestMemory &mem = rt_.mem();
     switch (t.code) {
     case 'c': case 'C': case 'B': *g = *h; break;
-    case 's': case 'S': std::memcpy(g, h, 2); break;
-    case 'i': case 'I': case 'f': std::memcpy(g, h, 4); break;
+    case 's': case 'S': gstore<uint16_t>(g, load<uint16_t>(h)); break;
+    case 'i': case 'I': case 'f': gstore<uint32_t>(g, load<uint32_t>(h)); break;
     case 'l': case 'q': case 'L': case 'Q':
         if (t.wide)
-            std::memcpy(g, h, 8);
+            gstore<uint64_t>(g, load<uint64_t>(h));
         else if (load<uint64_t>(h) == uint64_t(INT64_MAX))
-            store<uint32_t>(g, uint32_t(INT32_MAX));  // NSNotFound / NSIntegerMax
+            gstore<uint32_t>(g, uint32_t(INT32_MAX));  // NSNotFound / NSIntegerMax
         else
-            store<uint32_t>(g, uint32_t(load<uint64_t>(h)));
+            gstore<uint32_t>(g, uint32_t(load<uint64_t>(h)));
         break;
     case 'd':
         if (t.cgfloat)
-            store<float>(g, float(load<double>(h)));
+            gstore<float>(g, float(load<double>(h)));
         else
-            std::memcpy(g, h, 8);
+            gstore<double>(g, load<double>(h));
         break;
-    case '@': case '#': store<uint32_t>(g, toGuest(load<id>(h))); break;
+    case '@': case '#': gstore<uint32_t>(g, toGuest(load<id>(h))); break;
     case ':': {
         SEL sel = load<SEL>(h);
-        store<uint32_t>(g, sel ? guestSel(sel) : 0);
+        gstore<uint32_t>(g, sel ? guestSel(sel) : 0);
         break;
     }
     case '*': case '^': case '?': {
         void *p = load<void *>(h);
         auto *bytes = static_cast<uint8_t *>(p);
         if (!p)
-            store<uint32_t>(g, 0);
+            gstore<uint32_t>(g, 0);
         else if (bytes >= mem.base() && bytes < mem.base() + GuestMemory::kSize)
-            store<uint32_t>(g, mem.guestAddrOf(p));
+            gstore<uint32_t>(g, mem.guestAddrOf(p));
         else if (t.code == '*')
-            store<uint32_t>(g, guestCString(static_cast<const char *>(p), nil));
+            gstore<uint32_t>(g, guestCString(static_cast<const char *>(p), nil));
         else
             fatal("host pointer %p (type '%c') can't be given to the guest", p, t.code);
         break;

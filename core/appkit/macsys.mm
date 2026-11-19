@@ -399,7 +399,9 @@ B32_THUNK(_UCKeyTranslate) {
     UInt32 dead = c.mem.read<uint32_t>(deadOut);
     std::vector<UniChar> chars(std::max<uint32_t>(maximum, 1));
     UniCharCount length = 0;
-    OSStatus status = UCKeyTranslate(c.mem.ptr<const UCKeyboardLayout>(layout), keyCode, action, modifiers,
+    // The layout is the host's bytes as they are (guestUchr), opaque to the guest, on either byte order.
+    auto *hostLayout = reinterpret_cast<const UCKeyboardLayout *>(c.mem.ptr<uint8_t>(layout));
+    OSStatus status = UCKeyTranslate(hostLayout, keyCode, action, modifiers,
                                      keyboardType ? keyboardType : LMGetKbdType(), options, &dead, maximum, &length,
                                      chars.data());
     c.mem.write<uint32_t>(deadOut, dead);

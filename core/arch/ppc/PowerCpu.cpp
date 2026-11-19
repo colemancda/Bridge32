@@ -79,8 +79,9 @@ bool PowerCpu::threadState(int flavor, GuestAddr state, GuestAddr countOut) {
 // chain to the old one so a frame chain walks through it. The first eight
 // words go in r3-r10 and the rest on the stack; r12 holds the function's
 // address, which position-independent code uses to find its own data.
-uint64_t PowerCpu::call(GuestAddr fn, const std::vector<uint32_t> &args) {
+uint64_t PowerCpu::call(GuestAddr fn, const std::vector<uint32_t> &args, const std::vector<double> &floats) {
     std::vector<uint8_t> saved = saveState();
+    for (size_t i = 0; i < floats.size() && i < 13; i++) setFpr(1 + int(i), floats[i]);
     uint32_t oldSp = reg(SP);
     uint32_t words = args.size() > kRegisterArgs ? uint32_t(args.size()) : kRegisterArgs;
     uint32_t frame = (oldSp - kRedZone - kParamArea - words * 4) & ~15u;
@@ -105,6 +106,38 @@ uint64_t PowerCpu::call(GuestAddr fn, const std::vector<uint32_t> &args) {
     lastFloatResult_ = fpr(1);
     restoreState(saved);
     return result;
+}
+
+namespace {
+// Where each register goes in a jmp_buf (192 words in the guest's setjmp.h; this uses 107).
+constexpr uint32_t kJbSp = 0, kJbLr = 4, kJbCr = 8, kJbR2 = 12, kJbR13 = 16, kJbF14 = 96, kJbV20 = 240;
+}  // namespace
+
+void PowerCpu::saveJmpBuf(GuestAddr buf) {
+    mem().write<uint32_t>(buf + kJbSp, reg(SP));
+    mem().write<uint32_t>(buf + kJbLr, reg(LR));
+    mem().write<uint32_t>(buf + kJbCr, reg(CR));
+    mem().write<uint32_t>(buf + kJbR2, reg(2));
+    for (int r = 13; r <= 31; r++) mem().write<uint32_t>(buf + kJbR13 + uint32_t(r - 13) * 4, reg(r));
+    for (int f = 14; f <= 31; f++) mem().write<double>(buf + kJbF14 + uint32_t(f - 14) * 8, fpr(f));
+    for (int v = 20; v <= 31; v++) {
+        uint8_t bytes[16];
+        vr(v, bytes);
+        mem().copyIn(buf + kJbV20 + uint32_t(v - 20) * 16, bytes, 16);
+    }
+}
+
+void PowerCpu::longjmpTo(GuestAddr buf, uint32_t value) {
+    setReg(SP, mem().read<uint32_t>(buf + kJbSp));
+    setReg(CR, mem().read<uint32_t>(buf + kJbCr));
+    setReg(2, mem().read<uint32_t>(buf + kJbR2));
+    for (int r = 13; r <= 31; r++) setReg(r, mem().read<uint32_t>(buf + kJbR13 + uint32_t(r - 13) * 4));
+    for (int f = 14; f <= 31; f++) setFpr(f, mem().read<double>(buf + kJbF14 + uint32_t(f - 14) * 8));
+    for (int v = 20; v <= 31; v++) setVr(v, mem().ptr<uint8_t>(buf + kJbV20 + uint32_t(v - 20) * 16));
+    GuestAddr resume = mem().read<uint32_t>(buf + kJbLr);
+    setReg(LR, resume);
+    setReg(R3, value ? value : 1);
+    jump(resume);
 }
 
 // Mac OS X's 32-bit PowerPC layouts: ucontext { uc_onstack, uc_sigmask,

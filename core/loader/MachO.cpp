@@ -486,7 +486,10 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
 
     // External relocations (pre-iOS 4 data imports). For 32-bit images the
     // addresses are relative to the first segment, and the addend is already
-    // stored at the target.
+    // stored at the target. A prebound image (Mac OS X 10.3 and before) stores
+    // the address it was bound to instead, which its undefined symbol's value
+    // records, so the addend is what's stored beyond that.
+    const bool prebound = header.flags & MH_PREBOUND;
     GuestAddr relocBase = segments.empty() ? 0 : segments.front().vmaddr;
     for (uint32_t i = 0; i < dysymtab.nextrel; i++) {
         relocation_info rel;
@@ -497,7 +500,13 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             continue;
         }
         GuestAddr where = relocBase + rel.r_address;
-        bind(where, symbolName(rel.r_symbolnum), int32_t(mem_.read<uint32_t>(where)));
+        uint32_t stored = mem_.read<uint32_t>(where);
+        if (prebound) {
+            struct nlist sym;
+            sym = fetch<decltype(sym)>(slice + symtab.symoff + rel.r_symbolnum * sizeof sym);
+            stored -= sym.n_value;
+        }
+        bind(where, symbolName(rel.r_symbolnum), int32_t(stored));
     }
 
     // LC_DYLD_INFO bind and lazy-bind opcodes (iOS 4+).
