@@ -83,6 +83,38 @@ GuestAddr GuestHeap::allocLocked(uint32_t size, uint32_t align) {
     return aligned;
 }
 
+GuestAddr GuestHeap::allocAt(GuestAddr addr, uint32_t size) {
+    std::lock_guard guard(lock_);
+    size = roundUp(std::max(size, 1u), kGrain);
+    uint64_t end = uint64_t(addr) + size;
+    if (addr % kGrain || addr < layout::kHeapBase || end > layout::kHeapEnd) return 0;
+    // What is below top_ has to be one free block; what is above it is the heap's to grow into.
+    if (addr < top_) {
+        auto it = free_.upper_bound(addr);
+        if (it == free_.begin()) return 0;
+        --it;
+        auto [start, freeSize] = *it;
+        uint64_t freeEnd = uint64_t(start) + freeSize;
+        if (freeEnd < std::min<uint64_t>(end, top_)) return 0;
+        if (freeEnd != top_ && freeEnd < end) return 0;
+        freeBySize_.erase({freeSize, start});
+        free_.erase(it);
+        if (start < addr) insertFree(start, addr - start);
+        if (freeEnd > end) insertFree(GuestAddr(end), uint32_t(freeEnd - end));
+        else if (freeEnd == top_) top_ = GuestAddr(end);  // the block ran up to the top: the rest is new
+    } else {
+        if (addr > top_) insertFree(top_, addr - top_);
+        top_ = GuestAddr(end);
+    }
+    if (top_ > committed_) {
+        GuestAddr newCommitted = roundUp(top_, kCommitChunk);
+        mem_.map(committed_, newCommitted - committed_);
+        committed_ = newCommitted;
+    }
+    live_[addr] = size;
+    return addr;
+}
+
 GuestAddr GuestHeap::calloc(uint32_t count, uint32_t size) {
     uint64_t total = uint64_t(count) * size;
     if (total > UINT32_MAX) return 0;
