@@ -39,6 +39,8 @@ Cpu::SignalAction Cpu::setSignalAction(int sig, SignalAction action) {
 
 bool Cpu::guestHandlesFaults() { return faultHandlers; }
 
+void Cpu::longjmpTo(GuestAddr buf, uint32_t value) { fatal("longjmp to 0x%08x: no setjmp on this guest", buf); }
+
 void Cpu::bindToCurrentThread() {
     // mach_thread_self adds a send right each call; this one is kept while bound.
     thread_ = mach_thread_self();
