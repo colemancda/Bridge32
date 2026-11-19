@@ -68,6 +68,19 @@ B32_THUNK(_objc_exception_throw) {
     if (deliverGuestException(c.cpu, exception) != ExceptionDelivery::Delivered) @throw bridge(c).toHost(exception);
 }
 
+// Foundation's NS_DURING, older than @try: an NSHandler2 is a jmp_buf with the exception after it,
+// laid out as @try's buffer is, so its handlers are kept with @try's.
+B32_THUNK(__NSAddHandler2) { tryFrames.push_back({c.args.ptr(), c.cpu.runDepth()}); }
+B32_THUNK(__NSRemoveHandler2) {
+    GuestAddr handler = c.args.ptr();
+    while (!tryFrames.empty()) {
+        bool found = tryFrames.back().data == handler;
+        tryFrames.pop_back();
+        if (found) break;
+    }
+}
+B32_THUNK(__NSExceptionObjectFromHandler2) { c.ret(c.mem.read<uint32_t>(c.args.ptr() + kExceptionSlot)); }
+
 // int objc_exception_match(Class catchClass, id exception)
 B32_THUNK(_objc_exception_match) {
     ClassInfo *cls = bridge(c).classInfo(c.args.ptr());
