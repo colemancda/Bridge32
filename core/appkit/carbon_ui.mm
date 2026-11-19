@@ -208,6 +208,7 @@ NSSize gameSize = NSZeroSize;
 // themselves: then the view doesn't also send it to the handlers.
 bool handingEventToGuest = false;
 void deliverMouse(NSView *view, NSEvent *event, uint32_t kind);
+GuestAddr mouseEvent(NSView *view, NSEvent *event, uint32_t kind);
 void deliverKey(NSView *view, NSEvent *event, uint32_t kind);
 }  // namespace
 
@@ -523,6 +524,9 @@ struct PumpedEvent {
     uint32_t message = 0;
     uint16_t modifiers = 0;
     NSPoint where = NSZeroPoint;
+    // For the guest that pulls events itself: any mouse event, moves included, as the Carbon event its
+    // view would have had (ReceiveNextEvent hands it over; anyone else releases it).
+    GuestAddr mouse = 0;
 };
 
 uint16_t carbonModifiers(NSEventModifierFlags flags) {
@@ -540,8 +544,12 @@ NSPoint globalMouse() {
     return NSMakePoint(p.x, NSScreen.screens.firstObject.frame.size.height - p.y);
 }
 
+// When the guest last pulled an event itself.
+double lastGuestPull = 0;
+
 PumpedEvent pumpOne(double seconds, bool handedToGuest = true) {
     b32::appkit::ensureCarbonApplication();
+    if (handedToGuest) lastGuestPull = NSProcessInfo.processInfo.systemUptime;
     PumpedEvent out;
     @autoreleasepool {
         NSDate *until = seconds > 0 ? [NSDate dateWithTimeIntervalSinceNow:seconds] : NSDate.distantPast;
@@ -578,6 +586,21 @@ PumpedEvent pumpOne(double seconds, bool handedToGuest = true) {
             break;
         default: break;
         }
+        if (handedToGuest) {
+            uint32_t kind = 0;
+            switch (event.type) {
+            case NSEventTypeLeftMouseDown: case NSEventTypeRightMouseDown: case NSEventTypeOtherMouseDown: kind = kMouseDown; break;
+            case NSEventTypeLeftMouseUp: case NSEventTypeRightMouseUp: case NSEventTypeOtherMouseUp: kind = kMouseUp; break;
+            case NSEventTypeMouseMoved: kind = kMouseMoved; break;
+            case NSEventTypeLeftMouseDragged: case NSEventTypeRightMouseDragged: case NSEventTypeOtherMouseDragged: kind = kMouseDragged; break;
+            case NSEventTypeScrollWheel: kind = kMouseWheelMoved; break;
+            default: break;
+            }
+            if (kind && event.window) {
+                NSView *view = gameView && gameView.window == event.window ? gameView : event.window.contentView;
+                out.mouse = mouseEvent(view, event, kind);
+            }
+        }
         handingEventToGuest = handedToGuest;
         [NSApp sendEvent:event];
         handingEventToGuest = false;
@@ -605,6 +628,12 @@ void setPoint(GuestAddr event, uint32_t name, double x, double y) {
 void deliverMouse(NSView *view, NSEvent *event, uint32_t kind) {
     GuestAddr target = targetOf(view);
     if (handingEventToGuest || !target) return;
+    GuestAddr carbon = mouseEvent(view, event, kind);
+    dispatchTo(carbon, target);
+    releaseEvent(runtime(), carbon);
+}
+// The Carbon mouse event for an AppKit one in `view`.
+GuestAddr mouseEvent(NSView *view, NSEvent *event, uint32_t kind) {
     Runtime &rt = runtime();
     GuestAddr carbon = makeEvent(rt, kClassMouse, kind);
     // Where in the view, from its top left; for the game view, in the screen the game believes in.
@@ -632,8 +661,7 @@ void deliverMouse(NSView *view, NSEvent *event, uint32_t kind) {
         setPoint(carbon, kMouseDeltaParam, event.deltaX * scaleX, event.deltaY * scaleY);
         if (kind == kMouseDown || kind == kMouseUp) setParam<uint32_t>(carbon, kClickCountParam, uint32_t(event.clickCount));
     }
-    dispatchTo(carbon, target);
-    releaseEvent(rt, carbon);
+    return carbon;
 }
 // The character Carbon gives for a key: AppKit's function-key code points and its delete are the old
 // control characters there.
@@ -755,6 +783,10 @@ NSView *carbonFullScreenView(int &width, int &height) {
 }
 // These events go to the guest's handlers, as nothing here hands them to it.
 void pumpCarbonEvents(double seconds) { pumpOne(seconds, false); }
+void pumpForPresent() {
+    if (NSProcessInfo.processInfo.systemUptime - lastGuestPull < 1) return;
+    pumpOne(0, false);
+}
 
 CGPoint gameScreenPoint(CGPoint point) {
     if (!gameView || gameSize.width <= 0 || gameSize.height <= 0) return point;
@@ -1460,6 +1492,12 @@ B32_THUNK(_ReceiveNextEvent) {
     c.args.u32();
     GuestAddr out = c.args.ptr();
     PumpedEvent event = pumpOne(std::max(timeout, 0.0));
+    if (event.mouse) {
+        if (out) c.mem.write<uint32_t>(out, event.mouse);
+        else releaseEvent(c.rt, event.mouse);
+        c.ret(0);
+        return;
+    }
     if (!event.valid) {
         c.ret(uint32_t(kEventLoopTimedOut));
         return;
@@ -1490,6 +1528,7 @@ B32_THUNK(_WaitNextEvent) {
     GuestAddr record = c.args.ptr();
     uint32_t ticks = c.args.u32();
     PumpedEvent event = pumpOne(ticks / 60.0);
+    if (event.mouse) releaseEvent(c.rt, event.mouse);
     NSPoint where = event.valid ? event.where : globalMouse();
     if (record) {
         c.mem.write<int16_t>(record, event.valid ? event.what : 0);
@@ -1523,8 +1562,28 @@ B32_THUNK(_ConvertEventRefToEventRecord) {
     c.ret(1);
 }
 
+// B32_AUTO_OK=1 presses the OK button (the control sending kHICommandOK) of the window a loop runs for,
+// or of the front visible window, a second into the loop: for running a game unattended past its
+// settings window.
+namespace {
+void autoPressOK(CWindow *only) {
+    static const bool autoOK = getenv("B32_AUTO_OK") != nullptr;
+    if (!autoOK) return;
+    for (auto &[handle, w] : windows) {
+        if (only ? w != only : !w->window.visible) continue;
+        for (CControl *control : w->controls)
+            if (control->command == fourCC("ok  ") && [control->view isKindOfClass:NSButton.class]) {
+                log("B32_AUTO_OK: pressing OK in \"%s\"", w->window.title.UTF8String);
+                [control->view performSelector:@selector(performClick:) withObject:nil afterDelay:1
+                                       inModes:@[ NSModalPanelRunLoopMode, NSDefaultRunLoopMode ]];
+                return;
+            }
+    }
+}
+}  // namespace
 B32_THUNK(_RunApplicationEventLoop) {
     ensureCarbonApplication();
+    autoPressOK(nullptr);
     [NSApp run];
 }
 B32_THUNK(_QuitApplicationEventLoop) {
@@ -1532,7 +1591,10 @@ B32_THUNK(_QuitApplicationEventLoop) {
     [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];
 }
 B32_THUNK(_RunAppModalLoopForWindow) {
-    if (CWindow *w = windowOf(c.args.ptr())) [NSApp runModalForWindow:w->window];
+    if (CWindow *w = windowOf(c.args.ptr())) {
+        autoPressOK(w);
+        [NSApp runModalForWindow:w->window];
+    }
     c.ret(0);
 }
 B32_THUNK(_QuitAppModalLoopForWindow) {
