@@ -614,6 +614,153 @@ B32_OVERRIDE_WHEN(isRawMapTable, "removeObjectForKey:") {
     [static_cast<NSMapTable *>(o.receiver) removeObjectForKey:(id)key];
 }
 
+// --- bundles live as long as the process ------------------------------------------------------------
+// As on the systems of the time (and core/appkit/compat.mm keeps every bundle made), a guest's -release
+// of an NSBundle does nothing: frameworks then took a bundle without retaining it and released it later,
+// several holders the same one.
+namespace {
+bool isBundle(id receiver) { return [receiver isKindOfClass:[NSBundle class]]; }
+}  // namespace
+B32_OVERRIDE_WHEN(isBundle, "release") {}
+
+// --- sorting with a guest comparison function -------------------------------------------------------
+// -sortedArrayUsingFunction:context: and friends take an NSInteger (*)(id, id, void *), which here is
+// guest code: it's called on the guest's CPU with the two objects and the context as they are.
+
+namespace {
+bool isArray(id receiver) { return [receiver isKindOfClass:[NSArray class]]; }
+NSComparator guestComparator(OverrideCall &o, GuestAddr function, GuestAddr context) {
+    Bridge *bridge = &o.bridge;
+    return [[^NSComparisonResult(id a, id b) {
+        uint32_t result = uint32_t(Runtime::threadCpu().call(function, {bridge->toGuest(a), bridge->toGuest(b), context}));
+        int32_t order = int32_t(result);
+        return order < 0 ? NSOrderedAscending : order > 0 ? NSOrderedDescending : NSOrderedSame;
+    } copy] autorelease];
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isArray, "sortedArrayUsingFunction:context:", "sortedArrayUsingFunction:context:hint:") {
+    GuestAddr function = o.args.ptr(), context = o.args.ptr();
+    returnObject(o, [static_cast<NSArray *>(o.receiver) sortedArrayUsingComparator:guestComparator(o, function, context)]);
+}
+B32_OVERRIDE_WHEN(isArray, "sortUsingFunction:context:") {
+    GuestAddr function = o.args.ptr(), context = o.args.ptr();
+    [static_cast<NSMutableArray *>(o.receiver) sortUsingComparator:guestComparator(o, function, context)];
+}
+
+// --- -keyValueBindingForKey:typeMask: on a guest object ------------------------------------------
+// Foundation's old private key-value bindings, which Xcode 3's project unarchiver reads and writes
+// through: on 10.5 they went to an object's private setter (_setKey:) or else its instance variable,
+// not its public setter (whose side effects need the whole object, and unarchiving fills it in a key
+// at a time). Today's Foundation hands back a public setter binding, and a guest object's ivars
+// aren't the host's to find, so for a guest object with a _setKey: or an ivar named key or _key, the
+// guest gets a binding to that.
+
+@interface B32GuestIvarBinding : NSObject {
+@public
+    b32::objc::Bridge *bridge;
+    Class targetClass;
+    NSString *key;
+    SEL setter;  // the private setter, or null for the ivar
+    b32::GuestAddr offsetVar;
+    std::string type;
+}
+@end
+@implementation B32GuestIvarBinding
+- (void)dealloc {
+    [key release];
+    [super dealloc];
+}
+- (NSString *)key { return key; }
+- (Class)targetClass { return targetClass; }
+- (BOOL)isScalarProperty { return type.empty() || type[0] != '@'; }
+- (b32::GuestAddr)slotIn:(id)object {
+    b32::GuestMemory &mem = bridge->runtime().mem();
+    return bridge->toGuest(object) + mem.read<uint32_t>(offsetVar);
+}
+- (void)setValue:(id)value inObject:(id)object {
+    if (setter) {
+        reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(object, setter, value);
+        return;
+    }
+    b32::GuestMemory &mem = bridge->runtime().mem();
+    b32::GuestAddr slot = [self slotIn:object];
+    switch (type.empty() ? '@' : type[0]) {
+    case '@': case '#': {
+        b32::GuestAddr old = mem.read<uint32_t>(slot);
+        [value retain];
+        mem.write<uint32_t>(slot, bridge->toGuest(value));
+        if (old) [bridge->toHost(old) release];
+        return;
+    }
+    case 'c': case 'C': case 'B': mem.write<uint8_t>(slot, uint8_t([value intValue])); return;
+    case 's': case 'S': mem.write<uint16_t>(slot, uint16_t([value intValue])); return;
+    case 'q': case 'Q': mem.write<int64_t>(slot, [value longLongValue]); return;
+    case 'f': mem.write<float>(slot, [value floatValue]); return;
+    case 'd': mem.write<double>(slot, [value doubleValue]); return;
+    default: mem.write<uint32_t>(slot, uint32_t([value longLongValue])); return;
+    }
+}
+- (id)getValueFromObject:(id)object {
+    return [self valueInObject:object];
+}
+- (id)valueInObject:(id)object {
+    // A getter first, private then public (lastKnownFileType's ivar holds the file type object, its
+    // getter the identifier that's archived), then the ivar.
+    for (NSString *name : {[@"_" stringByAppendingString:key], key}) {
+        SEL getter = NSSelectorFromString(name);
+        if (![object respondsToSelector:getter]) continue;
+        NSMethodSignature *signature = [object methodSignatureForSelector:getter];
+        if (signature.numberOfArguments != 2 || signature.methodReturnType[0] != '@') continue;
+        return reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(object, getter);
+    }
+    if (!offsetVar) return [object valueForKey:key];
+    b32::GuestMemory &mem = bridge->runtime().mem();
+    b32::GuestAddr slot = [self slotIn:object];
+    switch (type.empty() ? '@' : type[0]) {
+    case '@': case '#': return bridge->toHost(mem.read<uint32_t>(slot));
+    case 'c': return @(int8_t(mem.read<uint8_t>(slot)));
+    case 'C': case 'B': return @(mem.read<uint8_t>(slot));
+    case 's': return @(int16_t(mem.read<uint16_t>(slot)));
+    case 'S': return @(mem.read<uint16_t>(slot));
+    case 'q': case 'Q': return @(mem.read<int64_t>(slot));
+    case 'f': return @(mem.read<float>(slot));
+    case 'd': return @(mem.read<double>(slot));
+    case 'I': case 'L': return @(mem.read<uint32_t>(slot));
+    default: return @(int32_t(mem.read<uint32_t>(slot)));
+    }
+}
+@end
+
+namespace {
+bool isGuestInstance(id receiver) {
+    if (!receiver || object_isClass(receiver)) return false;
+    Bridge *bridge = Bridge::shared();
+    return bridge && bridge->isShadowClass(object_getClass(receiver));
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isGuestInstance, "keyValueBindingForKey:typeMask:") {
+    NSString *key = o.bridge.toHost(o.args.ptr());
+    uint32_t mask = o.args.u32();
+    const GuestIvar *ivar = key.length ? o.bridge.ivarForKey(o.bridge.classOf(o.guestReceiver), key.UTF8String) : nullptr;
+    SEL setter = nil;
+    if (key.length) {
+        NSString *name = [NSString stringWithFormat:@"_set%@%@:", [key substringToIndex:1].uppercaseString, [key substringFromIndex:1]];
+        SEL candidate = NSSelectorFromString(name);
+        if ([o.receiver respondsToSelector:candidate] && (!ivar || ivar->type.empty() || ivar->type[0] == '@')) setter = candidate;
+    }
+    if (setter || ivar) {
+        B32GuestIvarBinding *binding = [[[B32GuestIvarBinding alloc] init] autorelease];
+        binding->bridge = &o.bridge;
+        binding->targetClass = object_getClass(o.receiver);
+        binding->key = [key copy];
+        binding->setter = setter;
+        binding->offsetVar = ivar ? ivar->offsetVar : 0;
+        binding->type = ivar ? ivar->type : "@";
+        return returnObject(o, binding);
+    }
+    returnObject(o, reinterpret_cast<id (*)(id, SEL, NSString *, NSUInteger)>(objc_msgSend)(o.receiver, o.sel, key, mask));
+}
+
 // --- NSHashTable with a non-object personality ---------------------------------------------------
 // The same for a hash table made with options for opaque pointers, integers or C strings: the host
 // holds the guest's values as they are, which the guest adds and looks up as if they were objects.
