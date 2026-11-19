@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace b32 {
 
@@ -59,8 +60,88 @@ std::wstring utf8ToWide(const std::string &text) {
     return out;
 }
 
+namespace {
+// What a conversion takes from the arguments.
+enum class ArgKind { Word, Wide, Double, LongDouble };
+
+// "%3$@": the argument's 1-based position, with p past the '$'; 0 (p unmoved) for none.
+int positionAt(const char *&p) {
+    const char *q = p;
+    int n = 0;
+    while (*q >= '1' && *q <= '9' && n < 100) n = n * 10 + (*q++ - '0');
+    while (n && *q >= '0' && *q <= '9') n = n * 10 + (*q++ - '0');
+    if (!n || *q != '$') return 0;
+    p = q + 1;
+    return n;
+}
+
+// The kinds of a format's positional arguments, by position (index 0 unused), so they can be read in order
+// before any is formatted; empty when the format numbers none.
+std::vector<ArgKind> positionalKinds(const char *format) {
+    std::vector<ArgKind> kinds;
+    for (const char *p = format; *p;) {
+        if (*p++ != '%') continue;
+        if (*p == '%') {
+            p++;
+            continue;
+        }
+        int position = positionAt(p);
+        if (!position) return {};
+        while (*p && (std::strchr("-+ #0'.*", *p) || (*p >= '0' && *p <= '9'))) p++;
+        ArgKind kind = ArgKind::Word;
+        while (*p && std::strchr("hlqjztL", *p)) {
+            if (*p == 'q' || *p == 'j' || (*p == 'l' && p[1] == 'l')) {
+                kind = ArgKind::Wide;
+                if (*p == 'l') p++;
+            } else if (*p == 'L') {
+                kind = ArgKind::LongDouble;
+            }
+            p++;
+        }
+        char conv = *p ? *p++ : '\0';
+        if (std::strchr("fFeEgGaA", conv) && conv) kind = kind == ArgKind::LongDouble ? ArgKind::LongDouble : ArgKind::Double;
+        else if (kind == ArgKind::LongDouble) kind = ArgKind::Word;
+        if (kinds.size() <= size_t(position)) kinds.resize(size_t(position) + 1, ArgKind::Word);
+        kinds[size_t(position)] = kind;
+    }
+    return kinds;
+}
+}  // namespace
+
 std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber describe) {
     args.beginVarArgs();
+
+    // Numbered arguments ("%2$@ %1$@", as localized strings reorder them) are read in order first.
+    using LongDouble = decltype(args.longDouble());
+    struct Value {
+        uint64_t bits = 0;
+        double d = 0;
+        LongDouble ld{};
+    };
+    std::vector<Value> numbered;
+    std::vector<ArgKind> kinds = positionalKinds(format);
+    for (size_t i = 1; i < kinds.size(); i++) {
+        Value v;
+        switch (kinds[i]) {
+        case ArgKind::Word: v.bits = args.u32(); break;
+        case ArgKind::Wide: v.bits = args.u64(); break;
+        case ArgKind::Double: v.d = args.f64(); break;
+        case ArgKind::LongDouble: v.ld = args.longDouble(); break;
+        }
+        numbered.push_back(v);
+    }
+    int position = 0;  // the conversion's argument, when numbered
+    auto value = [&]() -> const Value & {
+        static const Value none;
+        return position >= 1 && size_t(position) <= numbered.size() ? numbered[size_t(position) - 1] : none;
+    };
+    auto u32 = [&]() -> uint32_t { return position ? uint32_t(value().bits) : args.u32(); };
+    auto i32 = [&]() -> int32_t { return int32_t(u32()); };
+    auto ptr = [&]() -> GuestAddr { return u32(); };
+    auto u64 = [&]() -> uint64_t { return position ? value().bits : args.u64(); };
+    auto f64 = [&]() -> double { return position ? value().d : args.f64(); };
+    auto readLongDouble = [&]() -> LongDouble { return position ? value().ld : args.longDouble(); };
+
     std::string out;
     char piece[512];
     for (const char *p = format; *p;) {
@@ -74,6 +155,7 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             p++;
             continue;
         }
+        position = numbered.empty() ? 0 : positionAt(p);
 
         // Rebuild the spec for the host's snprintf: flags, width, precision.
         std::string spec = "%";
@@ -81,7 +163,7 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
         auto number = [&] {
             if (*p == '*') {
                 p++;
-                spec += std::to_string(args.i32());
+                spec += std::to_string(position ? 0 : i32());
                 return;
             }
             while (*p >= '0' && *p <= '9') spec += *p++;
@@ -115,25 +197,25 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
         case 'c':
             if (wideChars) {  // a wint_t, as UTF-8
                 std::string text;
-                appendCodePoint(text, args.u32());
+                appendCodePoint(text, u32());
                 out += text;
                 break;
             }
             [[fallthrough]];
         case 'd': case 'i': case 'u': case 'o': case 'x': case 'X':
             if (wide) {
-                std::snprintf(piece, sizeof piece, (spec + "ll" + conv).c_str(), (long long)args.u64());
+                std::snprintf(piece, sizeof piece, (spec + "ll" + conv).c_str(), (long long)u64());
             } else {
-                std::snprintf(piece, sizeof piece, (spec + conv).c_str(), args.u32());
+                std::snprintf(piece, sizeof piece, (spec + conv).c_str(), u32());
             }
             out += piece;
             break;
         case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A':
-            std::snprintf(piece, sizeof piece, (spec + conv).c_str(), longDouble ? args.longDouble() : args.f64());
+            std::snprintf(piece, sizeof piece, (spec + conv).c_str(), longDouble ? readLongDouble() : f64());
             out += piece;
             break;
         case 's': {
-            GuestAddr s = args.ptr();
+            GuestAddr s = ptr();
             if (wideChars) {  // a wchar_t string, as UTF-8
                 std::string host = !s ? "(null)" : wideToUTF8(c.mem.readWide(s));
                 int n = std::snprintf(nullptr, 0, (spec + 's').c_str(), host.c_str());
@@ -154,21 +236,21 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             break;
         }
         case 'p':
-            std::snprintf(piece, sizeof piece, (spec + "#x").c_str(), args.u32());
+            std::snprintf(piece, sizeof piece, (spec + "#x").c_str(), u32());
             out += piece;
             break;
         case 'C':  // a unichar (UTF-16 code unit), as UTF-8
-            appendUTF16(out, [&] { uint16_t ch = uint16_t(args.u32()); return std::u16string(1, char16_t(ch)); }());
+            appendUTF16(out, [&] { uint16_t ch = uint16_t(u32()); return std::u16string(1, char16_t(ch)); }());
             break;
 #if defined(B32_GUEST_MAC)
         case 'S': {  // on the Mac, a wchar_t string like %ls
-            GuestAddr s = args.ptr();
+            GuestAddr s = ptr();
             if (s) out += wideToUTF8(c.mem.readWide(s));
             break;
         }
 #else
         case 'S': {  // a NUL-terminated unichar string
-            GuestAddr s = args.ptr();
+            GuestAddr s = ptr();
             std::u16string text;
             if (s)
                 for (GuestAddr q = s; uint16_t ch = c.mem.read<uint16_t>(q); q += 2) text += char16_t(ch);
@@ -176,10 +258,10 @@ std::string formatGuest(Call &c, const char *format, Args &args, ObjectDescriber
             break;
         }
 #endif
-        case 'n': args.ptr(); break;  // never write back through %n
+        case 'n': ptr(); break;  // never write back through %n
         case '@':
             if (!describe) fatal("%%@ in a C format string: %s", format);
-            out += describe(c, args.ptr());
+            out += describe(c, ptr());
             break;
         default:
             log("unsupported printf conversion '%.*s'", int(p - start), start);

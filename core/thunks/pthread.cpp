@@ -256,6 +256,9 @@ B32_THUNK(_pthread_mach_thread_np) {
     c.ret(it == ports.end() ? 0 : it->second);
 }
 
+// Guest threads run on host threads of their own, and the guest's main thread on the host's.
+B32_THUNK(_pthread_main_np) { c.ret(uint32_t(::pthread_main_np())); }
+
 B32_THUNK(_pthread_equal) {
     GuestAddr a = c.args.ptr();
     c.ret(a == c.args.ptr());

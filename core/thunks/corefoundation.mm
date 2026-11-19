@@ -42,6 +42,7 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFStringAppendCharacters", "v:opz"}, {"CFStringAppendCString", "v:opu"},
     {"CFStringCreateWithCString", "o:opu"}, {"CFStringGetCString", "B:opzu"},
     {"CFStringGetLength", "z:o"}, {"CFStringCreateMutable", "o:oz"}, {"CFStringCreateCopy", "o:oo"},
+    {"CFStringGetFileSystemRepresentation", "B:opz"}, {"CFStringGetMaximumSizeOfFileSystemRepresentation", "z:o"},
     {"CFStringCompare", "z:ooz"}, {"CFStringGetIntValue", "i:o"}, {"CFStringGetDoubleValue", "d:o"},
     {"CFUUIDCreate", "o:o"}, {"CFUUIDCreateString", "o:oo"},
     {"CFGetTypeID", "z:o"}, {"CFStringGetTypeID", "z:"}, {"CFNumberGetTypeID", "z:"},

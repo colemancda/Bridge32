@@ -101,10 +101,13 @@ private:
     GuestAddr thisReturning(GuestAddr target);
     MachOLoader makeLoader();
     std::unordered_map<std::string, GuestAddr> nativeFunctions_;  // see arch::nativeFunction
-    void loadLinkedLibraries(const std::vector<std::string> &dylibs);
+    void loadLinkedLibraries(const std::vector<std::string> &dylibs, const std::vector<std::string> &rpaths, const std::string &loader);
+    // The run-path search folders of the images being loaded, the innermost last: an image's @rpath is
+    // searched in its own LC_RPATH entries and those of the images that loaded it, as dyld does.
+    std::vector<std::vector<std::string>> rpathStack_;
     // Loads the guest library at `path` into the next window; its index in libraries_.
     size_t loadGuestLibrary(const std::string &path);
-    std::string findGuestLibrary(const std::string &installName) const;
+    std::string findGuestLibrary(const std::string &installName, const std::string &loader = {}) const;
     // A CPU for a new guest thread, with its pthread slots (Cpu::tsd).
     std::unique_ptr<Cpu> newCpu();
     GuestAddr buildProcessStack(GuestAddr stackTop, const std::vector<std::string> &argv,

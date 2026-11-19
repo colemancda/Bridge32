@@ -78,6 +78,19 @@ B32_THUNK(_NSApplicationLoad) {
 
 B32_THUNK(_NSBeep) { NSBeep(); }
 
+// void NSCountWindows(NSInteger *count) and void NSWindowList(NSInteger size, NSInteger list[]):
+// the app's windows, front to back, by number.
+B32_THUNK(_NSCountWindows) {
+    if (GuestAddr out = c.args.ptr()) c.mem.write<int32_t>(out, int32_t([NSWindow windowNumbersWithOptions:0].count));
+}
+B32_THUNK(_NSWindowList) {
+    int32_t size = c.args.i32();
+    GuestAddr list = c.args.ptr();
+    NSArray<NSNumber *> *numbers = [NSWindow windowNumbersWithOptions:0];
+    for (int32_t i = 0; list && i < size && i < int32_t(numbers.count); i++)
+        c.mem.write<int32_t>(list + uint32_t(i) * 4, int32_t(numbers[NSUInteger(i)].integerValue));
+}
+
 // --- drawing --------------------------------------------------------------------------------
 
 B32_THUNK(_NSRectFill) { NSRectFill(rectArg(c)); }

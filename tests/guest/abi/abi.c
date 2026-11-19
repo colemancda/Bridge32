@@ -54,6 +54,43 @@ struct dirent64x {
 int stat32_(const char *, struct stat32 *) __asm("_stat");
 int stat64_(const char *, struct stat64x *) __asm("_stat$INODE64");
 struct dirent32 *readdir32(void *) __asm("_readdir");
+
+// The two FTSENT layouts, as far as their names (32-bit inodes before 10.5's $INODE64).
+struct ftsent32 {
+    void *cycle, *parent, *link;
+    long number;
+    void *pointer;
+    char *accpath, *path;
+    int err, symfd;
+    uint16_t pathlen, namelen;
+    uint32_t ino;
+    int32_t dev;
+    uint16_t nlink;
+    int16_t level;
+    uint16_t info, flags, instr;
+    void *statp;
+    char name[1];
+};
+struct ftsent64x {
+    void *cycle, *parent, *link;
+    long number;
+    void *pointer;
+    char *accpath, *path;
+    int err, symfd;
+    uint16_t pathlen, namelen;
+    uint64_t ino __attribute__((aligned(4)));
+    int32_t dev;
+    uint16_t nlink;
+    int16_t level;
+    uint16_t info, flags, instr;
+    void *statp;
+    char name[1];
+};
+void *fts_open32(char *const *, int, void *) __asm("_fts_open");
+void *fts_open64x(char *const *, int, void *) __asm("_fts_open$INODE64");
+void *fts_read_(void *) __asm("_fts_read");
+int fts_set_(void *, void *, int) __asm("_fts_set");
+int fts_close_(void *) __asm("_fts_close");
 struct dirent64x *readdir64x(void *) __asm("_readdir$INODE64");
 
 // Just the fields compared below of the two struct statfs layouts.
@@ -135,6 +172,9 @@ int main(int argc, char **argv) {
     char text[64];
     snprintf(text, sizeof text, "%d %.2Lf %d", 1, value * argc, 3);
     failures += check(strcmp(text, "1 2.50 3") == 0, "long-double-vararg");
+    // Numbered arguments, as localized formats reorder them: each is read by its own size.
+    snprintf(text, sizeof text, "%3$s %1$lld %2$.1f", 1LL << 40, 0.5 * argc, "x");
+    failures += check(strcmp(text, "x 1099511627776 0.5") == 0, "positional-args");
     failures += check(strtold("1.25", NULL) == 1.25L, "long-double-result");
 
     // Two words in EAX:EDX.
@@ -171,6 +211,29 @@ int main(int argc, char **argv) {
     for (struct dirent64x *e; (e = readdir64x(d));) found64 += strcmp(e->name, "usr") == 0 && e->namlen == 3;
     closedir(d);
     failures += check(found32 == 1 && found64 == 1, "dirent");
+
+    // fts walks /usr in both layouts; skipping a directory leaves out what's in it.
+    char *roots[] = {"/usr", NULL};
+    int usr32 = 0, lib32 = 0, deep32 = 0, usr64 = 0, lib64 = 0;
+    void *walk = fts_open32(roots, 0x10 /* FTS_PHYSICAL */, NULL);
+    for (struct ftsent32 *e; walk && (e = fts_read_(walk));) {
+        if (e->info != 1 /* FTS_D */) continue;
+        usr32 += e->level == 0 && strcmp(e->name, "usr") == 0 && strcmp(e->path, "/usr") == 0;
+        if (e->level == 1 && strcmp(e->name, "lib") == 0 && e->namelen == 3 && e->statp) lib32++;
+        if (e->level == 1) fts_set_(walk, e, 4 /* FTS_SKIP */);
+        if (e->level > 1) deep32++;
+    }
+    if (walk) fts_close_(walk);
+    walk = fts_open64x(roots, 0x10, NULL);
+    for (struct ftsent64x *e; walk && (e = fts_read_(walk));) {
+        if (e->info != 1) continue;
+        usr64 += e->level == 0 && strcmp(e->name, "usr") == 0;
+        lib64 += e->level == 1 && strcmp(e->name, "lib") == 0 && strcmp(e->path, "/usr/lib") == 0;
+        if (e->level == 1) fts_set_(walk, e, 4);
+    }
+    if (walk) fts_close_(walk);
+    failures += check(usr32 == 1 && lib32 == 1 && deep32 == 0, "fts");
+    failures += check(usr64 == 1 && lib64 == 1, "fts-inode64");
 
     struct statfs32 fs32;
     struct statfs64x fs64;

@@ -215,6 +215,11 @@ public:
 
     static Bridge *shared();  // the process's bridge, for host callbacks
     bool isShadowClass(Class c);
+    // The bundle directory of the guest library that defines shadow class `c` (a framework,
+    // a plug-in), or "" for the app's own classes and host classes.
+    std::string guestBundlePath(Class c);
+    // The bundle directories of the guest libraries loaded so far.
+    std::vector<std::string> guestBundlePaths();
 
     Runtime &runtime() { return rt_; }
 

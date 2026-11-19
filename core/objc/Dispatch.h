@@ -20,6 +20,10 @@ struct OverrideCall {
 };
 
 using OverrideFn = void (*)(OverrideCall &);
+
+// Whether a host NSHashTable was made (by the guest) with a personality that isn't objects, so
+// it holds plain guest values (overrides.mm).
+bool isRawHashTable(id table);
 // Decides from the receiver alone (without reading arguments) whether the
 // override applies, e.g. -bounds only for UIScreen.
 using OverrideCondition = bool (*)(id receiver);

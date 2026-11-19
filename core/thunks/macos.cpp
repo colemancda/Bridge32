@@ -116,9 +116,28 @@ B32_THUNK(_fegetround) { c.ret(0); }
 
 // --- processes --------------------------------------------------------------------------
 
+B32_THUNK(_dup) { retErrno(c, ::dup(c.args.i32())); }
 B32_THUNK(_dup2) {
     int a = c.args.i32();
     retErrno(c, ::dup2(a, c.args.i32()));
+}
+// struct rlimit is two 64-bit rlim_t in the 32-bit ABI too.
+B32_THUNK(_getrlimit) {
+    int resource = c.args.i32();
+    GuestAddr out = c.args.ptr();
+    struct rlimit limit {};
+    int result = ::getrlimit(resource, &limit);
+    if (result == 0 && out) {
+        c.mem.write<uint64_t>(out, limit.rlim_cur);
+        c.mem.write<uint64_t>(out + 8, limit.rlim_max);
+    }
+    retErrno(c, result);
+}
+B32_THUNK(_setrlimit) {
+    int resource = c.args.i32();
+    GuestAddr in = c.args.ptr();
+    struct rlimit limit {c.mem.read<uint64_t>(in), c.mem.read<uint64_t>(in + 8)};
+    retErrno(c, ::setrlimit(resource, &limit));
 }
 B32_THUNK(_kill) {
     pid_t pid = c.args.i32();
