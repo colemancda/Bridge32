@@ -125,12 +125,23 @@ UnicornCpu::~UnicornCpu() {
     uc_close(uc_);
 }
 
+namespace {
+// What __PAGEZERO covers in a Mac OS X executable: nothing below this is ever the guest's.
+constexpr uint32_t kPageZero = 0x1000;
+}  // namespace
+
 bool UnicornCpu::mapAroundForHook(uint64_t address) {
     return address < GuestMemory::kSize && mapAround(GuestAddr(address));
 }
 
 void UnicornCpu::mapPages(uint32_t first, uint32_t end) {
     uint64_t start = uint64_t(first) * GuestMemory::kPageSize, size = uint64_t(end - first) * GuestMemory::kPageSize;
+    // The program's own page zero stays unmapped: a Mach-O's text starts at 0x1000, in the same host page as
+    // address 0, and a null pointer (a read, a write, or a call through one) must fault rather than see zeros.
+    if (start < kPageZero) {
+        size -= kPageZero - start;
+        start = kPageZero;
+    }
     check(uc_mem_map_ptr(uc_, start, size, UC_PROT_ALL, mem().base() + start), "map");
     for (uint32_t p = first; p < end; p++) mapped_[p / 8] |= uint8_t(1u << (p % 8));
 }
@@ -138,7 +149,7 @@ void UnicornCpu::mapPages(uint32_t first, uint32_t end) {
 bool UnicornCpu::mapAround(GuestAddr addr) {
     constexpr uint32_t kPages = GuestMemory::kSize / GuestMemory::kPageSize;
     uint32_t page = addr / GuestMemory::kPageSize;
-    if (!mem().isMapped(addr)) {
+    if (addr < kPageZero || !mem().isMapped(addr)) {
         fault_ = Fault{addr, false};
         return false;
     }
@@ -246,6 +257,12 @@ void UnicornCpu::restoreState(const std::vector<uint8_t> &state) {
 uint32_t UnicornCpu::runUntilSvc() {
     for (;;) {
         fault_.reset();
+        // A call or jump through a null pointer: Unicorn would stop at once (0 is also where it's told to
+        // stop) and report nothing, so it's the fetch fault it is on a Mac.
+        if (reg(EIP) == 0) {
+            deliverFault(0, false);
+            continue;
+        }
         enterGuest();
         uc_err err = uc_emu_start(uc_, reg(EIP), 0, 0, 0);
         leaveGuest();
