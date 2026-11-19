@@ -1039,6 +1039,9 @@ GuestAddr Bridge::allocObject(id object, ClassInfo *isa, uint32_t size) {
     }
     GuestAddr addr = rt_.heap().calloc(1, size);
     rt_.mem().write<uint32_t>(addr, isa->addr);
+    // Kept, as a collector would keep what the guest refers to (an autorelease pool can't be retained;
+    // the guest's -drain pops it, and its -release does nothing, as under the collector).
+    if (collecting_ && ![object isKindOfClass:[NSAutoreleasePool class]]) [object retain];
     handleByGuest_[addr] = handle;
     handleObjects_[handle] = object;
     handleGuests_[handle] = addr;
