@@ -10,6 +10,7 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 
+#include <langinfo.h>
 #include <mach/clock.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
@@ -457,10 +458,12 @@ B32_THUNK(_vm_read_overwrite) {
 
 // --- processes and threads -----------------------------------------------------------------------
 
-B32_THUNK(_fork) {
+#if !defined(B32_GUEST_I386)
+B32_THUNK(_fork) {  // i386's is in core/arch
     setGuestErrno(c, ENOSYS);
     c.ret(uint32_t(-1));
 }
+#endif
 B32_THUNK(_getloadavg) { c.ret(uint32_t(-1)); }
 B32_THUNK(_backtrace) { c.ret(0); }
 B32_THUNK(_sigaltstack) { c.ret(0); }
@@ -506,8 +509,105 @@ B32_THUNK(_bsearch) {
     c.ret(0);
 }
 
+// tsearch, tfind, tdelete and twalk: a binary search tree in guest memory, unbalanced as BSD's is.
+// A node is { const void *key; node *left; node *right; }, and the functions hand back a node, whose
+// first word is its key. The comparator is the guest's.
+namespace {
+constexpr uint32_t kTreeLeft = 4, kTreeRight = 8;
+// The link that holds `key`'s node, or the empty link where it would go.
+GuestAddr treeLink(Call &c, GuestAddr key, GuestAddr link, GuestAddr compare) {
+    while (GuestAddr node = c.mem.read<uint32_t>(link)) {
+        auto order = int32_t(c.cpu.call(compare, {key, c.mem.read<uint32_t>(node)}));
+        if (order == 0) break;
+        link = node + (order < 0 ? kTreeLeft : kTreeRight);
+    }
+    return link;
+}
+void treeWalk(Call &c, GuestAddr node, GuestAddr action, uint32_t level) {
+    enum { preorder, postorder, endorder, leaf };
+    GuestAddr left = c.mem.read<uint32_t>(node + kTreeLeft), right = c.mem.read<uint32_t>(node + kTreeRight);
+    if (!left && !right) {
+        c.cpu.call(action, {node, leaf, level});
+        return;
+    }
+    c.cpu.call(action, {node, preorder, level});
+    if (left) treeWalk(c, left, action, level + 1);
+    c.cpu.call(action, {node, postorder, level});
+    if (right) treeWalk(c, right, action, level + 1);
+    c.cpu.call(action, {node, endorder, level});
+}
+}  // namespace
+
+// void *tsearch(const void *key, void **rootp, int (*compar)(const void *, const void *))
+B32_THUNK(_tsearch) {
+    GuestAddr key = c.args.ptr(), root = c.args.ptr(), compare = c.args.ptr();
+    if (!root) return c.ret(0);
+    GuestAddr link = treeLink(c, key, root, compare);
+    if (GuestAddr node = c.mem.read<uint32_t>(link)) return c.ret(node);
+    GuestAddr node = c.heap.calloc(1, 12);
+    c.mem.write<uint32_t>(node, key);
+    c.mem.write<uint32_t>(link, node);
+    c.ret(node);
+}
+B32_THUNK(_tfind) {
+    GuestAddr key = c.args.ptr(), root = c.args.ptr(), compare = c.args.ptr();
+    c.ret(root ? c.mem.read<uint32_t>(treeLink(c, key, root, compare)) : 0);
+}
+// void *tdelete(const void *key, void **rootp, compar): the deleted node's parent (or, for the root,
+// any non-null pointer), or NULL if the key isn't there.
+B32_THUNK(_tdelete) {
+    GuestAddr key = c.args.ptr(), link = c.args.ptr(), compare = c.args.ptr();
+    if (!link || !c.mem.read<uint32_t>(link)) return c.ret(0);
+    GuestAddr parent = c.mem.read<uint32_t>(link);
+    for (;;) {
+        GuestAddr node = c.mem.read<uint32_t>(link);
+        auto order = int32_t(c.cpu.call(compare, {key, c.mem.read<uint32_t>(node)}));
+        if (order == 0) break;
+        parent = node;
+        link = node + (order < 0 ? kTreeLeft : kTreeRight);
+        if (!c.mem.read<uint32_t>(link)) return c.ret(0);
+    }
+    GuestAddr node = c.mem.read<uint32_t>(link);
+    GuestAddr r = c.mem.read<uint32_t>(node + kTreeRight), q = c.mem.read<uint32_t>(node + kTreeLeft);
+    if (!q) q = r;
+    else if (r) {
+        if (!c.mem.read<uint32_t>(r + kTreeLeft)) {
+            c.mem.write<uint32_t>(r + kTreeLeft, q);
+            q = r;
+        } else {
+            for (q = c.mem.read<uint32_t>(r + kTreeLeft); c.mem.read<uint32_t>(q + kTreeLeft);
+                 q = c.mem.read<uint32_t>(r + kTreeLeft))
+                r = q;
+            c.mem.write<uint32_t>(r + kTreeLeft, c.mem.read<uint32_t>(q + kTreeRight));
+            c.mem.write<uint32_t>(q + kTreeLeft, c.mem.read<uint32_t>(node + kTreeLeft));
+            c.mem.write<uint32_t>(q + kTreeRight, c.mem.read<uint32_t>(node + kTreeRight));
+        }
+    }
+    c.heap.free(node);
+    c.mem.write<uint32_t>(link, q);
+    c.ret(parent);
+}
+// void twalk(const void *root, void (*action)(const void *node, VISIT, int level))
+B32_THUNK(_twalk) {
+    GuestAddr root = c.args.ptr(), action = c.args.ptr();
+    if (root && action) treeWalk(c, root, action, 0);
+}
+
+// void *sbrk(int increment): there's no program break, only the heap. A program that measures its
+// memory with sbrk(0) sees one that doesn't move; one that asks for more is given a heap block.
+B32_THUNK(_sbrk) {
+    static GuestAddr base = c.heap.alloc(16);
+    int32_t increment = c.args.i32();
+    c.ret(increment > 0 ? c.heap.alloc(uint32_t(increment)) : base);
+}
+
 // int mkstemp(char *template): fills in the template in place.
-B32_THUNK(_mkstemp) { c.ret(uint32_t(mkstemp(c.mem.ptr<char>(c.args.ptr())))); }
+B32_THUNK(_mkstemp) { retErrno(c, mkstemp(c.mem.ptr<char>(c.args.ptr()))); }
+// int mkstemps(char *template, int suffixlen): the same, with a suffix after the X's.
+B32_THUNK(_mkstemps) {
+    char *path = c.mem.ptr<char>(c.args.ptr());
+    retErrno(c, mkstemps(path, c.args.i32()));
+}
 
 // time_t mktime(struct tm *): the guest's tm is nine ints, tm_gmtoff and tm_zone.
 B32_THUNK(_mktime) {
@@ -525,6 +625,9 @@ B32_THUNK(_mktime) {
 }
 
 // struct lconv *localeconv(void): the C locale's, built once.
+// char *nl_langinfo(nl_item): the host's answer (the items are numbered alike).
+B32_THUNK(_nl_langinfo) { c.ret(c.rt.internString(nl_langinfo(nl_item(c.args.i32())))); }
+
 B32_THUNK(_localeconv) {
     static GuestAddr lconv = [&] {
         // Ten char * fields, then fourteen chars (CHAR_MAX: not available).
