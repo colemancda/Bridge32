@@ -47,7 +47,7 @@ public:
     uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args) override;
 
     // What longjmp does to a buffer our setjmp filled (see X86Cpu.cpp).
-    void longjmpTo(GuestAddr buf, uint32_t value);
+    void longjmpTo(GuestAddr buf, uint32_t value) override;
 
     // Pops the hidden result pointer as the callee's `ret $4` would, by moving
     // the return address up a word.
