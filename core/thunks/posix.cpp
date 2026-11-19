@@ -55,9 +55,10 @@ B32_THUNK(_open) {
     int flags = c.args.i32();
     int mode = c.args.i32();
     int fd = ::open(path, flags, mode);
-    if (fd < 0) log("open(%s) failed: %s", path, std::strerror(errno));
+    int error = errno;
     B32_FILE_LOG("open(%s, 0x%x) = %d", path, flags, fd);
-    c.ret(uint32_t(fd));
+    errno = error;
+    retErrno(c, fd);
 }
 
 // off_t lseek(int fd, off_t offset, int whence): off_t is 64-bit.
@@ -73,42 +74,43 @@ B32_THUNK(_lseek) {
 B32_THUNK(_fcntl) {
     int fd = c.args.i32();
     int cmd = c.args.i32();
-    c.ret(uint32_t(::fcntl(fd, cmd, c.args.i32())));
+    retErrno(c, ::fcntl(fd, cmd, c.args.i32()));
 }
 
 #define B32_PATH_CALL(symbol, call)                       \
     B32_THUNK(symbol) {                                   \
         const char *path = c.mem.cstr(c.args.ptr());      \
-        c.ret(uint32_t(call));                            \
+        retErrno(c, call);                                \
     }
 B32_PATH_CALL(_unlink, ::unlink(path))
 B32_PATH_CALL(_remove, std::remove(path))
 B32_PATH_CALL(_rmdir, ::rmdir(path))
 B32_THUNK(_chdir) {
     const char *path = c.mem.cstr(c.args.ptr());
-    int rc = ::chdir(path);
+    int rc = ::chdir(path), error = errno;
     B32_FILE_LOG("chdir(%s) = %d", path, rc);
-    c.ret(uint32_t(rc));
+    errno = error;
+    retErrno(c, rc);
 }
 B32_THUNK(_mkdir) {
     const char *path = c.mem.cstr(c.args.ptr());
-    c.ret(uint32_t(::mkdir(path, mode_t(c.args.u32()))));
+    retErrno(c, ::mkdir(path, mode_t(c.args.u32())));
 }
 B32_THUNK(_chmod) {
     const char *path = c.mem.cstr(c.args.ptr());
-    c.ret(uint32_t(::chmod(path, mode_t(c.args.u32()))));
+    retErrno(c, ::chmod(path, mode_t(c.args.u32())));
 }
 B32_THUNK(_rename) {
     const char *from = c.mem.cstr(c.args.ptr());
-    c.ret(uint32_t(std::rename(from, c.mem.cstr(c.args.ptr()))));
+    retErrno(c, std::rename(from, c.mem.cstr(c.args.ptr())));
 }
 B32_THUNK(_truncate) {
     const char *path = c.mem.cstr(c.args.ptr());
-    c.ret(uint32_t(::truncate(path, off_t(c.args.u64()))));
+    retErrno(c, ::truncate(path, off_t(c.args.u64())));
 }
 B32_THUNK(_access) {
     const char *path = c.mem.cstr(c.args.ptr());
-    c.ret(uint32_t(::access(path, c.args.i32())));
+    retErrno(c, ::access(path, c.args.i32()));
 }
 
 // The guest's struct stat comes in two layouts, each with 32-bit time_t and long.
@@ -174,10 +176,11 @@ void statPath(Call &c, int (*host)(const char *, struct stat *), bool inode64) {
     const char *path = c.mem.cstr(c.args.ptr());
     GuestAddr out = c.args.ptr();
     struct stat st;
-    int rc = host(path, &st);
+    int rc = host(path, &st), error = errno;
     if (rc == 0) (inode64 ? writeStat : writeStat32)(c.mem, out, st);
     B32_FILE_LOG("stat(%s) = %d", path, rc);
-    c.ret(uint32_t(rc));
+    errno = error;
+    retErrno(c, rc);
 }
 void statDescriptor(Call &c, bool inode64) {
     int fd = c.args.i32();
@@ -185,7 +188,7 @@ void statDescriptor(Call &c, bool inode64) {
     struct stat st;
     int rc = ::fstat(fd, &st);
     if (rc == 0) (inode64 ? writeStat : writeStat32)(c.mem, out, st);
-    c.ret(uint32_t(rc));
+    retErrno(c, rc);
 }
 }  // namespace
 
@@ -1068,6 +1071,16 @@ B32_THUNK(_setenv) {
     const char *value = c.mem.cstr(c.args.ptr());
     c.ret(uint32_t(::setenv(name, value, c.args.i32())));
 }
+// int putenv(char *string): "NAME=value", copied, so the guest's string needn't live on.
+B32_THUNK(_putenv) {
+    std::string entry = c.mem.cstr(c.args.ptr());
+    size_t equals = entry.find('=');
+    if (equals == std::string::npos || equals == 0) {
+        setGuestErrno(c, EINVAL);
+        return c.ret(uint32_t(-1));
+    }
+    retErrno(c, ::setenv(entry.substr(0, equals).c_str(), entry.c_str() + equals + 1, 1));
+}
 B32_THUNK(_unsetenv) { c.ret(uint32_t(::unsetenv(c.mem.cstr(c.args.ptr())))); }
 
 // syslog goes to Bridge32's log.
@@ -1080,7 +1093,11 @@ B32_THUNK(_syslog) {
 
 // --- process and system -------------------------------------------------------------------------
 
-B32_THUNK(__Exit) { c.rt.exit(c.args.i32()); }
+B32_THUNK(__Exit) {
+    int status = c.args.i32();
+    if (ForkChild *child = forkChild) return child->exited(c, status);
+    c.rt.exit(status);
+}
 
 // long sysconf(int): long is 32-bit in the guest, and pages are 4 KB there.
 B32_THUNK(_sysconf) {
@@ -1216,7 +1233,7 @@ B32_THUNK(_flock) {
 B32_THUNK(_readlink) {
     const char *path = c.mem.cstr(c.args.ptr());
     GuestAddr buf = c.args.ptr();
-    c.ret(uint32_t(::readlink(path, c.mem.ptr<char>(buf), c.args.u32())));
+    retErrno(c, ::readlink(path, c.mem.ptr<char>(buf), c.args.u32()));
 }
 B32_THUNK(_symlink) {
     const char *target = c.mem.cstr(c.args.ptr());
@@ -1305,7 +1322,8 @@ B32_THUNK(_mktemp) {
     c.ret(path);
 }
 
-// A guest can't start other programs.
+#if !defined(B32_GUEST_MAC)
+// An iOS guest can't start other programs (a Mac guest can: spawn.cpp).
 B32_THUNK(_execv) {
     setGuestErrno(c, ENOTSUP);
     c.ret(uint32_t(-1));
@@ -1314,6 +1332,7 @@ B32_THUNK(_execvp) {
     setGuestErrno(c, ENOTSUP);
     c.ret(uint32_t(-1));
 }
+#endif
 // int system(const char *command): no shell either; system(NULL) asks
 // whether there is one.
 B32_THUNK(_system) {

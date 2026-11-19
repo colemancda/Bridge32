@@ -63,6 +63,12 @@ B32_THUNK(___umoddi3) {
     c.ret64(modulo(a, c.args.u64()));
 }
 
+// Leading and trailing zero bits (undefined for zero, as in compiler-rt).
+B32_THUNK(___clzsi2) { c.ret(uint32_t(__builtin_clz(c.args.u32()))); }
+B32_THUNK(___ctzsi2) { c.ret(uint32_t(__builtin_ctz(c.args.u32()))); }
+B32_THUNK(___clzdi2) { c.ret(uint32_t(__builtin_clzll(c.args.u64()))); }
+B32_THUNK(___ctzdi2) { c.ret(uint32_t(__builtin_ctzll(c.args.u64()))); }
+
 // --- single precision ------------------------------------------------------
 
 #define B32_FLOAT_BINOP(name, op)                \

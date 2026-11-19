@@ -15,14 +15,42 @@
 #import <AppKit/AppKit.h>
 #include <unistd.h>
 
+#include <cstring>
 #include <string>
 
 namespace b32::appkit {
 void startControllerMapping();  // core/appkit/controller.mm
 }
 
+namespace {
+std::unique_ptr<b32::Cpu> makeCpu(b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) {
+#if defined(B32_GUEST_PPC)
+    return std::make_unique<b32::UnicornPowerCpu>(mem, std::move(handler));
+#else
+    return std::make_unique<b32::UnicornCpu>(mem, std::move(handler));
+#endif
+}
+
+// Bridge32 --b32-exec <guest executable> <argv0> [args...]: another program the guest started (with
+// exec, fork and exec, or posix_spawn), a command-line tool more often than not. It runs as b32-run
+// would run it, with the wrapped app's frameworks to hand.
+int runStartedProgram(int argc, char **argv) {
+    static b32::Runtime &rt = *new b32::Runtime(makeCpu);
+    if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
+    NSString *guest = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Contents/B32Guest"];
+    rt.addGuestLibraryDir([guest stringByAppendingPathComponent:@"Frameworks"].fileSystemRepresentation);
+    rt.load(argv[2]);
+    std::vector<std::string> guestArgv(argv + 3, argv + argc);
+    std::vector<std::string> envp = {std::string("HOME=") + NSHomeDirectory().fileSystemRepresentation,
+                                     std::string("TMPDIR=") + NSTemporaryDirectory().fileSystemRepresentation};
+    return rt.run(guestArgv, envp);
+}
+}  // namespace
+
 int main(int argc, char **argv) {
     @autoreleasepool {
+        if (argc >= 4 && std::strcmp(argv[1], "--b32-exec") == 0) return runStartedProgram(argc, argv);
+
         NSBundle *bundle = [NSBundle mainBundle];
         NSString *executable = [bundle objectForInfoDictionaryKey:@"B32GuestExecutable"];
         if (!executable) {
@@ -54,13 +82,7 @@ int main(int argc, char **argv) {
 
         // Never destroyed: quitting runs exit()'s static destructors while the
         // guest's threads are still running.
-        static b32::Runtime &rt = *new b32::Runtime([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
-#if defined(B32_GUEST_PPC)
-            return std::make_unique<b32::UnicornPowerCpu>(mem, std::move(handler));
-#else
-            return std::make_unique<b32::UnicornCpu>(mem, std::move(handler));
-#endif
-        });
+        static b32::Runtime &rt = *new b32::Runtime(makeCpu);
         if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
         // A guest's libraries: its Frameworks folder and, for apps that set
         // DYLD_LIBRARY_PATH in a launcher script, folders beside the executable.

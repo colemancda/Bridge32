@@ -8,10 +8,13 @@
 #include "core/mem/GuestHeap.h"
 
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#include <spawn.h>
 
 namespace b32 {
 
@@ -197,5 +200,20 @@ private:
 
 // Stores the host's errno in the calling guest thread's errno (libsystem.cpp).
 void setGuestErrno(Call &c, int value);
+// Returns a libc call's result to the guest, with the guest's errno set from the host's when it is
+// negative (a failure).
+void retErrno(Call &c, long result);
+
+// A guest's fork or vfork child, until it execs or exits (spawn.cpp). It runs in the parent's place,
+// and the dup2s and closes it makes wait for the program it starts.
+struct ForkChild {
+    posix_spawn_file_actions_t actions;
+    std::function<void(Call &, uint32_t pid)> resumeParent;
+    std::function<void(Call &, int status)> exited;  // it exits without starting a program
+};
+// The calling thread's fork child, if it is one now (libsystem.cpp).
+extern thread_local ForkChild *forkChild;
+// Makes the calling thread a fork child; `resumeParent` returns from fork in the parent (spawn.cpp).
+void beginForkChild(Call &c, std::function<void(Call &, uint32_t pid)> resumeParent);
 
 }  // namespace b32
