@@ -304,6 +304,15 @@ void Bridge::msgSend(Call &c, bool stret, SuperKind kind, bool fpret) {
             if (stret) cpu.popStructPointer();
             return;
         }
+        if (collecting_) {  // see setCollecting
+            static const GuestAddr retain = guestSel("retain"), release = guestSel("release"),
+                                   autorelease = guestSel("autorelease");
+            if (sel == retain || sel == autorelease) {
+                cpu.setResult(receiver);
+                return;
+            }
+            if (sel == release) return;
+        }
         if (!mem.isMapped(receiver) || !mem.isMapped(receiver + 3)) {
             std::string frames;
             for (uint32_t ret : cpu.frameChain(8)) frames += " " + std::to_string(ret);
@@ -606,6 +615,25 @@ bool hostCallersKeepHostMethod(const char *sel) {
     return false;
 }
 
+// Methods today's AppKit added under names a guest class of the time could use for its own: the host
+// calls them for its own ends (an NSButton's -contentView is its private content view, which its visual
+// provider lays out), and a guest subclass's method of that name answers something else (Xcode 3's
+// XCActiveComboPopup, an NSPopUpButton, has a -contentView of its own, and AppKit lays it out without
+// end). Host callers get the host class's method; the guest's own calls still reach the guest's.
+struct HostOwnedMethod {
+    const char *cls;
+    const char *sel;
+};
+constexpr HostOwnedMethod kHostOwnedMethods[] = {
+    {"NSButton", "contentView"},
+};
+bool hostCallersKeepSuperMethod(Class target, const char *sel) {
+    for (const HostOwnedMethod &m : kHostOwnedMethods)
+        if (std::strcmp(sel, m.sel) == 0)
+            if (Class cls = objc_getClass(m.cls); cls && [target isSubclassOfClass:cls]) return true;
+    return false;
+}
+
 std::mutex trampolinesLock;
 std::unordered_map<void *, Trampoline *> trampolines;  // closure code -> its trampoline
 
@@ -844,6 +872,11 @@ void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &m
         log("guest category replaces host method %c[%s %s]", owner->isMeta ? '+' : '-', owner->name.c_str(), sel_getName(hsel));
         if (hostCallersKeepHostMethod(sel_getName(hsel)))
             t->hostOriginal = method_getImplementation(class_getInstanceMethod(target, hsel));
+    }
+    if (owner->isGuest && !owner->isMeta && hostCallersKeepSuperMethod(target, sel_getName(hsel))) {
+        Class host = class_getSuperclass(target);
+        while (host && isShadowClass(host)) host = class_getSuperclass(host);
+        if (Method m = host ? class_getInstanceMethod(host, hsel) : nullptr) t->hostOriginal = method_getImplementation(m);
     }
     class_replaceMethod(target, hsel, reinterpret_cast<IMP>(code), types.c_str());
 }
