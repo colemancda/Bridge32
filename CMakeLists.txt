@@ -218,9 +218,9 @@ if(B32_MAC)
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/objc/legacytables.mm core/appkit/appkit.mm core/appkit/compat.mm
         core/appkit/macsys.mm core/appkit/carbon.mm core/appkit/carbon_ui.mm core/appkit/carbon_files.mm core/appkit/quickdraw.mm core/appkit/ats.mm core/appkit/agl.mm core/appkit/controller.mm core/gl/opengl.mm core/audio/hal.mm)
-    # AudioQueue, AudioUnit and OpenAL aren't converted for the big-endian guest yet.
+    # AudioQueue, AudioUnit, OpenAL and the Sound Manager aren't converted for the big-endian guest yet.
     if(NOT B32_GUEST_ARCH STREQUAL "ppc")
-        target_sources(b32core PRIVATE core/audio/audiounit.mm core/audio/audioqueue.mm core/audio/openal.mm)
+        target_sources(b32core PRIVATE core/audio/audiounit.mm core/audio/audioqueue.mm core/audio/openal.mm core/audio/soundmanager.mm)
     endif()
     target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
         "-framework QuartzCore" "-framework CoreData" "-framework OpenGL" "-framework ImageIO"
