@@ -1,7 +1,7 @@
 // What a Mac OS X 10.3 and 10.4 program's start-up code calls in libSystem:
 // crt1 and crtbegin initialize the key manager libgcc registers its unwind
-// tables with, and old code finds optional functions with the NSModule calls
-// instead of dlsym. None of it has a job here beyond answering.
+// tables with. None of it has a job here beyond answering. (The NSModule
+// calls, which old code finds optional functions with, are in macos.cpp.)
 
 #include "Thunks.h"
 #include "core/Log.h"
@@ -49,17 +49,6 @@ B32_THUNK(__keymgr_get_and_lock_processwide_ptr_2) {
     c.mem.write<uint32_t>(out, it == processWide.end() ? 0 : it->second);
     c.ret(0);
 }
-
-// --- NSModule: finding a symbol by name ---------------------------------------------------------
-// Names come with their leading underscore, as the registry spells them. A
-// symbol is the address of its stub.
-
-B32_THUNK(_NSIsSymbolNameDefinedWithHint) { c.ret(ThunkRegistry::find(c.mem.cstr(c.args.ptr())) ? 1 : 0); }
-B32_THUNK(_NSLookupAndBindSymbolWithHint) {
-    std::string name = c.mem.cstr(c.args.ptr());
-    c.ret(ThunkRegistry::find(name) ? c.rt.thunks().stubFor(name) : 0);
-}
-B32_THUNK(_NSAddressOfSymbol) { c.ret(c.args.u32()); }
 
 // --- C++ unwinding -------------------------------------------------------------------------------
 // Reached only by an exception that unwinds through guest frames, which isn't supported.

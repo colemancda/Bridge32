@@ -112,6 +112,7 @@ bool passesThrough(const Type &t) {
 struct Override {
     OverrideFn fn;
     OverrideCondition when;
+    bool overGuestCategories;
 };
 
 std::unordered_multimap<std::string, Override> &overrides() {
@@ -119,11 +120,18 @@ std::unordered_multimap<std::string, Override> &overrides() {
     return table;
 }
 
+// Whether an override takes the place of a guest category's method for this receiver.
+bool overridesGuestCategory(const char *name, id receiver) {
+    for (auto [it, end] = overrides().equal_range(name); it != end; ++it)
+        if (it->second.overGuestCategories && (!it->second.when || it->second.when(receiver))) return true;
+    return false;
+}
+
 }  // namespace
 
 OverrideRegistry::OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn,
-                                   OverrideCondition when) {
-    for (const char *s : selectors) overrides().emplace(s, Override{fn, when});
+                                   OverrideCondition when, bool overGuestCategories) {
+    for (const char *s : selectors) overrides().emplace(s, Override{fn, when, overGuestCategories});
 }
 
 // --- host call descriptions ---------------------------------------------------
@@ -413,7 +421,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
     // runs here in the guest, as the guest's own runtime would run it, rather
     // than through the host and back: that would hand it host pointers for
     // its out-parameters (NSError **).
-    if (recv) {
+    if (recv && (direct || !overridesGuestCategory(name, recv))) {
         IMP target = direct ? direct
                             : class_getMethodImplementation(superInfo ? superInfo->host : object_getClass(recv), hsel);
         if (GuestAddr guestImp = trampolineGuestImp(target)) {

@@ -1027,3 +1027,23 @@ B32_THUNK(_strsep) {
     }
     c.ret(token);
 }
+
+// --- NSModule: finding a symbol by name ---------------------------------------------------------
+// Old code finds optional functions (OpenGL's extensions, Doom 3's) with these instead of dlsym.
+// Names come with their leading underscore, as the registry spells them. A symbol is the address
+// of its stub, and its address is itself.
+
+// bool NSIsSymbolNameDefined(const char *) and NSIsSymbolNameDefinedWithHint(name, libraryHint)
+B32_THUNK(_NSIsSymbolNameDefined) { c.ret(ThunkRegistry::find(c.mem.cstr(c.args.ptr())) ? 1 : 0); }
+B32_THUNK(_NSIsSymbolNameDefinedWithHint) { c.ret(ThunkRegistry::find(c.mem.cstr(c.args.ptr())) ? 1 : 0); }
+// NSSymbol NSLookupAndBindSymbol(const char *) and NSLookupAndBindSymbolWithHint(name, libraryHint)
+B32_THUNK(_NSLookupAndBindSymbol) {
+    std::string name = c.mem.cstr(c.args.ptr());
+    c.ret(ThunkRegistry::find(name) ? c.rt.thunks().stubFor(name) : 0);
+}
+B32_THUNK(_NSLookupAndBindSymbolWithHint) {
+    std::string name = c.mem.cstr(c.args.ptr());
+    c.ret(ThunkRegistry::find(name) ? c.rt.thunks().stubFor(name) : 0);
+}
+// void *NSAddressOfSymbol(NSSymbol)
+B32_THUNK(_NSAddressOfSymbol) { c.ret(c.args.u32()); }

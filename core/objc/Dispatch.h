@@ -29,7 +29,10 @@ bool isRawHashTable(id table);
 using OverrideCondition = bool (*)(id receiver);
 
 struct OverrideRegistry {
-    OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn, OverrideCondition when = nullptr);
+    // overGuestCategories: the override also takes the place of a guest category's method of that
+    // name on the host class, which otherwise runs first.
+    OverrideRegistry(std::initializer_list<const char *> selectors, OverrideFn fn, OverrideCondition when = nullptr,
+                     bool overGuestCategories = false);
 };
 
 #define B32_OVERRIDE_CONCAT2(a, b) a##b
@@ -47,6 +50,15 @@ struct OverrideRegistry {
 #define B32_OVERRIDE_WHEN_IMPL(fn, condition, ...)                                    \
     static void fn(::b32::objc::OverrideCall &o);                                     \
     static ::b32::objc::OverrideRegistry B32_OVERRIDE_CONCAT(fn, _registry)({__VA_ARGS__}, fn, condition); \
+    static void fn(::b32::objc::OverrideCall &o)
+
+// B32_OVERRIDE_OVER_GUEST(condition, "sel") { ... }: as B32_OVERRIDE_WHEN, and in place of a guest
+// category's method of the same name on the host class too, for a category that reads the host
+// class's private ivars, which the guest can't see.
+#define B32_OVERRIDE_OVER_GUEST(condition, ...) B32_OVERRIDE_OVER_GUEST_IMPL(B32_OVERRIDE_CONCAT(override_, __LINE__), condition, __VA_ARGS__)
+#define B32_OVERRIDE_OVER_GUEST_IMPL(fn, condition, ...)                              \
+    static void fn(::b32::objc::OverrideCall &o);                                     \
+    static ::b32::objc::OverrideRegistry B32_OVERRIDE_CONCAT(fn, _registry)({__VA_ARGS__}, fn, condition, true); \
     static void fn(::b32::objc::OverrideCall &o)
 
 }  // namespace b32::objc

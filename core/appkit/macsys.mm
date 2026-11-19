@@ -14,6 +14,7 @@
 
 #import <AppKit/AppKit.h>
 #include <ApplicationServices/ApplicationServices.h>
+#include <Carbon/Carbon.h>
 #include <CoreVideo/CoreVideo.h>
 #include <ImageIO/ImageIO.h>
 #include <OpenGL/OpenGL.h>
@@ -154,6 +155,33 @@ NSDictionary *modeDictionary(size_t width, size_t height, double refresh) {
              @"SamplesPerPixel" : @3, @"RefreshRate" : @(refresh), @"UsableForDesktopGUI" : @YES};
 }
 }  // namespace
+// CFArrayRef CGDisplayAvailableModes(display): the sizes games of the day offered, up to the screen's,
+// and the screen's own.
+B32_THUNK(_CGDisplayAvailableModes) {
+    CGDirectDisplayID display = c.args.u32();
+    size_t screenWidth = CGDisplayPixelsWide(display), screenHeight = CGDisplayPixelsHigh(display);
+    static const size_t sizes[][2] = {{640, 480}, {800, 600}, {1024, 768}, {1152, 864}, {1280, 720}, {1280, 800},
+                                      {1280, 960}, {1280, 1024}, {1440, 900}, {1600, 1200}, {1680, 1050}, {1920, 1080},
+                                      {1920, 1200}};
+    NSMutableArray *modes = [NSMutableArray array];
+    for (const auto &size : sizes)
+        if (size[0] <= screenWidth && size[1] <= screenHeight && !(size[0] == screenWidth && size[1] == screenHeight))
+            [modes addObject:modeDictionary(size[0], size[1], 60)];
+    [modes addObject:modeDictionary(screenWidth, screenHeight, 60)];
+    // Kept, so the guest can hold on to the array and its modes as it could the system's.
+    static NSMutableDictionary<NSNumber *, NSArray *> *lists = [[NSMutableDictionary alloc] init];
+    lists[@(display)] = modes;
+    c.ret(bridge(c).toGuest(modes));
+}
+// CGError CGDisplaySwitchToMode(display, CFDictionaryRef mode): the screen stays as it is, and the game's
+// picture is scaled to it from the size it asked for.
+B32_THUNK(_CGDisplaySwitchToMode) {
+    c.args.u32();
+    NSDictionary *mode = bridge(c).toHost(c.args.ptr());
+    NSNumber *width = mode[@"Width"], *height = mode[@"Height"];
+    if (width && height) appkit::setRequestedDisplaySize(width.intValue, height.intValue);
+    c.ret(0);
+}
 B32_THUNK(_CGDisplayCurrentMode) {
     CGDirectDisplayID display = c.args.u32();
     c.ret(bridge(c).toGuest(modeDictionary(CGDisplayPixelsWide(display), CGDisplayPixelsHigh(display), 60)));
@@ -201,7 +229,6 @@ B32_THUNK(_CGDataProviderCreateWithURL) {
 
 // The screen stays the user's.
 #define B32_SUCCEEDS(symbol) B32_THUNK(symbol) { c.ret(0); }
-B32_SUCCEEDS(_CGDisplaySwitchToMode)
 B32_SUCCEEDS(_CGDisplayCaptureWithOptions)
 B32_THUNK(_CGDisplayIsCaptured) { c.ret(0); }
 B32_SUCCEEDS(_CGCaptureAllDisplays)
@@ -210,6 +237,7 @@ B32_SUCCEEDS(_CGDisplayCapture)
 B32_SUCCEEDS(_CGDisplayRelease)
 B32_SUCCEEDS(_CGDisplaySetDisplayMode)
 B32_SUCCEEDS(_CGSetDisplayTransferByTable)
+B32_THUNK(_CGDisplayRestoreColorSyncSettings) {}  // the gamma was never changed
 B32_SUCCEEDS(_CGDisplayFade)
 B32_SUCCEEDS(_CGReleaseDisplayFadeReservation)
 // CGDisplayErr: kCGErrorFailure, so no fade is attempted.
@@ -308,7 +336,68 @@ B32_THUNK(_TISCopyCurrentKeyboardLayoutInputSource) { c.ret(0); }
 B32_THUNK(_TISGetInputSourceProperty) { c.ret(0); }
 B32_THUNK(_KBGetLayoutType) { c.ret(0); }
 B32_THUNK(_LMGetKbdType) { c.ret(0); }
-B32_THUNK(_UCKeyTranslate) { c.ret(uint32_t(-1)); }
+// The Keyboard Layout Services of 10.2 to 10.4 hand out the current layout's 'uchr' data, which
+// here is a copy of the host's in guest memory; UCKeyTranslate reads it in place. (The data is
+// self-relative, so a copy works anywhere.)
+namespace {
+GuestAddr guestUchr(Call &c) {
+    static GuestAddr copy = [&]() -> GuestAddr {
+        TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+        CFDataRef data = source ? (CFDataRef)TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) : nullptr;
+        GuestAddr out = 0;
+        if (data && CFDataGetLength(data) > 0) {
+            out = c.heap.alloc(uint32_t(CFDataGetLength(data)));
+            c.mem.copyIn(out, CFDataGetBytePtr(data), size_t(CFDataGetLength(data)));
+        }
+        if (source) CFRelease(source);
+        return out;
+    }();
+    return copy;
+}
+GuestAddr keyboardLayoutRef(Call &c) {
+    static GuestAddr ref = c.heap.calloc(1, 16);
+    return ref;
+}
+}  // namespace
+// OSStatus KLGetCurrentKeyboardLayout(KeyboardLayoutRef *)
+B32_THUNK(_KLGetCurrentKeyboardLayout) {
+    GuestAddr out = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, keyboardLayoutRef(c));
+    c.ret(0);
+}
+// OSStatus KLGetKeyboardLayoutProperty(KeyboardLayoutRef, KeyboardLayoutPropertyTag, const void **value):
+// kKLuchrData (1) is the host's layout; there is no 'KCHR' (0), and the rest aren't known.
+B32_THUNK(_KLGetKeyboardLayoutProperty) {
+    c.args.u32();
+    uint32_t tag = c.args.u32();
+    GuestAddr out = c.args.ptr();
+    constexpr uint32_t kKLKCHRData = 0, kKLuchrData = 1;
+    GuestAddr value = tag == kKLuchrData ? guestUchr(c) : 0;
+    if (out) c.mem.write<uint32_t>(out, value);
+    c.ret(value || tag == kKLKCHRData ? 0 : uint32_t(-50));  // paramErr
+}
+// OSStatus UCKeyTranslate(const UCKeyboardLayout *, UInt16 keyCode, UInt16 action, UInt32 modifiers,
+//     UInt32 keyboardType, OptionBits options, UInt32 *deadKeyState, UniCharCount max,
+//     UniCharCount *length, UniChar *chars): the host's, on the guest's copy of a layout.
+B32_THUNK(_UCKeyTranslate) {
+    GuestAddr layout = c.args.ptr();
+    uint16_t keyCode = uint16_t(c.args.u32()), action = uint16_t(c.args.u32());
+    uint32_t modifiers = c.args.u32(), keyboardType = c.args.u32(), options = c.args.u32();
+    GuestAddr deadOut = c.args.ptr();
+    uint32_t maximum = c.args.u32();
+    GuestAddr lengthOut = c.args.ptr(), charsOut = c.args.ptr();
+    if (!layout || !deadOut) return c.ret(uint32_t(-50));
+    UInt32 dead = c.mem.read<uint32_t>(deadOut);
+    std::vector<UniChar> chars(std::max<uint32_t>(maximum, 1));
+    UniCharCount length = 0;
+    OSStatus status = UCKeyTranslate(c.mem.ptr<const UCKeyboardLayout>(layout), keyCode, action, modifiers,
+                                     keyboardType ? keyboardType : LMGetKbdType(), options, &dead, maximum, &length,
+                                     chars.data());
+    c.mem.write<uint32_t>(deadOut, dead);
+    if (lengthOut) c.mem.write<uint32_t>(lengthOut, uint32_t(length));
+    if (charsOut && length) c.mem.writeArray<uint16_t>(charsOut, chars.data(), std::min<size_t>(length, maximum));
+    c.ret(uint32_t(status));
+}
 
 // --- IOKit: the registry where a device name leads, and discs of its own --------------
 //
@@ -377,6 +466,12 @@ IONotificationPortRef hostPort(uint32_t handle) {
 B32_THUNK(_IOServiceMatching) {
     GuestAddr name = c.args.ptr();
     CFMutableDictionaryRef matching = name ? IOServiceMatching(c.mem.cstr(name)) : nullptr;
+    c.ret(matching ? bridge(c).toGuest((id)CFBridgingRelease(matching)) : 0);
+}
+// CFMutableDictionaryRef IOServiceNameMatching(const char *name)
+B32_THUNK(_IOServiceNameMatching) {
+    GuestAddr name = c.args.ptr();
+    CFMutableDictionaryRef matching = name ? IOServiceNameMatching(c.mem.cstr(name)) : nullptr;
     c.ret(matching ? bridge(c).toGuest((id)CFBridgingRelease(matching)) : 0);
 }
 // kern_return_t IOMasterPort(mach_port_t bootstrapPort, mach_port_t *masterPort)
@@ -499,6 +594,61 @@ B32_THUNK(_IORegistryEntryGetParentEntry) {
     kern_return_t status = IORegistryEntryGetParentEntry(entry, plane ? c.mem.cstr(plane) : nullptr, &hostParent);
     if (status == KERN_SUCCESS && parent) c.mem.write<uint32_t>(parent, hostParent);
     c.ret(uint32_t(status));
+}
+// kern_return_t IORegistryEntryGetChildEntry(io_registry_entry_t entry, const io_name_t plane,
+//                                            io_registry_entry_t *child): the first one
+B32_THUNK(_IORegistryEntryGetChildEntry) {
+    uint32_t entry = c.args.u32();
+    GuestAddr plane = c.args.ptr(), child = c.args.ptr();
+    if (FakeEntry fake = fakeEntry(entry); fake.cls) {
+        uint32_t first = 0;
+        if (plane && !strcmp(c.mem.cstr(plane), "IOService")) {
+            std::lock_guard guard(fakeLock);
+            for (const auto &[handle, under] : fakeRegistry)
+                if (under.parent == entry && (!first || handle < first)) first = handle;
+        }
+        if (first && child) c.mem.write<uint32_t>(child, first);
+        c.ret(first ? kIOReturnSuccess : kIOReturnNoDevice);
+        return;
+    }
+    io_registry_entry_t hostChild = 0;
+    kern_return_t status = IORegistryEntryGetChildEntry(entry, plane ? c.mem.cstr(plane) : nullptr, &hostChild);
+    if (status == KERN_SUCCESS && child) c.mem.write<uint32_t>(child, hostChild);
+    c.ret(uint32_t(status));
+}
+// kern_return_t IORegistryEntryGetName(io_registry_entry_t entry, io_name_t name): a disc's entries are
+// named for their class.
+B32_THUNK(_IORegistryEntryGetName) {
+    uint32_t entry = c.args.u32();
+    GuestAddr name = c.args.ptr();
+    if (FakeEntry fake = fakeEntry(entry); fake.cls) {
+        strlcpy(c.mem.ptr<char>(name), fake.cls, sizeof(io_name_t));
+        c.ret(kIOReturnSuccess);
+        return;
+    }
+    c.ret(IORegistryEntryGetName(entry, c.mem.ptr<char>(name)));
+}
+// kern_return_t IORegistryEntryGetPath(io_registry_entry_t entry, const io_name_t plane, io_string_t path):
+// a disc's entries have no place in the host's registry to give a path to.
+B32_THUNK(_IORegistryEntryGetPath) {
+    uint32_t entry = c.args.u32();
+    GuestAddr plane = c.args.ptr(), path = c.args.ptr();
+    if (isFakeHandle(entry)) {
+        c.ret(kIOReturnNoDevice);
+        return;
+    }
+    c.ret(IORegistryEntryGetPath(entry, plane ? c.mem.cstr(plane) : nullptr, c.mem.ptr<char>(path)));
+}
+// boolean_t IOObjectConformsTo(io_object_t object, const io_name_t className): a disc's IOCDMedia is
+// an IOMedia too.
+B32_THUNK(_IOObjectConformsTo) {
+    uint32_t object = c.args.u32();
+    const char *name = c.mem.cstr(c.args.ptr());
+    if (FakeEntry fake = fakeEntry(object); fake.cls) {
+        c.ret(!strcmp(fake.cls, name) || !strcmp(name, "IOMedia") ? 1 : 0);
+        return;
+    }
+    c.ret(IOObjectConformsTo(object, name));
 }
 // kern_return_t IORegistryEntryCreateIterator(io_registry_entry_t entry, const io_name_t plane,
 //                                             IOOptionBits options, io_iterator_t *iter)

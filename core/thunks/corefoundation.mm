@@ -35,7 +35,8 @@ constexpr CFunction kCoreFoundation[] = {
     
     {"CFPreferencesAppSynchronize", "B:o"}, {"CFPreferencesCopyAppValue", "o:oo"},
     {"CFPreferencesCopyKeyList", "o:ooo"}, {"CFPreferencesSetValue", "v:ooooo"}, {"CFPreferencesSynchronize", "B:ooo"},
-    {"CFPreferencesSetAppValue", "v:ooo"},
+    {"CFPreferencesSetAppValue", "v:ooo"}, {"CFPreferencesGetAppBooleanValue", "B:oop"},
+    {"CFPreferencesGetAppIntegerValue", "z:oop"},
     {"CFRunLoopGetCurrent", "o:"}, {"CFRunLoopGetMain", "o:"}, {"CFRunLoopPerformBlock", "v:ooo"},
     {"CFRunLoopWakeUp", "v:o"}, {"CFRunLoopRun", "v:"},
     {"CFRunLoopAddTimer", "v:ooo"}, {"CFRunLoopTimerInvalidate", "v:o"},

@@ -245,7 +245,21 @@ B32_THUNK(_glPixelStorei) {
 }
 #endif
 
+// The ARB and ATI names of calls that became core, which the host's OpenGL still exports but the SDK's
+// headers (and so the generated table) no longer declare. Doom 3 looks them up by name.
+const CFunction kExtensionNames[] = {
+    {"glActiveTextureARB", "v:u"}, {"glClientActiveTextureARB", "v:u"}, {"glMultiTexCoord2fARB", "v:uff"},
+    {"glMultiTexCoord2fvARB", "v:up"}, {"glCompressedTexImage2DARB", "v:uiuiiiip"},
+    {"glGetCompressedTexImageARB", "v:uip"}, {"glBindBufferARB", "v:uu"}, {"glBufferDataARB", "v:uzpu"},
+    {"glBufferSubDataARB", "v:uzzp"}, {"glDeleteBuffersARB", "v:ip"}, {"glGenBuffersARB", "v:ip"},
+    {"glGetBufferParameterivARB", "v:uup"}, {"glGetBufferSubDataARB", "v:uzzp"}, {"glIsBufferARB", "B:u"},
+    {"glUnmapBufferARB", "B:u"}, {"glVertexAttribPointerARB", "v:uiuuia"}, {"glEnableVertexAttribArrayARB", "v:u"},
+    {"glDisableVertexAttribArrayARB", "v:u"}, {"glStencilOpSeparateATI", "v:uuuu"},
+    {"glStencilFuncSeparateATI", "v:uuiu"},
+};
+
 B32_C_FUNCTIONS(kFunctions, library);
+B32_C_FUNCTIONS(kExtensionNames, library);
 B32_C_FUNCTIONS(kCGL, library);
 
 // Methods handing out a context or pixel format as a raw pointer.
@@ -323,6 +337,11 @@ namespace b32::gl {
 void snapshotPresented() { snapshotIfAsked(); }
 }  // namespace b32::gl
 
+// -[NSOpenGLContext cglContext]: Doom 3's own category, which reads the CGL context from the
+// class's private _contextAuxiliary, as 10.3's NSOpenGLContext kept it.
+B32_OVERRIDE_OVER_GUEST(isOpenGLContext, "cglContext") {
+    o.c.ret(hostHandle([(NSOpenGLContext *)o.receiver CGLContextObj]));
+}
 B32_OVERRIDE_WHEN(isOpenGLContext, "flushBuffer") {
     snapshotIfAsked();
     [(NSOpenGLContext *)o.receiver flushBuffer];
