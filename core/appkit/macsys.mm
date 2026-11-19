@@ -97,6 +97,14 @@ B32_THUNK(_CGWarpMouseCursorPosition) {
     float x = c.args.structFloat();  // a CGPoint passed by value
     c.ret(CGWarpMouseCursorPosition(appkit::gameScreenPoint(CGPointMake(x, c.args.structFloat()))));
 }
+// CGError CGSetLocalEventsSuppressionInterval(CFTimeInterval): how long the mouse stays still after
+// a warp; mouse-look games set it to 0.
+B32_THUNK(_CGSetLocalEventsSuppressionInterval) {
+    CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+    CGEventSourceSetLocalEventsSuppressionInterval(source, c.args.f64());
+    if (source) CFRelease(source);
+    c.ret(0);
+}
 B32_THUNK(_CGDisplayMoveCursorToPoint) {
     uint32_t display = c.args.u32();
     float x = c.args.structFloat();
@@ -354,6 +362,14 @@ bool isFakeHandle(uint32_t handle) {
     std::lock_guard guard(fakeLock);
     return fakeRegistry.count(handle) != 0 || fakeIterators.count(handle) != 0;
 }
+// The host notification ports behind the guest's handles.
+std::mutex portsLock;
+std::unordered_map<uint32_t, IONotificationPortRef> ports;
+IONotificationPortRef hostPort(uint32_t handle) {
+    std::lock_guard guard(portsLock);
+    auto it = ports.find(handle);
+    return it == ports.end() ? nullptr : it->second;
+}
 }  // namespace
 
 // CFMutableDictionaryRef IOServiceMatching(const char *className): a real dictionary, which
@@ -539,6 +555,67 @@ B32_NOTHING(_IOPMAssertionCreateWithDescription)
 B32_NOTHING(_IOPMAssertionRelease)
 
 // An IOHIDManager that opens and never reports a device.
+// --- notifications and plug-in interfaces --------------------------------------------------------
+// A port is the host's own, whose run loop source the guest schedules. Matching notifications are armed
+// the way a guest expects (an iterator it drains of what's already there), but find nothing and never
+// fire: a device the guest found would need its plug-in interface, a COM object of host function pointers,
+// which a guest can't call, so IOCreatePlugInInterfaceForService says it's unsupported.
+
+// IONotificationPortRef IONotificationPortCreate(mach_port_t masterPort)
+B32_THUNK(_IONotificationPortCreate) {
+    IONotificationPortRef port = IONotificationPortCreate(kIOMasterPortDefault);
+    if (!port) return c.ret(0);
+    uint32_t handle = mintFakeIterator({});  // a handle no one else hands out
+    std::lock_guard guard(portsLock);
+    ports[handle] = port;
+    c.ret(handle);
+}
+// CFRunLoopSourceRef IONotificationPortGetRunLoopSource(IONotificationPortRef)
+B32_THUNK(_IONotificationPortGetRunLoopSource) {
+    IONotificationPortRef port = hostPort(c.args.u32());
+    CFRunLoopSourceRef source = port ? IONotificationPortGetRunLoopSource(port) : nullptr;
+    c.ret(source ? bridge(c).toGuest((__bridge id)source) : 0);
+}
+B32_THUNK(_IONotificationPortDestroy) {
+    uint32_t handle = c.args.u32();
+    if (IONotificationPortRef port = hostPort(handle)) {
+        IONotificationPortDestroy(port);
+        std::lock_guard guard(portsLock);
+        ports.erase(handle);
+    }
+}
+// kern_return_t IOServiceAddMatchingNotification(IONotificationPortRef, const io_name_t type,
+//     CFDictionaryRef matching, IOServiceMatchingCallback, void *refCon, io_iterator_t *notification):
+// consumes the dictionary, as IOServiceGetMatchingServices does.
+B32_THUNK(_IOServiceAddMatchingNotification) {
+    c.args.u32();
+    c.args.ptr();
+    c.args.ptr();
+    c.args.ptr();
+    c.args.ptr();
+    GuestAddr out = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, mintFakeIterator({}));
+    c.ret(kIOReturnSuccess);
+}
+// kern_return_t IOServiceAddInterestNotification(IONotificationPortRef, io_service_t, const io_name_t,
+//     IOServiceInterestCallback, void *refCon, io_object_t *notification)
+B32_THUNK(_IOServiceAddInterestNotification) {
+    for (int i = 0; i < 5; i++) c.args.u32();
+    GuestAddr out = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, mintFakeIterator({}));
+    c.ret(kIOReturnSuccess);
+}
+// kern_return_t IOCreatePlugInInterfaceForService(io_service_t, CFUUIDRef pluginType, CFUUIDRef interfaceType,
+//     IOCFPlugInInterface ***theInterface, SInt32 *theScore)
+B32_THUNK(_IOCreatePlugInInterfaceForService) {
+    for (int i = 0; i < 3; i++) c.args.u32();
+    GuestAddr out = c.args.ptr(), score = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, 0);
+    if (score) c.mem.write<int32_t>(score, 0);
+    c.ret(uint32_t(kIOReturnUnsupported));
+}
+B32_THUNK(_IODestroyPlugInInterface) { c.ret(kIOReturnSuccess); }
+
 B32_THUNK(_IOHIDManagerCreate) {
     static id manager = [[NSObject alloc] init];
     c.ret(bridge(c).toGuest(manager));

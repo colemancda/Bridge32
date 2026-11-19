@@ -1260,8 +1260,16 @@ B32_THUNK(_CreateScrollingTextBoxControl) {
     }
     c.ret(0);
 }
-B32_THUNK(_ClearKeyboardFocus) { c.ret(0); }
-B32_THUNK(_AdvanceKeyboardFocus) { c.ret(0); }
+// OSStatus ClearKeyboardFocus(WindowRef) / AdvanceKeyboardFocus(WindowRef): to the window itself,
+// or on to the next control that takes the keyboard.
+B32_THUNK(_ClearKeyboardFocus) {
+    if (CWindow *w = windowOf(c.args.ptr())) [w->window makeFirstResponder:w->content];
+    c.ret(0);
+}
+B32_THUNK(_AdvanceKeyboardFocus) {
+    if (CWindow *w = windowOf(c.args.ptr())) [w->window selectNextKeyView:nil];
+    c.ret(0);
+}
 B32_THUNK(_SetKeyboardFocus) {
     CWindow *w = windowOf(c.args.ptr());
     CControl *control = controlOf(c.args.ptr());
@@ -1652,6 +1660,9 @@ B32_THUNK(_Button) { c.ret(NSEvent.pressedMouseButtons & 1); }
 // UInt32 GetCurrentEventButtonState(void) and GetCurrentButtonState(void): bit 0 the primary button.
 B32_THUNK(_GetCurrentEventButtonState) { c.ret(uint32_t(NSEvent.pressedMouseButtons)); }
 B32_THUNK(_GetCurrentButtonState) { c.ret(uint32_t(NSEvent.pressedMouseButtons)); }
+// UInt32 GetCurrentEventKeyModifiers(void) and GetCurrentKeyModifiers(void): Carbon's modifier bits.
+B32_THUNK(_GetCurrentEventKeyModifiers) { c.ret(carbonModifiers(NSEvent.modifierFlags)); }
+B32_THUNK(_GetCurrentKeyModifiers) { c.ret(carbonModifiers(NSEvent.modifierFlags)); }
 B32_THUNK(_FindWindow) {
     c.args.u32();
     c.mem.write<uint32_t>(c.args.ptr(), 0);
@@ -1705,3 +1716,330 @@ B32_THUNK(_GetPortBounds) {
     }
     c.ret(out);
 }
+
+// --- dialogs ------------------------------------------------------------------------------
+//
+// The Dialog Manager's dialogs and alerts, from their 'DLOG', 'ALRT' and 'DITL' resources: a
+// window with a control for each item, laid out where the item list puts it (user items,
+// pictures and icons draw nothing yet). A dialog is the window it shows in, as it was in the
+// classic Mac OS. ModalDialog returns, as it did, when an enabled item is hit: a button
+// pressed, or a key typed into an edit field.
+
+namespace {
+constexpr uint8_t kItemDisabled = 128, kButtonItem = 4, kCheckItem = 5, kRadioItem = 6, kControlItem = 7,
+                  kStaticTextItem = 8, kEditTextItem = 16;
+enum AlertIcon { kNoIcon, kStopIcon, kNoteIcon, kCautionIcon };
+
+struct DItem {
+    uint8_t type;
+    NSRect rect;
+    NSView *view;
+    GuestAddr handle;  // what GetDialogItem hands out for the item
+};
+struct CDialog {
+    CWindow *window;
+    std::vector<DItem> items;  // item n is items[n - 1]
+    GuestAddr textEdit = 0;    // the one TEHandle for whichever edit field has the focus
+    int16_t hit = 0;
+};
+std::unordered_map<GuestAddr, CDialog *> dialogs;                          // by the dialog's window
+std::unordered_map<GuestAddr, std::pair<CDialog *, int>> dialogItemHandles;  // an item's handle: its dialog and number
+std::vector<CDialog *> dialogOrder;  // the most recently shown last: the one ModalDialog runs
+
+CDialog *dialogOf(GuestAddr handle) {
+    auto it = dialogs.find(handle);
+    return it == dialogs.end() ? nullptr : it->second;
+}
+DItem *itemOf(CDialog *d, int item) { return d && item >= 1 && size_t(item) <= d->items.size() ? &d->items[size_t(item) - 1] : nullptr; }
+DItem *itemForHandle(GuestAddr handle) {
+    auto it = dialogItemHandles.find(handle);
+    return it == dialogItemHandles.end() ? nullptr : itemOf(it->second.first, it->second.second);
+}
+
+// The Resource Manager flips the system's resource types to the host's byte order as it loads them.
+int16_t field16(const uint8_t *p) {
+    int16_t v;
+    std::memcpy(&v, p, 2);
+    return v;
+}
+NSRect resourceRect(const uint8_t *p) {  // top, left, bottom, right
+    int16_t t = field16(p), l = field16(p + 2), b = field16(p + 4), r = field16(p + 6);
+    return NSMakeRect(l, t, r - l, b - t);
+}
+NSString *pascalText(const uint8_t *p, size_t length) {
+    return [[NSString alloc] initWithBytes:p length:length encoding:NSMacOSRomanStringEncoding] ?: @"";
+}
+NSString *guestPascal(Call &c, GuestAddr p) {
+    return p ? pascalText(c.mem.ptr<uint8_t>(p + 1), c.mem.read<uint8_t>(p)) : @"";
+}
+}  // namespace
+
+// Button presses and typing in a dialog end the ModalDialog that is waiting for them.
+@interface B32DialogResponder : NSObject <NSTextFieldDelegate>
+@end
+@implementation B32DialogResponder
+- (void)hitItem:(NSInteger)item inWindow:(NSWindow *)window {
+    for (auto &[handle, d] : dialogs)
+        if (d->window->window == window) {
+            DItem *it = itemOf(d, int(item));
+            if (!it || it->type & kItemDisabled) return;
+            d->hit = int16_t(item);
+            if (NSApp.modalWindow == window) [NSApp stopModal];
+            return;
+        }
+}
+- (void)pressed:(NSButton *)sender { [self hitItem:sender.tag inWindow:sender.window]; }
+- (void)controlTextDidChange:(NSNotification *)note {
+    NSTextField *field = note.object;
+    [self hitItem:field.tag inWindow:field.window];
+}
+@end
+
+namespace {
+B32DialogResponder *dialogResponder() {
+    static B32DialogResponder *shared = [[B32DialogResponder alloc] init];
+    return shared;
+}
+
+NSView *makeItemView(uint8_t type, NSRect rect, NSString *text, int item) {
+    switch (type & ~kItemDisabled) {
+    case kButtonItem: {
+        // A push button's bezel has a margin around what a classic button's rectangle covered.
+        NSButton *b = [NSButton buttonWithTitle:text target:dialogResponder() action:@selector(pressed:)];
+        b.frame = NSInsetRect(rect, -6, -6);
+        b.tag = item;
+        return b;
+    }
+    case kCheckItem:
+    case kRadioItem: {
+        NSButton *b = type == kCheckItem ? [NSButton checkboxWithTitle:text target:dialogResponder() action:@selector(pressed:)]
+                                         : [NSButton radioButtonWithTitle:text target:dialogResponder() action:@selector(pressed:)];
+        b.frame = rect;
+        b.tag = item;
+        return b;
+    }
+    case kStaticTextItem: {
+        NSTextField *label = [NSTextField wrappingLabelWithString:text];
+        label.font = [NSFont systemFontOfSize:12];
+        label.frame = NSMakeRect(rect.origin.x, rect.origin.y, rect.size.width, rect.size.height + 4);
+        return label;
+    }
+    case kEditTextItem: {
+        // An edit item's rectangle is its text; the frame went around it, three points out.
+        NSTextField *field = [NSTextField textFieldWithString:text];
+        field.font = [NSFont systemFontOfSize:12];
+        field.frame = NSInsetRect(rect, -3, -3);
+        field.delegate = dialogResponder();
+        field.tag = item;
+        return field;
+    }
+    default:  // user items, pictures, icons and controls draw nothing of their own here
+        return nil;
+    }
+}
+
+// A dialog from item list `ditl` in a window whose content is `size`, centered on the main screen.
+CDialog *makeDialog(Call &c, NSSize size, NSString *title, int16_t ditl, AlertIcon icon) {
+    Handle list = GetResource('DITL', ditl);
+    if (!list || GetHandleSize(list) < 2) {
+        log("Dialog Manager: no 'DITL' %d", ditl);
+        return nullptr;
+    }
+    ensureCarbonApplication();
+    B32GameWindow *ns = [[B32GameWindow alloc] initWithContentRect:NSMakeRect(0, 0, size.width, size.height)
+                                                         styleMask:NSWindowStyleMaskTitled
+                                                           backing:NSBackingStoreBuffered
+                                                             defer:NO];
+    ns.title = title ?: @"";
+    [ns center];
+    auto *d = new CDialog{registerWindow(c, ns)};
+    if (icon != kNoIcon) {
+        static const OSType types[] = {0, kAlertStopIcon, kAlertNoteIcon, kAlertCautionIcon};
+        NSImageView *image = [NSImageView imageViewWithImage:[NSWorkspace.sharedWorkspace iconForFileType:NSFileTypeForHFSTypeCode(types[icon])]];
+        image.frame = NSMakeRect(20, 10, 32, 32);
+        [d->window->content addSubview:image];
+    }
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(*list), *end = p + GetHandleSize(list);
+    int count = field16(p) + 1;
+    p += 2;
+    for (int i = 1; i <= count && p + 14 <= end; i++) {
+        DItem item{p[12], resourceRect(p + 4), nil, c.heap.calloc(1, 8)};
+        uint8_t length = p[13];
+        NSString *text = (item.type & ~kItemDisabled) == kControlItem ? @"" : pascalText(p + 14, length);
+        item.view = makeItemView(item.type, item.rect, text, i);
+        if (item.view) [d->window->content addSubview:item.view];
+        dialogItemHandles[item.handle] = {d, i};
+        d->items.push_back(item);
+        p += 14 + length + (length & 1);
+    }
+    ns.autorecalculatesKeyViewLoop = YES;
+    for (DItem &item : d->items)  // the first edit field starts with the focus
+        if ((item.type & ~kItemDisabled) == kEditTextItem) {
+            [ns makeFirstResponder:item.view];
+            break;
+        }
+    dialogs[d->window->handle] = d;
+    dialogOrder.push_back(d);
+    return d;
+}
+
+void setDefaultItem(CDialog *d, int item, NSString *key) {
+    if (DItem *it = itemOf(d, item))
+        if ([it->view isKindOfClass:NSButton.class]) ((NSButton *)it->view).keyEquivalent = key;
+}
+
+void disposeDialog(CDialog *d) {
+    CWindow *w = d->window;
+    [w->window orderOut:nil];
+    w->window.delegate = nil;
+    for (DItem &item : d->items) dialogItemHandles.erase(item.handle);
+    std::erase(dialogOrder, d);
+    dialogs.erase(w->handle);
+    windows.erase(w->handle);
+    delete d;
+}
+
+// Shows `d` modally until an enabled item is hit, and returns that item.
+int16_t runDialog(CDialog *d) {
+    d->hit = 0;
+    NSWindow *ns = d->window->window;
+    while (!d->hit) {
+        [ns makeKeyAndOrderFront:nil];
+        [NSApp runModalForWindow:ns];
+        if (!ns.visible) break;  // closed some other way
+    }
+    return d->hit;
+}
+
+// short Alert/StopAlert/NoteAlert/CautionAlert(short alertID, ModalFilterUPP)
+void runAlert(Call &c, AlertIcon icon) {
+    int16_t alertID = int16_t(c.args.u32());
+    GuestAddr filter = c.args.ptr();
+    if (filter) log("Dialog Manager: alert %d's filter isn't called", alertID);
+    Handle alert = GetResource('ALRT', alertID);
+    if (!alert || GetHandleSize(alert) < 12) {
+        log("Dialog Manager: no 'ALRT' %d", alertID);
+        return c.ret(uint32_t(-1));
+    }
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(*alert);
+    CDialog *d = makeDialog(c, resourceRect(p).size, @"", field16(p + 8), icon);
+    if (!d) return c.ret(uint32_t(-1));
+    setDefaultItem(d, 1, @"\r");
+    // Edit fields and checkboxes in an alert don't end it; only its buttons do.
+    int16_t hit;
+    do hit = runDialog(d);
+    while (hit && (itemOf(d, hit)->type & ~kItemDisabled) != kButtonItem);
+    disposeDialog(d);
+    c.ret(uint32_t(hit));
+}
+
+// The field editor of a dialog's text field, if it has the focus.
+NSText *editorOf(NSView *view) { return [view isKindOfClass:NSTextField.class] ? ((NSTextField *)view).currentEditor : nil; }
+}  // namespace
+
+// DialogRef GetNewDialog(short dialogID, void *storage, WindowRef behind)
+B32_THUNK(_GetNewDialog) {
+    int16_t dialogID = int16_t(c.args.u32());
+    Handle dlog = GetResource('DLOG', dialogID);
+    if (!dlog || GetHandleSize(dlog) < 21) {
+        log("Dialog Manager: no 'DLOG' %d", dialogID);
+        return c.ret(0);
+    }
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(*dlog);
+    // bounds, procID, visible, goAway, refCon, items, title
+    CDialog *d = makeDialog(c, resourceRect(p).size, pascalText(p + 21, p[20]), field16(p + 18), kNoIcon);
+    if (!d) return c.ret(0);
+    std::memcpy(&d->window->refcon, p + 14, 4);
+    if (p[10]) [d->window->window makeKeyAndOrderFront:nil];
+    c.ret(d->window->handle);
+}
+B32_THUNK(_DisposeDialog) {
+    if (CDialog *d = dialogOf(c.args.ptr())) disposeDialog(d);
+}
+// WindowRef GetDialogWindow(DialogRef): a dialog is its window. A standard alert is the host's,
+// with no Carbon window behind it.
+B32_THUNK(_GetDialogWindow) {
+    GuestAddr dialog = c.args.ptr();
+    c.ret(dialogOf(dialog) ? dialog : 0);
+}
+B32_THUNK(_GetDialogFromWindow) {
+    GuestAddr window = c.args.ptr();
+    c.ret(dialogOf(window) ? window : 0);
+}
+// OSErr SetDialogDefaultItem(DialogRef, short) / SetDialogCancelItem(DialogRef, short)
+B32_THUNK(_SetDialogDefaultItem) {
+    CDialog *d = dialogOf(c.args.ptr());
+    setDefaultItem(d, int16_t(c.args.u32()), @"\r");
+    c.ret(0);
+}
+B32_THUNK(_SetDialogCancelItem) {
+    CDialog *d = dialogOf(c.args.ptr());
+    setDefaultItem(d, int16_t(c.args.u32()), @"\e");
+    c.ret(0);
+}
+// void ModalDialog(ModalFilterUPP, DialogItemIndex *itemHit): runs the frontmost dialog.
+B32_THUNK(_ModalDialog) {
+    GuestAddr filter = c.args.ptr(), hit = c.args.ptr();
+    static bool warned = false;
+    if (filter && !warned) {
+        warned = true;
+        log("Dialog Manager: ModalDialog's filter isn't called");
+    }
+    int16_t item = dialogOrder.empty() ? 0 : runDialog(dialogOrder.back());
+    if (hit) c.mem.write<int16_t>(hit, item);
+}
+// void GetDialogItem(DialogRef, short item, short *type, Handle *handle, Rect *box)
+B32_THUNK(_GetDialogItem) {
+    CDialog *d = dialogOf(c.args.ptr());
+    DItem *item = itemOf(d, int16_t(c.args.u32()));
+    GuestAddr type = c.args.ptr(), handle = c.args.ptr(), box = c.args.ptr();
+    if (type) c.mem.write<int16_t>(type, item ? item->type : 0);
+    if (handle) c.mem.write<uint32_t>(handle, item ? item->handle : 0);
+    if (box) writeRect(c, box, item ? item->rect : NSZeroRect);
+}
+// void GetDialogItemText(Handle item, Str255 text)
+B32_THUNK(_GetDialogItemText) {
+    DItem *item = itemForHandle(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    NSString *text = [item->view respondsToSelector:@selector(stringValue)] ? [(id)item->view stringValue] : @"";
+    if (NSText *editor = item ? editorOf(item->view) : nil) text = editor.string;
+    NSData *bytes = [text dataUsingEncoding:NSMacOSRomanStringEncoding allowLossyConversion:YES];
+    uint8_t length = uint8_t(std::min<NSUInteger>(bytes.length, 255));
+    c.mem.write<uint8_t>(out, length);
+    c.mem.copyIn(out + 1, bytes.bytes, length);
+}
+// void SetDialogItemText(Handle item, ConstStr255Param text)
+B32_THUNK(_SetDialogItemText) {
+    DItem *item = itemForHandle(c.args.ptr());
+    NSString *text = guestPascal(c, c.args.ptr());
+    if (!item) return;
+    if (NSText *editor = editorOf(item->view)) editor.string = text;
+    if ([item->view isKindOfClass:NSButton.class]) ((NSButton *)item->view).title = text;
+    else if ([item->view isKindOfClass:NSTextField.class]) ((NSTextField *)item->view).stringValue = text;
+}
+// TEHandle GetDialogTextEditHandle(DialogRef): the dialog's one TextEdit record, which the
+// focused edit field uses.
+B32_THUNK(_GetDialogTextEditHandle) {
+    CDialog *d = dialogOf(c.args.ptr());
+    if (d && !d->textEdit) d->textEdit = c.heap.calloc(1, 8);
+    c.ret(d ? d->textEdit : 0);
+}
+// void TESetSelect(long start, long end, TEHandle): the selection in the focused field.
+B32_THUNK(_TESetSelect) {
+    int32_t start = c.args.i32(), end = c.args.i32();
+    GuestAddr te = c.args.ptr();
+    for (auto &[handle, d] : dialogs) {
+        if (d->textEdit != te) continue;
+        NSText *editor = [d->window->window.firstResponder isKindOfClass:NSText.class] ? (NSText *)d->window->window.firstResponder : nil;
+        if (!editor) return;
+        NSUInteger length = editor.string.length;
+        NSUInteger from = std::min<NSUInteger>(NSUInteger(std::max(start, 0)), length);
+        NSUInteger to = std::min<NSUInteger>(NSUInteger(std::max(end, start)), length);
+        editor.selectedRange = NSMakeRange(from, std::max(from, to) - from);
+        return;
+    }
+}
+B32_THUNK(_Alert) { runAlert(c, kNoIcon); }
+B32_THUNK(_StopAlert) { runAlert(c, kStopIcon); }
+B32_THUNK(_NoteAlert) { runAlert(c, kNoteIcon); }
+B32_THUNK(_CautionAlert) { runAlert(c, kCautionIcon); }

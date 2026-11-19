@@ -333,6 +333,44 @@ B32_THUNK(_SectRect) {
     writeRect(c.rt, out, top, left, bottom, right);
     c.ret(top < bottom && left < right);
 }
+// Points: { short v, h }, a word on the stack when passed by value (v in its low half).
+// void AddPt(Point src, Point *dst), SubPt(Point src, Point *dst): dst plus or minus src.
+B32_THUNK(_AddPt) {
+    uint32_t src = c.args.u32();
+    GuestAddr dst = c.args.ptr();
+    c.mem.write<int16_t>(dst, int16_t(c.mem.read<int16_t>(dst) + int16_t(src)));
+    c.mem.write<int16_t>(dst + 2, int16_t(c.mem.read<int16_t>(dst + 2) + int16_t(src >> 16)));
+}
+B32_THUNK(_SubPt) {
+    uint32_t src = c.args.u32();
+    GuestAddr dst = c.args.ptr();
+    c.mem.write<int16_t>(dst, int16_t(c.mem.read<int16_t>(dst) - int16_t(src)));
+    c.mem.write<int16_t>(dst + 2, int16_t(c.mem.read<int16_t>(dst + 2) - int16_t(src >> 16)));
+}
+// Boolean EqualPt(Point, Point)
+B32_THUNK(_EqualPt) {
+    uint32_t a = c.args.u32(), b = c.args.u32();
+    c.ret(a == b);
+}
+// Boolean PtInRect(Point, const Rect *): on the top or left edge counts, the bottom or right doesn't.
+B32_THUNK(_PtInRect) {
+    uint32_t pt = c.args.u32();
+    GuestAddr rect = c.args.ptr();
+    int16_t v = int16_t(pt), h = int16_t(pt >> 16);
+    c.ret(v >= c.mem.read<int16_t>(rect) && h >= c.mem.read<int16_t>(rect + 2) && v < c.mem.read<int16_t>(rect + 4) &&
+          h < c.mem.read<int16_t>(rect + 6));
+}
+// long PinRect(const Rect *, Point): the point moved into the rect (short of its bottom and right
+// edges), v in the high word and h in the low.
+B32_THUNK(_PinRect) {
+    GuestAddr rect = c.args.ptr();
+    uint32_t pt = c.args.u32();
+    int16_t top = c.mem.read<int16_t>(rect), left = c.mem.read<int16_t>(rect + 2);
+    int16_t bottom = c.mem.read<int16_t>(rect + 4), right = c.mem.read<int16_t>(rect + 6);
+    int16_t v = std::max(top, std::min(int16_t(pt), int16_t(bottom - 1)));
+    int16_t h = std::max(left, std::min(int16_t(pt >> 16), int16_t(right - 1)));
+    c.ret(uint32_t(uint16_t(v)) << 16 | uint16_t(h));
+}
 // void EraseRect(const Rect *): the current port's background color, in a GWorld's pixels.
 B32_THUNK(_EraseRect) {
     GuestAddr rect = c.args.ptr();
@@ -341,6 +379,11 @@ B32_THUNK(_EraseRect) {
     fillPixels(c.rt, px, c.mem.read<int16_t>(rect), c.mem.read<int16_t>(rect + 2), c.mem.read<int16_t>(rect + 4),
                c.mem.read<int16_t>(rect + 6), b32::appkit::portState(currentPort).back);
 }
+// PicHandle GetPicture(short id): none. The host has nothing left that reads a 'PICT', so a
+// splash screen drawn from one is skipped, as a game does when the resource is missing.
+B32_THUNK(_GetPicture) { c.ret(0); }
+B32_THUNK(_DrawPicture) { c.args.ptr(); }
+B32_THUNK(_KillPicture) { c.args.ptr(); }
 // The rest paint nothing: the guest's own blitter or OpenGL puts the pixels up.
 B32_THUNK(_PaintRect) { c.args.ptr(); }
 B32_THUNK(_FrameRect) { c.args.ptr(); }
@@ -381,6 +424,21 @@ B32_THUNK(_Move) {
     std::lock_guard guard(portsLock);
     stateOf(currentPort).penH = int16_t(stateOf(currentPort).penH + dh);
     stateOf(currentPort).penV = int16_t(stateOf(currentPort).penV + dv);
+}
+// void GetPenState(PenState *), SetPenState(const PenState *): the pen's place is all that is kept;
+// it is drawn with nowhere else. PenState is { Point pnLoc, pnSize; short pnMode; Pattern pnPat; }.
+B32_THUNK(_GetPenState) {
+    GuestAddr out = c.args.ptr();
+    std::lock_guard guard(portsLock);
+    const int16_t fields[5] = {stateOf(currentPort).penV, stateOf(currentPort).penH, 1, 1, 8};  // patCopy
+    c.mem.writeArray<int16_t>(out, fields, 5);
+    for (int i = 0; i < 8; i++) c.mem.write<uint8_t>(out + 10 + uint32_t(i), 0xff);  // black
+}
+B32_THUNK(_SetPenState) {
+    GuestAddr in = c.args.ptr();
+    std::lock_guard guard(portsLock);
+    stateOf(currentPort).penV = c.mem.read<int16_t>(in);
+    stateOf(currentPort).penH = c.mem.read<int16_t>(in + 2);
 }
 // void TextFont(short family), TextFace(StyleParameter), TextSize(short)
 B32_THUNK(_TextFont) {

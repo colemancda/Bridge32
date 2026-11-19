@@ -386,12 +386,17 @@ B32_THUNK(_mmap) {
     if (flags & MAP_FIXED) {
         // Garbage collectors reserve a region with one mmap and commit pages
         // in it with MAP_FIXED. The region is already real guest memory, so
-        // committing gives fresh pages at the same address.
+        // committing gives fresh pages at the same address. Outside one, the
+        // heap gives the guest that address if nothing has it yet (Halo keeps
+        // its map cache at 0x40000000).
         std::lock_guard guard(vmLock);
         if (!mappingHolding(addr, length)) {
-            setGuestErrno(c, ENOMEM);
-            c.ret(uint32_t(-1));  // MAP_FAILED
-            return;
+            if (!c.heap.allocAt(addr, length)) {
+                setGuestErrno(c, ENOMEM);
+                c.ret(uint32_t(-1));  // MAP_FAILED
+                return;
+            }
+            mappings[addr] = {addr, length};
         }
         if ((flags & MAP_ANON) || fd < 0) std::memset(c.mem.ptr<void>(addr), 0, length);
         else if (::pread(fd, c.mem.ptr<void>(addr), length, offset) < 0) {
