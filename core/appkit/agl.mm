@@ -259,7 +259,7 @@ B32_THUNK(_aglUpdateContext) {
 B32_THUNK(_aglSwapBuffers) {
     b32::gl::snapshotPresented();
     [contextOf(c.args.u32()) flushBuffer];
-    b32::appkit::pumpCarbonEvents(0);
+    b32::appkit::pumpForPresent();
 }
 // GLboolean aglSetInteger(ctx, pname, const GLint *params)
 B32_THUNK(_aglSetInteger) {
