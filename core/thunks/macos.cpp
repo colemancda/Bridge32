@@ -21,6 +21,7 @@
 #include <mach/mach.h>
 #include <mach/semaphore.h>
 #include <netdb.h>
+#include <notify.h>
 #include <pwd.h>
 #include <signal.h>
 #include <sys/event.h>
@@ -152,6 +153,61 @@ B32_THUNK(_waitpid) {
     setGuestErrno(c, ECHILD);
     c.ret(uint32_t(-1));
 }
+// posix_spawn and posix_spawnp: no program starts, as for execve; the file actions and attributes the
+// guest sets up for one are accepted and forgotten.
+B32_THUNK(_posix_spawn) { c.ret(ENOSYS); }
+B32_THUNK(_posix_spawnp) { c.ret(ENOSYS); }
+#define B32_SPAWN_SETUP(symbol) \
+    B32_THUNK(symbol) { c.ret(0); }
+B32_SPAWN_SETUP(_posix_spawn_file_actions_init)
+B32_SPAWN_SETUP(_posix_spawn_file_actions_destroy)
+B32_SPAWN_SETUP(_posix_spawn_file_actions_adddup2)
+B32_SPAWN_SETUP(_posix_spawn_file_actions_addclose)
+B32_SPAWN_SETUP(_posix_spawn_file_actions_addopen)
+B32_SPAWN_SETUP(_posix_spawnattr_init)
+B32_SPAWN_SETUP(_posix_spawnattr_destroy)
+B32_SPAWN_SETUP(_posix_spawnattr_setflags)
+B32_SPAWN_SETUP(_posix_spawnattr_setpgroup)
+B32_SPAWN_SETUP(_posix_spawnattr_setsigmask)
+B32_SPAWN_SETUP(_posix_spawnattr_setsigdefault)
+#undef B32_SPAWN_SETUP
+
+// --- malloc zones: all of them the guest heap, as NSZones are ------------------------------------
+
+namespace {
+GuestAddr defaultZone(Call &c) {
+    static GuestAddr zone = c.heap.calloc(1, 64);  // a malloc_zone_t the guest only passes back
+    return zone;
+}
+}  // namespace
+B32_THUNK(_malloc_default_zone) { c.ret(defaultZone(c)); }
+B32_THUNK(_malloc_create_zone) { c.ret(defaultZone(c)); }
+B32_THUNK(_malloc_zone_from_ptr) { c.ret(defaultZone(c)); }
+B32_THUNK(_malloc_destroy_zone) {}
+B32_THUNK(_malloc_set_zone_name) {}
+B32_THUNK(_malloc_zone_malloc) {
+    c.args.ptr();
+    c.ret(c.heap.alloc(c.args.u32()));
+}
+B32_THUNK(_malloc_zone_calloc) {
+    c.args.ptr();
+    uint32_t count = c.args.u32();
+    c.ret(c.heap.calloc(count, c.args.u32()));
+}
+B32_THUNK(_malloc_zone_realloc) {
+    c.args.ptr();
+    GuestAddr p = c.args.ptr();
+    c.ret(c.heap.realloc(p, c.args.u32()));
+}
+B32_THUNK(_malloc_zone_free) {
+    c.args.ptr();
+    if (GuestAddr p = c.args.ptr()) c.heap.free(p);
+}
+B32_THUNK(_malloc_zone_valloc) {
+    c.args.ptr();
+    c.ret(c.heap.alloc(c.args.u32(), 4096));
+}
+B32_THUNK(_malloc_good_size) { c.ret((c.args.u32() + 15) & ~15u); }
 B32_THUNK(_getpriority) {
     int which = c.args.i32();
     c.ret(uint32_t(::getpriority(which, c.args.u32())));
@@ -313,7 +369,88 @@ B32_THUNK(_getgrnam_r) {
     uint32_t size = c.args.u32();
     finishLookup(c, ::getgrnam(name), out, buffer, size, c.args.ptr(), writeGroup);
 }
+// struct group *getgrgid(gid_t) and getgrnam(const char *): one entry per thread, as libc keeps.
+namespace {
+void staticGroup(Call &c, const struct group *gr) {
+    constexpr uint32_t kBuffer = 1024;
+    static thread_local GuestAddr entry = 0;
+    if (!entry) entry = c.heap.calloc(1, 16 + kBuffer);
+    if (!gr || writeGroup(c, entry, entry + 16, kBuffer, gr)) {
+        c.ret(0);
+        return;
+    }
+    c.ret(entry);
+}
+}  // namespace
+B32_THUNK(_getgrgid) { staticGroup(c, ::getgrgid(gid_t(c.args.u32()))); }
+B32_THUNK(_getgrnam) { staticGroup(c, ::getgrnam(c.mem.cstr(c.args.ptr()))); }
+B32_THUNK(_gethostid) { c.ret(uint32_t(::gethostid())); }
+// uint32_t notify_post(const char *name): the host's notification center has the name too.
+B32_THUNK(_notify_post) { c.ret(::notify_post(c.mem.cstr(c.args.ptr()))); }
 B32_THUNK(_getprotobyname) { c.ret(0); }
+
+// --- architectures (NXGetArchInfoFromCpuType and friends) -------------------------------------
+// const NXArchInfo *: { const char *name; cpu_type_t cputype; cpu_subtype_t cpusubtype;
+// enum NXByteOrder byteorder; const char *description; }, from a table in guest memory.
+
+namespace {
+struct ArchEntry {
+    const char *name;
+    int32_t cpu, subtype;
+    uint32_t order;  // NX_LittleEndian 1, NX_BigEndian 2
+    const char *description;
+};
+constexpr ArchEntry kArchs[] = {
+    {"ppc", 18, 0, 2, "PowerPC"},           {"ppc750", 18, 9, 2, "PowerPC 750"},
+    {"ppc7400", 18, 10, 2, "PowerPC 7400"}, {"ppc7450", 18, 11, 2, "PowerPC 7450"},
+    {"ppc970", 18, 100, 2, "PowerPC 970"},  {"ppc64", 0x01000012, 0, 2, "PowerPC 64-bit"},
+    {"i386", 7, 3, 1, "Intel 80x86"},       {"x86_64", 0x01000007, 3, 1, "Intel x86-64"},
+    {"arm", 12, 0, 1, "ARM"},
+};
+constexpr uint32_t kArchCount = sizeof kArchs / sizeof kArchs[0];
+GuestAddr archTable(Call &c) {
+    static GuestAddr table = [&] {
+        GuestAddr t = c.heap.calloc(kArchCount + 1, 20);
+        for (uint32_t i = 0; i < kArchCount; i++) {
+            const ArchEntry &a = kArchs[i];
+            const uint32_t words[5] = {c.rt.internString(a.name), uint32_t(a.cpu), uint32_t(a.subtype), a.order,
+                                       c.rt.internString(a.description)};
+            c.mem.writeWords(t + i * 20, words, sizeof words);
+        }
+        return t;
+    }();
+    return table;
+}
+}  // namespace
+
+// const NXArchInfo *NXGetArchInfoFromCpuType(cpu_type_t, cpu_subtype_t): the subtype's entry, or the
+// type's general one for CPU_SUBTYPE_MULTIPLE (-1) or a subtype not in the table.
+B32_THUNK(_NXGetArchInfoFromCpuType) {
+    int32_t cpu = c.args.i32(), subtype = c.args.i32();
+    GuestAddr table = archTable(c);
+    int found = -1;
+    for (uint32_t i = 0; i < kArchCount && found < 0; i++)
+        if (kArchs[i].cpu == cpu && kArchs[i].subtype == (subtype & 0x00ffffff)) found = int(i);
+    for (uint32_t i = 0; i < kArchCount && found < 0; i++)
+        if (kArchs[i].cpu == cpu) found = int(i);
+    c.ret(found < 0 ? 0 : table + uint32_t(found) * 20);
+}
+B32_THUNK(_NXGetArchInfoFromName) {
+    std::string name = c.mem.cstr(c.args.ptr());
+    GuestAddr table = archTable(c);
+    for (uint32_t i = 0; i < kArchCount; i++)
+        if (name == kArchs[i].name) return c.ret(table + i * 20);
+    c.ret(0);
+}
+// cpu_type_t _CSGetProcessorArchitecture(void): CoreServices' name for the CPU, the guest's.
+B32_THUNK(__CSGetProcessorArchitecture) {
+#if defined(B32_GUEST_PPC)
+    c.ret(18);  // CPU_TYPE_POWERPC
+#else
+    c.ret(7);   // CPU_TYPE_I386
+#endif
+}
+B32_THUNK(_NXGetAllArchInfos) { c.ret(archTable(c)); }
 
 // --- iconv: descriptors are 64-bit host pointers behind small guest handles -------------
 

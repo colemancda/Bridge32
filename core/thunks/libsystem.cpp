@@ -111,6 +111,8 @@ bool sysctlAnswer(Call &c, const std::string &name, GuestAddr out, GuestAddr len
     } else if (name == "hw.cputype" || name == "hw.cpusubtype") {
 #if defined(B32_GUEST_PPC)
         replyInt(name == "hw.cputype" ? 18 /* CPU_TYPE_POWERPC */ : 10 /* CPU_SUBTYPE_POWERPC_7400 */);
+#elif defined(B32_GUEST_I386)
+        replyInt(name == "hw.cputype" ? 7 /* CPU_TYPE_I386 */ : 3 /* CPU_SUBTYPE_I386_ALL */);
 #else
         replyInt(name == "hw.cputype" ? 12 /* CPU_TYPE_ARM */ : 9 /* CPU_SUBTYPE_ARM_V7 */);
 #endif

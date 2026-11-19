@@ -1649,6 +1649,9 @@ B32_THUNK(_GetMouse) {
     c.mem.write<int16_t>(out + 2, int16_t(p.x));
 }
 B32_THUNK(_Button) { c.ret(NSEvent.pressedMouseButtons & 1); }
+// UInt32 GetCurrentEventButtonState(void) and GetCurrentButtonState(void): bit 0 the primary button.
+B32_THUNK(_GetCurrentEventButtonState) { c.ret(uint32_t(NSEvent.pressedMouseButtons)); }
+B32_THUNK(_GetCurrentButtonState) { c.ret(uint32_t(NSEvent.pressedMouseButtons)); }
 B32_THUNK(_FindWindow) {
     c.args.u32();
     c.mem.write<uint32_t>(c.args.ptr(), 0);

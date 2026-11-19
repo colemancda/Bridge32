@@ -158,6 +158,23 @@ B32_OVERRIDE_WHEN(isGraphicsContext, "graphicsPort") {
     o.c.ret(o.bridge.toGuest((id)static_cast<NSGraphicsContext *>(o.receiver).CGContext));
 }
 
+// NSArray *_NSUniqueMenuItemNamesForFullPaths(NSArray *paths): AppKit's private names for a menu of
+// files (Xcode 3's Window menu), gone from today's AppKit: each file's name, with its folder's after
+// it where two files share a name.
+B32_THUNK(__NSUniqueMenuItemNamesForFullPaths) {
+    NSArray *paths = bridge(c).toHost(c.args.ptr());
+    NSCountedSet *names = [NSCountedSet set];
+    for (NSString *path in paths) [names addObject:path.lastPathComponent];
+    NSMutableArray *unique = [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSString *path in paths) {
+        NSString *name = path.lastPathComponent;
+        if ([names countForObject:name] > 1)
+            name = [NSString stringWithFormat:@"%@ \u2014 %@", name, path.stringByDeletingLastPathComponent.lastPathComponent];
+        [unique addObject:name];
+    }
+    c.ret(bridge(c).toGuest(unique));
+}
+
 // void NSCountWindows(NSInteger *count) and void NSWindowList(NSInteger size, NSInteger list[]):
 // the app's windows, front to back, by number.
 B32_THUNK(_NSCountWindows) {

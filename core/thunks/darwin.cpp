@@ -152,16 +152,26 @@ B32_THUNK(_getprogname) {
     c.ret(c.rt.internString(path.substr(path.rfind('/') + 1)));
 }
 
-// const NXArchInfo *NXGetLocalArchInfo(void): the guest's CPU, an armv7.
+// const NXArchInfo *NXGetLocalArchInfo(void): the guest's CPU, an armv7, an i386 or a PowerPC 7400.
 // NXArchInfo is { name, cputype, cpusubtype, byteorder, description }.
 B32_THUNK(_NXGetLocalArchInfo) {
+#if defined(B32_GUEST_PPC)
+    constexpr const char *kName = "ppc7400", *kDescription = "PowerPC 7400";
+    constexpr uint32_t kType = 18, kSubtype = 10, kOrder = 2;  // NX_BigEndian
+#elif defined(B32_GUEST_I386)
+    constexpr const char *kName = "i386", *kDescription = "Intel 80x86";
+    constexpr uint32_t kType = 7, kSubtype = 3, kOrder = 1;
+#else
+    constexpr const char *kName = "armv7", *kDescription = "arm v7";
+    constexpr uint32_t kType = 12, kSubtype = 9, kOrder = 1;   // NX_LittleEndian
+#endif
     static GuestAddr info = [&] {
         GuestAddr p = c.heap.calloc(1, 20);
-        c.mem.write<uint32_t>(p, c.rt.internString("armv7"));
-        c.mem.write<uint32_t>(p + 4, 12);   // CPU_TYPE_ARM
-        c.mem.write<uint32_t>(p + 8, 9);    // CPU_SUBTYPE_ARM_V7
-        c.mem.write<uint32_t>(p + 12, 1);   // NX_LittleEndian
-        c.mem.write<uint32_t>(p + 16, c.rt.internString("arm v7"));
+        c.mem.write<uint32_t>(p, c.rt.internString(kName));
+        c.mem.write<uint32_t>(p + 4, kType);
+        c.mem.write<uint32_t>(p + 8, kSubtype);
+        c.mem.write<uint32_t>(p + 12, kOrder);
+        c.mem.write<uint32_t>(p + 16, c.rt.internString(kDescription));
         return p;
     }();
     c.ret(info);

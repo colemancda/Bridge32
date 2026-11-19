@@ -110,6 +110,13 @@ public:
     bool isAlias(GuestAddr guest);
     // Whether `object` is one of the app's constant strings (@"..." literals).
     bool isConstantString(GuestAddr object) const;
+
+    // A garbage-collected app (its executable built for the collector of Mac OS X 10.5, as Xcode 3 was)
+    // leaves memory to the collector: it releases what it never retained and keeps what it never
+    // retained. There's no collector here, so nothing it touches is freed: -retain, -release and
+    // -autorelease it sends do nothing, and every host object it's handed is kept.
+    void setCollecting(bool on) { collecting_ = on; }
+    bool collecting() const { return collecting_; }
     // A protocol by name as a guest protocol_t: the app's own, or one standing
     // for the host's; 0 if neither has it.
     GuestAddr protocolNamed(const std::string &name);
@@ -306,6 +313,7 @@ private:
     std::recursive_mutex initLock_;
     bool running_ = false;     // guest code has started (runLoadMethods)
     bool settingUp_ = false;   // inside setupImage
+    bool collecting_ = false;  // see setCollecting
     struct DeferredTrampoline {
         Class target;
         GuestAddr sel;

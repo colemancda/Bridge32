@@ -388,6 +388,16 @@ void Runtime::load(const std::string &path) {
         mem_->write<uint32_t>(image_.dyldSection + 4, thunks_->stubFor("__dyld_func_lookup"));
     }
     bridge_->setupImage(image_);
+#if defined(B32_GUEST_MAC)
+    // An executable built for the garbage collector (image info flags: 2 supports it, 4 requires it) ran
+    // with it: see Bridge::setCollecting.
+    const Section *info = image_.section("__OBJC", "__image_info");
+    if (!info) info = image_.section("__DATA", "__objc_imageinfo");
+    if (info && info->size >= 8 && (mem_->read<uint32_t>(info->addr + 4) & 6)) {
+        log("%s was built for garbage collection; nothing it uses is freed", image_.path.c_str());
+        bridge_->setCollecting(true);
+    }
+#endif
 }
 
 GuestAddr Runtime::buildProcessStack(GuestAddr top, const std::vector<std::string> &argv,

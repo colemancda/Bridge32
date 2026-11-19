@@ -45,3 +45,8 @@ B32_THUNK(_SCNetworkReachabilitySetDispatchQueue) { c.ret(1); }
 // with location permission), as when an iPhone isn't on Wi-Fi.
 B32_THUNK(_CNCopySupportedInterfaces) { c.ret(0); }
 B32_THUNK(_CNCopyCurrentNetworkInfo) { c.ret(0); }
+
+// SCDynamicStoreRef SCDynamicStoreCreate(CFAllocatorRef, CFStringRef name, SCDynamicStoreCallBack, SCDynamicStoreContext *):
+// the guest gets no session with configd, as a sandboxed process doesn't.
+B32_THUNK(_SCDynamicStoreCreate) { c.ret(0); }
+B32_THUNK(_SCDynamicStoreCopyValue) { c.ret(0); }

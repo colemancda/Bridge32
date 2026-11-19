@@ -276,6 +276,10 @@ B32_THUNK(_CVDisplayLinkGetNominalOutputVideoRefreshPeriod) {
     (void)out;
 }
 
+// OSStatus CSBackupSetItemExcluded(NSURL *item, Boolean exclude, Boolean excludeByPath): Time Machine
+// exclusions (Xcode 3's build folders), which are the user's to set; nothing changes.
+B32_THUNK(_CSBackupSetItemExcluded) { c.ret(0); }
+
 // --- Launch Services ------------------------------------------------------------------------
 
 // OSStatus LSFindApplicationForInfo(OSType creator, CFStringRef bundleID, CFStringRef name,
@@ -639,6 +643,19 @@ B32_THUNK(_UTTypeConformsTo) {
     NSString *b = bridge(c).toHost(c.args.ptr());
     c.ret(UTTypeConformsTo((CFStringRef)a, (CFStringRef)b));
 }
+// CFDictionaryRef _CFCopySystemVersionDictionary(void): SystemVersion.plist as the guest sees it, the
+// same Mac OS X 10.6.8 that Gestalt reports.
+B32_THUNK(__CFCopySystemVersionDictionary) {
+    NSDictionary *version = @{
+        @"ProductName" : @"Mac OS X",
+        @"ProductVersion" : @"10.6.8",
+        @"ProductUserVisibleVersion" : @"10.6.8",
+        @"ProductBuildVersion" : @"10K549",
+        @"ProductCopyright" : @"1983-2011 Apple Inc.",
+    };
+    c.ret(c.rt.bridge().toGuest([version retain]));  // a copy the caller releases
+}
+
 // OSErr Gestalt(OSType selector, SInt32 *response): the guest sees Mac OS X 10.6.8,
 // the last system that ran both its PowerPC-era and Intel-era APIs.
 B32_THUNK(_Gestalt) {

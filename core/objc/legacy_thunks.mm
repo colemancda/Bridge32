@@ -77,8 +77,10 @@ B32_THUNK(_objc_exception_match) {
 
 // --- garbage collection: no collector runs, so a barrier is its plain store ---------
 
-B32_THUNK(_objc_collectingEnabled) { c.ret(0); }
-B32_THUNK(_objc_collecting_enabled) { c.ret(0); }
+B32_THUNK(_objc_collectingEnabled) { c.ret(bridge(c).collecting()); }
+// The collector's hint to clear the stack below the caller, for conservative scanning: nothing to do.
+B32_THUNK(_objc_clear_stack) {}
+B32_THUNK(_objc_collecting_enabled) { c.ret(bridge(c).collecting()); }
 
 namespace {
 // Ivars of host classes that a guest's category on the class assigns directly, by their offset
