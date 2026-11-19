@@ -253,6 +253,27 @@ void Bridge::setupLegacyImage(const Image &image) {
             GuestAddr cls = mem.read<uint32_t>(m.defs + i * 4);
             legacyClasses_[mem.cstr(mem.read<uint32_t>(cls + kName))] = cls;
         }
+    // Selector and class references, before any class is realized: the host may message a class
+    // as soon as it exists (to ask +isSubclassOfClass:, which a framework's category can take
+    // over), so its +initialize can run while the rest are set up, and its code uses these. A
+    // class of this image is its own address, realized or not.
+    for (const auto &s : image.sections) {
+        if (s.name == "__message_refs")
+            for (uint32_t off = 0; off < s.size; off += 4)
+                mem.write<uint32_t>(s.addr + off, guestSel(mem.cstr(mem.read<uint32_t>(s.addr + off))));
+        if (s.name == "__cls_refs")
+            for (uint32_t off = 0; off < s.size; off += 4) {
+                std::string name = mem.cstr(mem.read<uint32_t>(s.addr + off));
+                if (auto inImage = legacyClasses_.find(name); inImage != legacyClasses_.end()) {
+                    mem.write<uint32_t>(s.addr + off, inImage->second);
+                    continue;
+                }
+                ClassInfo *cls = classNamed(name);
+                if (!cls) cls = stubForName(name);
+                mem.write<uint32_t>(s.addr + off, cls->addr);
+            }
+    }
+
     for (const Module &m : list)
         for (uint32_t i = 0; i < m.classes; i++) realizeLegacyClass(mem.read<uint32_t>(m.defs + i * 4));
 
@@ -271,17 +292,5 @@ void Bridge::setupLegacyImage(const Image &image) {
                 guestClassProtocols_[cls->addr].push_back(protocols);
         }
 
-    for (const auto &s : image.sections) {
-        if (s.name == "__message_refs")
-            for (uint32_t off = 0; off < s.size; off += 4)
-                mem.write<uint32_t>(s.addr + off, guestSel(mem.cstr(mem.read<uint32_t>(s.addr + off))));
-        if (s.name == "__cls_refs")
-            for (uint32_t off = 0; off < s.size; off += 4) {
-                std::string name = mem.cstr(mem.read<uint32_t>(s.addr + off));
-                ClassInfo *cls = classNamed(name);
-                if (!cls) cls = stubForName(name);
-                mem.write<uint32_t>(s.addr + off, cls->addr);
-            }
-    }
     legacyClasses_.clear();
 }
