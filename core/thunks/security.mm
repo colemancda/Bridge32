@@ -220,6 +220,36 @@ B32_THUNK(_SecTrustCreateWithCertificates) {
     c.ret(uint32_t(status));
 }
 
+// --- keychains and identities (the Mac's older API) ---------------------------------------------
+// The guest sees no keychain of its own and no signing identities: a search finds nothing.
+
+// OSStatus SecKeychainCopyDefault(SecKeychainRef *keychain)
+B32_THUNK(_SecKeychainCopyDefault) {
+    if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, 0);
+    c.ret(uint32_t(errSecNoDefaultKeychain));
+}
+// OSStatus SecIdentitySearchCreate(CFTypeRef keychainOrArray, CSSM_KEYUSE keyUsage, SecIdentitySearchRef *search):
+// an empty search, an object the guest releases when it's done.
+B32_THUNK(_SecIdentitySearchCreate) {
+    c.args.ptr();
+    c.args.u32();
+    GuestAddr out = c.args.ptr();
+    if (out) c.mem.write<uint32_t>(out, c.rt.bridge().toGuest([[NSObject alloc] init]));
+    c.ret(errSecSuccess);
+}
+// OSStatus SecIdentitySearchCopyNext(SecIdentitySearchRef search, SecIdentityRef *identity)
+B32_THUNK(_SecIdentitySearchCopyNext) {
+    c.args.ptr();
+    if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, 0);
+    c.ret(uint32_t(errSecItemNotFound));
+}
+// OSStatus SecIdentityCopyCertificate(SecIdentityRef identity, SecCertificateRef *certificate)
+B32_THUNK(_SecIdentityCopyCertificate) {
+    c.args.ptr();
+    if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, 0);
+    c.ret(uint32_t(errSecItemNotFound));
+}
+
 // --- keys ---------------------------------------------------------------------------------------
 // Keys are generated in memory; with no keychain behind this app, permanent
 // ones aren't kept.
