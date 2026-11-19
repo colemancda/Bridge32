@@ -210,17 +210,36 @@ void loadHostLibrary(const std::string &path) {
 }
 }  // namespace
 
-std::string Runtime::findGuestLibrary(const std::string &installName) const {
+std::string Runtime::findGuestLibrary(const std::string &installName, const std::string &loader) const {
+    auto readable = [](const std::string &path) { return access(path.c_str(), R_OK) == 0; };
+    std::string loaderDir = loader.empty() ? mainDir_ : loader.substr(0, loader.rfind('/'));
+    // @loader_path is the folder of the image naming the library; @executable_path the program's.
+    if (installName.rfind("@loader_path/", 0) == 0) {
+        std::string path = loaderDir + installName.substr(std::strlen("@loader_path"));
+        if (readable(path)) return path;
+    }
+    if (installName.rfind("@executable_path/", 0) == 0) {
+        std::string path = mainDir_ + installName.substr(std::strlen("@executable_path"));
+        if (readable(path)) return path;
+    }
+    // @rpath, in the run-path folders of the images loading it, innermost first.
+    if (installName.rfind("@rpath/", 0) == 0) {
+        std::string rest = installName.substr(std::strlen("@rpath/"));
+        for (auto level = rpathStack_.rbegin(); level != rpathStack_.rend(); ++level)
+            for (const std::string &dir : *level)
+                if (readable(dir + "/" + rest)) return dir + "/" + rest;
+    }
     // Libraries the app ships itself, beside its executable or in its
     // Frameworks folder: SDL2.framework, or the Swift runtime of Swift apps
-    // from before iOS 12.2.
+    // from before iOS 12.2. A wrapped Mac app's run paths point outside its
+    // bundle, so its frameworks are looked for in the guest library folders too.
     for (const char *prefix : {"@rpath/", "@executable_path/", "@loader_path/"}) {
         if (installName.rfind(prefix, 0) != 0) continue;
         std::string rest = installName.substr(std::strlen(prefix));
-        for (const std::string &dir : {mainDir_, mainDir_ + "/Frameworks"}) {
-            std::string path = dir + "/" + rest;
-            if (access(path.c_str(), R_OK) == 0) return path;
-        }
+        for (const std::string &dir : {mainDir_, mainDir_ + "/Frameworks"})
+            if (readable(dir + "/" + rest)) return dir + "/" + rest;
+        for (const std::string &dir : guestLibraryDirs_)
+            if (readable(dir + "/" + rest)) return dir + "/" + rest;
         return {};
     }
     std::string base = installName.substr(installName.rfind('/') + 1);
@@ -242,7 +261,9 @@ std::string Runtime::findGuestLibrary(const std::string &installName) const {
 
 MachOLoader Runtime::makeLoader() {
     MachOLoader loader(*mem_, [this](const std::string &s) { return resolve(s); });
-    loader.onDylibs = [this](const std::vector<std::string> &dylibs) { loadLinkedLibraries(dylibs); };
+    loader.onDylibs = [this](const std::vector<std::string> &dylibs, const std::vector<std::string> &rpaths, const std::string &path) {
+        loadLinkedLibraries(dylibs, rpaths, path);
+    };
     // An import that got a stub nothing stands behind is remembered, for the image that defines it.
     loader.onImport = [this](const std::string &symbol, GuestAddr target, GuestAddr where, int64_t addend, bool jump) {
         bool stub = target >= layout::kStubBase && target - layout::kStubBase < layout::kStubRegionSize;
@@ -269,7 +290,20 @@ void Runtime::bindPendingImports(const std::unordered_map<std::string, GuestAddr
 // Before an image is bound: host frameworks are loaded so their classes and
 // constants exist, and guest builds of libraries are loaded (dependencies
 // first) so the image binds to them.
-void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs) {
+void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs, const std::vector<std::string> &rpaths, const std::string &loader) {
+    // This image's run paths, resolved, for it and the libraries it loads.
+    std::string loaderDir = loader.substr(0, loader.rfind('/'));
+    std::vector<std::string> resolved;
+    for (const std::string &rpath : rpaths) {
+        if (rpath.rfind("@loader_path", 0) == 0) resolved.push_back(loaderDir + rpath.substr(std::strlen("@loader_path")));
+        else if (rpath.rfind("@executable_path", 0) == 0) resolved.push_back(mainDir_ + rpath.substr(std::strlen("@executable_path")));
+        else resolved.push_back(rpath);
+    }
+    rpathStack_.push_back(std::move(resolved));
+    struct Pop {
+        std::vector<std::vector<std::string>> &stack;
+        ~Pop() { stack.pop_back(); }
+    } pop{rpathStack_};
     for (const auto &d : dylibs) {
         if (d.rfind("/System/Library/Frameworks/", 0) == 0) {
             loadHostLibrary(d);
@@ -277,7 +311,7 @@ void Runtime::loadLinkedLibraries(const std::vector<std::string> &dylibs) {
         }
         if (librariesSeen_.count(d)) continue;
         librariesSeen_[d] = true;
-        std::string path = findGuestLibrary(d);
+        std::string path = findGuestLibrary(d, loader);
         if (path.empty() || librariesByPath_.count(path)) continue;
         loadGuestLibrary(path);
     }
@@ -325,8 +359,9 @@ uint32_t Runtime::openLibrary(const std::string &requested, Cpu &cpu) {
 
     size_t first = libraries_.size();
     size_t index = loadGuestLibrary(path);
-    // Its dependencies loaded first and come before it; initialize all of
-    // them in that order, as dyld does.
+    // Their classes' +load first, then their initializers: dependencies loaded first and come
+    // before it, and are initialized in that order, as dyld does.
+    bridge_->runLoadMethods(cpu);
     for (size_t i = first; i < libraries_.size(); i++) {
         std::vector<GuestAddr> inits = libraries_[i].initializers;
         for (GuestAddr init : inits) cpu.call(init, {});
