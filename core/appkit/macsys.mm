@@ -276,6 +276,20 @@ B32_THUNK(_CVDisplayLinkGetNominalOutputVideoRefreshPeriod) {
     (void)out;
 }
 
+// --- Launch Services ------------------------------------------------------------------------
+
+// OSStatus LSFindApplicationForInfo(OSType creator, CFStringRef bundleID, CFStringRef name,
+//     FSRef *outAppRef, CFURLRef *outAppURL): the guest can't launch another app, so none is found.
+B32_THUNK(_LSFindApplicationForInfo) {
+    c.args.u32();
+    c.args.ptr();
+    c.args.ptr();
+    GuestAddr ref = c.args.ptr(), url = c.args.ptr();
+    if (ref) std::memset(c.mem.ptr<uint8_t>(ref), 0, 80);  // FSRef
+    if (url) c.mem.write<uint32_t>(url, 0);
+    c.ret(uint32_t(-10814));  // kLSApplicationNotFoundErr
+}
+
 // --- keyboard layout: none, so SDL keeps its US key map --------------------------------
 
 B32_THUNK(_TISCopyCurrentKeyboardLayoutInputSource) { c.ret(0); }
