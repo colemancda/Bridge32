@@ -131,10 +131,15 @@ B32_THUNK(__NSGetArgv) { c.ret(processArgs(c) + 4); }
 
 B32_THUNK(_exit) {
     int status = c.args.i32();
+    if (ForkChild *child = forkChild) return child->exited(c, status);
     log("guest called exit(%d) from 0x%08x", status, c.cpu.returnAddress());
     c.rt.exit(status);
 }
-B32_THUNK(__exit) { c.rt.exit(c.args.i32()); }
+B32_THUNK(__exit) {
+    int status = c.args.i32();
+    if (ForkChild *child = forkChild) return child->exited(c, status);
+    c.rt.exit(status);
+}
 B32_THUNK(_abort) { fatal("guest called abort() from 0x%08x", c.cpu.returnAddress()); }
 
 B32_THUNK(_atol) { c.ret(uint32_t(std::atol(c.mem.cstr(c.args.ptr())))); }
@@ -198,6 +203,15 @@ B32_THUNK(_strcpy) {
     GuestAddr dst = c.args.ptr();
     std::strcpy(hostPtr(c, dst), c.mem.cstr(c.args.ptr()));
     c.ret(dst);
+}
+
+// char *stpcpy(char *dst, const char *src): the end of the copy.
+B32_THUNK(_stpcpy) {
+    GuestAddr dst = c.args.ptr();
+    const char *src = c.mem.cstr(c.args.ptr());
+    size_t length = std::strlen(src);
+    std::memcpy(hostPtr(c, dst), src, length + 1);
+    c.ret(dst + uint32_t(length));
 }
 
 B32_THUNK(_strncpy) {
@@ -697,6 +711,23 @@ B32_THUNK(_fgets) {
 B32_THUNK(_putc) {
     int ch = c.args.i32();
     c.ret(uint32_t(std::fputc(ch, hostFile(c, c.args.ptr()))));
+}
+// void setbuffer(FILE *, char *buf, int size) and setlinebuf(FILE *): the host stream keeps its own buffer.
+B32_THUNK(_setbuffer) {}
+B32_THUNK(_setlinebuf) { c.ret(0); }
+
+// int __swbuf(int c, FILE *) and int __srget(FILE *): where the putc and getc macros go when the
+// guest FILE's buffer counts (_w at 8, _r at 4) run out, which, as they stay zero, is every time.
+B32_THUNK(___swbuf) {
+    int ch = c.args.i32();
+    GuestAddr f = c.args.ptr();
+    c.mem.write<int32_t>(f + 8, 0);
+    c.ret(uint32_t(std::fputc(ch, hostFile(c, f))));
+}
+B32_THUNK(___srget) {
+    GuestAddr f = c.args.ptr();
+    c.mem.write<int32_t>(f + 4, 0);
+    c.ret(uint32_t(std::fgetc(hostFile(c, f))));
 }
 B32_THUNK(_ungetc) {
     int ch = c.args.i32();
