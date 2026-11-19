@@ -75,6 +75,7 @@ inline void fix(symtab_command &c) { swapWords(&c, 0, 6); }
 inline void fix(dysymtab_command &c) { swapWords(&c, 0, 20); }
 inline void fix(dyld_info_command &c) { swapWords(&c, 0, 12); }
 inline void fix(dylib_command &c) { swapWords(&c, 0, 6); }
+inline void fix(rpath_command &c) { swapWords(&c, 0, 3); }
 inline void fix(encryption_info_command &c) { swapWords(&c, 0, 5); }
 inline void fix(entry_point_command &c) {
     swapWords(&c, 0, 2);
@@ -207,13 +208,14 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
     mach_header header;
     header = fetch<decltype(header)>(slice);
     if (header.magic != MH_MAGIC || header.cputype != kGuestCpuType) fatal("%s is not a %s Mach-O", path.c_str(), arch::name());
-    if (header.filetype != MH_EXECUTE && header.filetype != MH_DYLIB)
-        fatal("%s is not an executable or a dylib", path.c_str());
+    // A bundle (a plug-in, loaded with NSBundle) loads the way a dylib does.
+    if (header.filetype != MH_EXECUTE && header.filetype != MH_DYLIB && header.filetype != MH_BUNDLE)
+        fatal("%s is not an executable, a dylib or a bundle", path.c_str());
 
     Image image;
     image.path = path;
     image.cpuSubtype = header.cpusubtype;
-    const bool isDylib = header.filetype == MH_DYLIB;
+    const bool isDylib = header.filetype == MH_DYLIB || header.filetype == MH_BUNDLE;
     if (isDylib) {
         // Slide so the first segment starts at dylibBase.
         const uint8_t *c = slice + sizeof header;
@@ -308,6 +310,12 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
             image.dylibs.push_back(reinterpret_cast<const char *>(cmd) + dc.dylib.name.offset);
             break;
         }
+        case LC_RPATH: {
+            rpath_command rc;
+            rc = fetch<decltype(rc)>(cmd);
+            image.rpaths.push_back(reinterpret_cast<const char *>(cmd) + rc.path.offset);
+            break;
+        }
         case LC_ENCRYPTION_INFO: {
             encryption_info_command enc;
             enc = fetch<decltype(enc)>(cmd);
@@ -319,7 +327,7 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
         cmd += lc.cmdsize;
     }
 
-    if (onDylibs) onDylibs(image.dylibs);
+    if (onDylibs) onDylibs(image.dylibs, image.rpaths, path);
 
     if (image.hasMain) {
         // entryoff is a file offset; turn it into the address in __TEXT.
@@ -455,6 +463,14 @@ Image MachOLoader::load(const std::string &path, GuestAddr dylibBase) {
                 if (type != S_NON_LAZY_SYMBOL_POINTERS && type != S_LAZY_SYMBOL_POINTERS) continue;
                 for (uint32_t k = 0; k < sect.size / 4; k++) {
                     uint32_t indirect = fetch<uint32_t>(slice + dysymtab.indirectsymoff + (sect.reserved1 + k) * 4);
+                    // A non-lazy pointer to one of the image's own symbols holds that symbol's address as
+                    // linked, which no relocation entry covers in an image without LC_DYLD_INFO: dyld moves
+                    // it with the image, and so does this.
+                    if (indirect == INDIRECT_SYMBOL_LOCAL && type == S_NON_LAZY_SYMBOL_POINTERS && slide && !haveDyldInfo) {
+                        GuestAddr where = sect.addr + slide + k * 4;
+                        mem_.write<uint32_t>(where, mem_.read<uint32_t>(where) + slide);
+                        continue;
+                    }
                     if (indirect & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) continue;
                     // A symbol the linker made private to this image (a template
                     // instantiation): the pointer already holds its address.
