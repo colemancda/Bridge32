@@ -143,6 +143,155 @@ bool Bridge::isShadowClass(Class c) {
     return it != byHostClass_.end() && it->second->isGuest;
 }
 
+namespace {
+// The innermost bundle directory around a library: Foo.framework/Versions/A/Foo,
+// Bar.plugin/Contents/MacOS/Bar; "" for a bare dylib.
+std::string bundleDirectoryOf(const std::string &path) {
+    for (size_t slash = path.rfind('/'); slash != std::string::npos && slash > 0; slash = path.rfind('/', slash - 1)) {
+        std::string dir = path.substr(0, slash);
+        std::string name = dir.substr(dir.rfind('/') + 1);
+        if (size_t dot = name.find('.'); dot != std::string::npos && dot > 0) return dir;
+    }
+    return {};
+}
+}  // namespace
+
+std::string Bridge::guestBundlePath(Class c) {
+    GuestAddr addr;
+    {
+        std::lock_guard guard(lock_);
+        auto it = byHostClass_.find(c);
+        if (it == byHostClass_.end() || !it->second->isGuest) return {};
+        addr = it->second->addr;
+    }
+    // The app's own classes are the main bundle's, which the host already answers.
+    for (size_t i = 1; i < rt_.imageCount(); i++) {
+        const Image &image = rt_.imageAt(i);
+        if (addr >= image.base && addr < image.end) return bundleDirectoryOf(image.path);
+    }
+    return {};
+}
+
+std::vector<std::string> Bridge::guestBundlePaths() {
+    std::vector<std::string> paths;
+    for (size_t i = 1; i < rt_.imageCount(); i++)
+        if (std::string dir = bundleDirectoryOf(rt_.imageAt(i).path); !dir.empty()) paths.push_back(dir);
+    return paths;
+}
+
+namespace {
+// AppKit and Foundation find a class's resources (a window controller's nib, a framework's
+// strings) through +bundleForClass:, which answers the main bundle for a shadow class, as for
+// any class it made at run time. A guest framework's classes get that framework's bundle, and
+// +bundleWithIdentifier: finds the guest's frameworks, which the host never loaded.
+NSBundle *(*hostBundleForClass)(id, SEL, Class);
+NSBundle *bundleForClass(id self, SEL _cmd, Class cls) {
+    if (Bridge *bridge = Bridge::shared()) {
+        std::string path = bridge->guestBundlePath(cls);
+        if (!path.empty())
+            if (NSBundle *bundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:path.c_str()]]) return bundle;
+    }
+    return hostBundleForClass(self, _cmd, cls);
+}
+NSBundle *(*hostBundleWithIdentifier)(id, SEL, NSString *);
+NSBundle *bundleWithIdentifier(id self, SEL _cmd, NSString *identifier) {
+    if (NSBundle *bundle = hostBundleWithIdentifier(self, _cmd, identifier)) return bundle;
+    if (Bridge *bridge = Bridge::shared())
+        for (const std::string &path : bridge->guestBundlePaths()) {
+            NSBundle *bundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:path.c_str()]];
+            if ([bundle.bundleIdentifier isEqualToString:identifier]) return bundle;
+        }
+    return nil;
+}
+
+// A bundle whose code is the guest's (an app's plug-in): the host can't load it, so -load and
+// friends load it as a guest library, and its principal class is one of the guest's.
+char guestBundleLoadedKey;
+bool isGuestCode(NSString *path) {
+    if (!path) return false;
+    NSFileHandle *file = [NSFileHandle fileHandleForReadingAtPath:path];
+    NSData *head = [file readDataOfLength:4096];
+    [file closeFile];
+    if (head.length < 8) return false;
+    const uint8_t *b = static_cast<const uint8_t *>(head.bytes);
+    auto be32 = [&](size_t at) { return uint32_t(b[at]) << 24 | uint32_t(b[at + 1]) << 16 | uint32_t(b[at + 2]) << 8 | b[at + 3]; };
+    auto le32 = [&](size_t at) { return uint32_t(b[at + 3]) << 24 | uint32_t(b[at + 2]) << 16 | uint32_t(b[at + 1]) << 8 | b[at]; };
+#if defined(B32_GUEST_PPC)
+    constexpr uint32_t kGuestCpu = 18;  // CPU_TYPE_POWERPC
+    if (be32(0) == 0xfeedface) return be32(4) == kGuestCpu;
+#else
+    constexpr uint32_t kGuestCpu = 7;  // CPU_TYPE_I386
+    if (le32(0) == 0xfeedface) return le32(4) == kGuestCpu;
+#endif
+    if (be32(0) != 0xcafebabe) return false;
+    // A universal file the host has no slice of, with one for the guest.
+    bool guest = false;
+    for (uint32_t i = 0, n = be32(4); i < n && 8 + i * 20 + 8 <= head.length; i++) {
+        uint32_t cpu = be32(8 + i * 20);
+        if (cpu == 0x0100000c) return false;  // arm64
+        guest |= cpu == kGuestCpu;
+    }
+    return guest;
+}
+bool isGuestBundle(NSBundle *bundle) { return Bridge::shared() && isGuestCode(bundle.executablePath); }
+bool loadGuestBundle(NSBundle *bundle) {
+    if (objc_getAssociatedObject(bundle, &guestBundleLoadedKey)) return true;
+    Runtime &rt = Bridge::shared()->runtime();
+    uint32_t handle = rt.openLibrary(bundle.executablePath.UTF8String, Runtime::threadCpu());
+    if (!handle) {
+        log("can't load the guest code of bundle %s", bundle.bundlePath.UTF8String);
+        return false;
+    }
+    objc_setAssociatedObject(bundle, &guestBundleLoadedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return true;
+}
+BOOL (*hostLoadAndReturnError)(NSBundle *, SEL, NSError **);
+BOOL loadAndReturnError(NSBundle *self, SEL _cmd, NSError **error) {
+    if (!isGuestBundle(self)) return hostLoadAndReturnError(self, _cmd, error);
+    if (loadGuestBundle(self)) return YES;
+    if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSExecutableLoadError userInfo:nil];
+    return NO;
+}
+BOOL (*hostLoad)(NSBundle *, SEL);
+BOOL load(NSBundle *self, SEL _cmd) { return isGuestBundle(self) ? loadGuestBundle(self) : hostLoad(self, _cmd); }
+BOOL (*hostIsLoaded)(NSBundle *, SEL);
+BOOL isLoaded(NSBundle *self, SEL _cmd) {
+    return objc_getAssociatedObject(self, &guestBundleLoadedKey) ? YES : hostIsLoaded(self, _cmd);
+}
+Class (*hostPrincipalClass)(NSBundle *, SEL);
+Class principalClass(NSBundle *self, SEL _cmd) {
+    if (!isGuestBundle(self)) return hostPrincipalClass(self, _cmd);
+    if (!loadGuestBundle(self)) return Nil;
+    NSString *name = [self objectForInfoDictionaryKey:@"NSPrincipalClass"];
+    return name ? NSClassFromString(name) : Nil;
+}
+Class (*hostClassNamed)(NSBundle *, SEL, NSString *);
+Class classNamed(NSBundle *self, SEL _cmd, NSString *name) {
+    if (!isGuestBundle(self)) return hostClassNamed(self, _cmd, name);
+    return loadGuestBundle(self) ? NSClassFromString(name) : Nil;
+}
+template <typename Fn> void hookInstanceMethod(SEL sel, Fn replacement, Fn &original) {
+    Method m = class_getInstanceMethod([NSBundle class], sel);
+    original = reinterpret_cast<Fn>(method_getImplementation(m));
+    method_setImplementation(m, reinterpret_cast<IMP>(replacement));
+}
+
+[[maybe_unused]] const bool bundleLookupsHooked = [] {
+    hookInstanceMethod(@selector(loadAndReturnError:), loadAndReturnError, hostLoadAndReturnError);
+    hookInstanceMethod(@selector(load), load, hostLoad);
+    hookInstanceMethod(@selector(isLoaded), isLoaded, hostIsLoaded);
+    hookInstanceMethod(@selector(principalClass), principalClass, hostPrincipalClass);
+    hookInstanceMethod(@selector(classNamed:), classNamed, hostClassNamed);
+    Method m = class_getClassMethod([NSBundle class], @selector(bundleForClass:));
+    hostBundleForClass = reinterpret_cast<NSBundle *(*)(id, SEL, Class)>(method_getImplementation(m));
+    method_setImplementation(m, reinterpret_cast<IMP>(bundleForClass));
+    m = class_getClassMethod([NSBundle class], @selector(bundleWithIdentifier:));
+    hostBundleWithIdentifier = reinterpret_cast<NSBundle *(*)(id, SEL, NSString *)>(method_getImplementation(m));
+    method_setImplementation(m, reinterpret_cast<IMP>(bundleWithIdentifier));
+    return true;
+}();
+}  // namespace
+
 #if defined(B32_GUEST_I386)
 namespace {
 // AppKit connects a nib's outlet through a setter or a real ivar, and never
@@ -1071,7 +1220,9 @@ id Bridge::cfstringToHost(GuestAddr addr) {
 }
 
 void Bridge::ensureInitialized(ClassInfo *cls) {
-    if (!running_) return;  // not while images are still being set up
+    // Not while images are being set up: neither before guest code starts nor while a library
+    // opened later is (the host may message its classes as they appear, before they're all there).
+    if (!running_ || settingUp_) return;
     if (cls && cls->isMeta) cls = cls->instance;
     if (!cls || !cls->isGuest || cls->initialized) return;
     std::lock_guard guard(initLock_);
