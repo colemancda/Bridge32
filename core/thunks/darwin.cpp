@@ -81,6 +81,14 @@ B32_ATOMIC_CAS(_OSAtomicCompareAndSwapInt)
 B32_ATOMIC_CAS(_OSAtomicCompareAndSwapIntBarrier)
 B32_ATOMIC_CAS(_OSAtomicCompareAndSwapLong)
 B32_ATOMIC_CAS(_OSAtomicCompareAndSwapLongBarrier)
+// BOOL objc_atomicCompareAndSwapPtr(id predicate, id replacement, volatile id *location) and the rest:
+// the same, with no collector to tell.
+B32_ATOMIC_CAS(_objc_atomicCompareAndSwapPtr)
+B32_ATOMIC_CAS(_objc_atomicCompareAndSwapPtrBarrier)
+B32_ATOMIC_CAS(_objc_atomicCompareAndSwapGlobal)
+B32_ATOMIC_CAS(_objc_atomicCompareAndSwapGlobalBarrier)
+B32_ATOMIC_CAS(_objc_atomicCompareAndSwapInstanceVariable)
+B32_ATOMIC_CAS(_objc_atomicCompareAndSwapInstanceVariableBarrier)
 
 B32_THUNK(_OSMemoryBarrier) { std::atomic_thread_fence(std::memory_order_seq_cst); }
 
