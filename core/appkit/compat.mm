@@ -62,3 +62,41 @@ id connectorInitWithCoder(id self, SEL _cmd, NSCoder *coder) {
     return true;
 }();
 }  // namespace
+
+// Today's controls tell their cell when they move to a window (-_controlViewDidMoveToWindow:), which
+// only button and segmented cells answer; a control of the time could hold any cell (Xcode 3 puts a
+// table header cell in a button). Other cells take it and do nothing.
+namespace {
+void cellControlViewDidMoveToWindow(id, SEL, id) {}
+[[maybe_unused]] const bool cellsTakeControlViewMoves = [] {
+    class_addMethod([NSCell class], sel_registerName("_controlViewDidMoveToWindow:"),
+                    reinterpret_cast<IMP>(cellControlViewDidMoveToWindow), "v@:@");
+    return true;
+}();
+}  // namespace
+
+// NSBundle objects lived as long as the process on the systems of the time: Foundation kept every one it
+// made, and frameworks took one without retaining it and released it later (Xcode 3's smart group
+// bindings hold their bundle so). Today's Foundation can free a bundle nothing else holds, so every one
+// made is held here, as Foundation held it then.
+namespace {
+id (*hostBundleInitWithPath)(id, SEL, NSString *);
+id bundleInitWithPath(id self, SEL _cmd, NSString *path) {
+    static NSMutableSet *bundles = [[NSMutableSet alloc] init];
+    static NSLock *lock = [[NSLock alloc] init];
+    id bundle = hostBundleInitWithPath(self, _cmd, path);
+    if (bundle) {
+        [lock lock];
+        [bundles addObject:bundle];
+        [lock unlock];
+    }
+    return bundle;
+}
+[[maybe_unused]] const bool bundlesKept = [] {
+    if (Method m = class_getInstanceMethod([NSBundle class], @selector(initWithPath:))) {
+        hostBundleInitWithPath = reinterpret_cast<id (*)(id, SEL, NSString *)>(method_getImplementation(m));
+        method_setImplementation(m, reinterpret_cast<IMP>(bundleInitWithPath));
+    }
+    return true;
+}();
+}  // namespace
