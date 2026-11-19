@@ -164,6 +164,30 @@ B32_THUNK(_CFArrayCreate) {
     c.ret(bridge(c).toGuest((id)array));
 }
 
+// CFSetRef CFSetCreate(CFAllocatorRef, const void **values, CFIndex count, const CFSetCallBacks *): with
+// no callbacks the values are raw pointers, any others are taken for kCFTypeSetCallBacks.
+B32_THUNK(_CFSetCreate) {
+    c.args.ptr();
+    GuestAddr values = c.args.ptr();
+    int32_t count = c.args.i32();
+    bool raw = c.args.ptr() == 0;
+    std::vector<const void *> items(size_t(std::max(count, 0)));
+    for (int32_t i = 0; i < count; i++) items[size_t(i)] = hostValue(c, raw, c.mem.read<uint32_t>(values + uint32_t(i) * 4));
+    CFSetRef set = CFSetCreate(nullptr, items.data(), count, raw ? nullptr : &kCFTypeSetCallBacks);
+    markRaw((id)set, raw ? kRawValues : 0);
+    c.ret(bridge(c).toGuest((id)set));
+}
+B32_THUNK(_CFSetGetCount) { c.ret(uint32_t(CFSetGetCount((CFSetRef)bridge(c).toHost(c.args.ptr())))); }
+// void CFSetGetValues(CFSetRef, const void **values)
+B32_THUNK(_CFSetGetValues) {
+    id set = bridge(c).toHost(c.args.ptr());
+    GuestAddr out = c.args.ptr();
+    bool raw = rawFlags(set) & kRawValues;
+    std::vector<const void *> values(size_t(CFSetGetCount((CFSetRef)set)));
+    CFSetGetValues((CFSetRef)set, values.data());
+    for (size_t i = 0; i < values.size(); i++) c.mem.write<uint32_t>(out + uint32_t(i) * 4, guestValue(c, raw, values[i]));
+}
+
 // CFMutableArrayRef CFArrayCreateMutable(CFAllocatorRef, CFIndex capacity, const CFArrayCallBacks *)
 B32_THUNK(_CFArrayCreateMutable) {
     c.args.ptr();
