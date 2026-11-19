@@ -1,7 +1,8 @@
 # Running 32-bit PowerPC Mac apps: feasibility and plan
 
 Status: Phases 0 and 1 are implemented and tested, Phase 2 is done for the
-runtime and open for the Mac shell, and Phases 3-6 are not started; see
+runtime and open for the Mac shell, guest Objective-C runs (Quinn, a Cocoa
+game), and Phases 3-6 are not started; see
 "Progress" below. The spike results were run on 2026-11-09 against the patched
 Unicorn in `external/unicorn`.
 
@@ -57,7 +58,7 @@ been run here. Phase 1 must confirm the rest against real binaries.
 | 64-bit arguments | Two words, low first | Two words, **high first**, no alignment padding |
 | Integer return | EAX, EAX:EDX | `r3`, `r3`:`r4` (high first) |
 | Float return | ST(0) | `f1`; `long double` in `f1`:`f2` |
-| Struct return | In registers up to 8 bytes | Up to 8 bytes in `r3`:`r4`, larger through a hidden pointer in `r3` that the callee doesn't pop (GCC's rule for Darwin; to confirm in Phase 1) |
+| Struct return | In registers up to 8 bytes | Always through a hidden pointer in `r3` that the callee doesn't pop (GCC's AIX struct return, which Darwin keeps) |
 | Return address | On the stack | Link register, saved by the callee |
 | `sizeof(bool)` | 1 | **4** in C++ and `_Bool`; ObjC `BOOL` stays 1 |
 | `long double` | 80-bit x87 | 128-bit double-double from 10.4 (`$LDBL128` symbols), 64-bit before |
@@ -431,6 +432,31 @@ doesn't allow yet): 5 of its files fail to compile, with 14 sites.
   parameters as raw host-order bytes (mouse locations, key codes), and
   `hal.mm` copies audio buffers and format structs raw; each needs conversion
   by parameter or format type.
+
+**Guest Objective-C (2026-11-19).** Quinn 2.3.3 (a 2005 Cocoa game, `ppc` only,
+prebound) opens its window and draws its own views. What it took:
+- Prebound executables (before 10.4): an external relocation's word holds the
+  address its symbol had then, which the undefined symbol's value records, so
+  the addend is what's stored beyond that.
+- The legacy ObjC reader and its thunks build for PowerPC. `LegacyImage.mm`
+  already read everything through `mem.read`, so it needed nothing.
+- `toHostValue`/`toGuestValue` read and write guest-layout bytes in the guest's
+  order. Argument words convert at their edges (`argumentBytes`,
+  `argumentBuffer`, `argumentWords`), and a `char` or `short` is at the low end
+  of its word.
+- Float and double message arguments come from f1-f13, and a host call into a
+  guest method puts them there (`Cpu::call` with floats).
+- Every struct comes back through memory: `objc_msgSend_stret` for any struct
+  result. This corrects the ABI table's "up to 8 bytes in r3:r4".
+- A tail call from a thunk sets r12 to its target, as Darwin's indirect calls
+  do: methods take their PIC base from it (`mr r31, r12`).
+- `setjmp`/`longjmp` (r1, LR, CR, r2, r13-r31, f14-f31, v20-v31 in the 768-byte
+  `jmp_buf`), so `@try` and the older `NS_DURING` (`_NSAddHandler2`) work.
+- Constant strings of compilers before `__cfstring` sit in `__data`, found by
+  their bound isa and flags.
+
+Not yet seen working: Quinn's play (no input has been tried), `NSInvocation`
+and blocks from a PowerPC guest, and struct arguments made only of floats.
 
 **Next:** Phase 3 (the 72 imports; with the Carbon, AGL, GL, display and HAL
 groups counted, `b32-inspect` reports 149 unimplemented for the game plus
