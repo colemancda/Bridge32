@@ -481,6 +481,12 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
             fatal("%c[%s %s] returned 0x%lx, which isn't an object (type %s)", object_isClass(recv) ? '+' : '-',
                   object_getClassName(recv), name, (unsigned long)value, types.c_str());
     }
+    // Zones have long been ignored (allocWithZone: takes any zone as the default one), and NULL is the default
+    // zone, so a guest that asks an object for its zone gets that.
+    if (r.code == '^' && r.pointee && r.pointee->isStruct() && r.pointee->name == "_NSZone") {
+        c.ret(0);
+        return;
+    }
     if (r.code == '^' && !isCFRef(r)) {
         auto *p = *reinterpret_cast<uint8_t **>(result);
         uint8_t *base = mem.base();
