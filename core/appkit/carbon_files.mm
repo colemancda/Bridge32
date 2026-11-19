@@ -214,14 +214,14 @@ int32_t directoryOn(int16_t volume, int32_t dir) {
 }  // namespace
 
 // OSErr FSGetCatalogInfo(const FSRef *ref, FSCatalogInfoBitmap whichInfo, FSCatalogInfo *catalogInfo,
-//                        HFSUniStr255 *outName, FSRef *parentRef, FSSpec *outSpec): explicit, so the
+//                        HFSUniStr255 *outName, FSSpec *outSpec, FSRef *parentRef): explicit, so the
 // node and parent IDs are this file's, which the classic calls (HSetVol, FSpMakeFSRef) resolve.
 // The rest of the record comes from stat: dates as seconds since 1904, sizes and permissions;
 // what stat has no word for (finder info, sharing) stays zero.
 B32_THUNK(_FSGetCatalogInfo) {
     GuestAddr ref = c.args.ptr();
     uint32_t which = c.args.u32();
-    GuestAddr info = c.args.ptr(), outName = c.args.ptr(), parentRef = c.args.ptr(), outSpec = c.args.ptr();
+    GuestAddr info = c.args.ptr(), outName = c.args.ptr(), outSpec = c.args.ptr(), parentRef = c.args.ptr();
     char path[PATH_MAX] = "";
     if (FSRefMakePath(fsRef(c, ref), reinterpret_cast<uint8_t *>(path), sizeof path) != noErr || !exists(path)) {
         c.ret(uint32_t(kFnfErr));
@@ -403,6 +403,11 @@ B32_THUNK(_FindFolder) {
     if (type == 'pref') path = [path stringByAppendingPathComponent:@"Preferences"];
     if (type == 'temp' || type == 'flnt') path = NSTemporaryDirectory();
     if (create) [NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil];
+    // A folder that isn't there, and wasn't asked for, isn't found.
+    if (!isDirectory(path.fileSystemRepresentation)) {
+        c.ret(uint32_t(kFnfErr));
+        return;
+    }
     if (vref) c.mem.write<int16_t>(vref, kVolume);
     if (dir) c.mem.write<int32_t>(dir, idForPath(path.fileSystemRepresentation));
     c.ret(0);
@@ -602,6 +607,55 @@ B32_THUNK(_PBHGetVInfoSync) {
     c.mem.write<uint16_t>(pb + 46, uint16_t(std::min<uint64_t>(total / blockSize, 65535)));
     c.mem.write<uint32_t>(pb + 48, blockSize);
     c.mem.write<uint16_t>(pb + 62, uint16_t(std::min<uint64_t>(free / blockSize, 65535)));
+    c.ret(0);
+}
+
+// OSErr FSGetVolumeInfo(FSVolumeRefNum volume, ItemCount index, FSVolumeRefNum *actualVolume,
+//     FSVolumeInfoBitmap whichInfo, FSVolumeInfo *info, HFSUniStr255 *name, FSRef *rootDirectory):
+// one of the volumes the classic calls number, as statfs has it. FSVolumeInfo is 2-byte aligned:
+// four UTCDateTimes, fileCount 32, folderCount 36, totalBytes 40, freeBytes 48, blockSize 56,
+// totalBlocks 60, freeBlocks 64, ... signature 120, 126 bytes in all. Only the sizes are known; the
+// rest is zero.
+B32_THUNK(_FSGetVolumeInfo) {
+    constexpr int32_t kNoSuchVolume = -35;
+    int16_t reference = int16_t(c.args.u32());
+    uint32_t index = c.args.u32();
+    GuestAddr actual = c.args.ptr();
+    c.args.u32();  // whichInfo
+    GuestAddr info = c.args.ptr(), name = c.args.ptr(), root = c.args.ptr();
+    std::vector<Volume> volumes = mountedVolumes();
+    int position = positionOf(volumes, int16_t(index), reference);
+    if (position < 0 || size_t(position) >= volumes.size()) {
+        c.ret(uint32_t(kNoSuchVolume));
+        return;
+    }
+    const Volume &volume = volumes[size_t(position)];
+    if (actual) c.mem.write<int16_t>(actual, int16_t(-(position + 1)));
+    if (info) {
+        std::memset(c.mem.ptr<uint8_t>(info), 0, 126);
+        struct statfs st;
+        if (::statfs(volume.mount.c_str(), &st) == 0) {
+            c.mem.write<uint64_t>(info + 40, uint64_t(st.f_blocks) * st.f_bsize);
+            c.mem.write<uint64_t>(info + 48, uint64_t(st.f_bavail) * st.f_bsize);
+            c.mem.write<uint32_t>(info + 56, st.f_bsize);
+            c.mem.write<uint32_t>(info + 60, uint32_t(std::min<uint64_t>(st.f_blocks, UINT32_MAX)));
+            c.mem.write<uint32_t>(info + 64, uint32_t(std::min<uint64_t>(st.f_bavail, UINT32_MAX)));
+        }
+        c.mem.write<uint16_t>(info + 120, 0x482B);  // 'H+'
+    }
+    if (name) {
+        NSString *text = @(volume.name.c_str());
+        NSUInteger length = MIN(text.length, NSUInteger(255));
+        c.mem.write<uint16_t>(name, uint16_t(length));
+        std::vector<UniChar> characters(length);
+        [text getCharacters:characters.data() range:NSMakeRange(0, length)];
+        c.mem.writeArray<UniChar>(name + 2, characters.data(), length);
+    }
+    if (root) {
+        FSRef ref;
+        if (FSPathMakeRef(reinterpret_cast<const UInt8 *>(volume.mount.c_str()), &ref, nullptr) == noErr)
+            c.mem.copyIn(root, &ref, sizeof ref);
+    }
     c.ret(0);
 }
 
