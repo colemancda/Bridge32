@@ -223,6 +223,11 @@ B32_THUNK(_SecTrustCreateWithCertificates) {
 // --- keychains and identities (the Mac's older API) ---------------------------------------------
 // The guest sees no keychain of its own and no signing identities: a search finds nothing.
 
+// OSStatus SecKeychainAddCallback(SecKeychainCallback, SecKeychainEventMask, void *context): no keychain
+// events come, so the callback is never called.
+B32_THUNK(_SecKeychainAddCallback) { c.ret(errSecSuccess); }
+B32_THUNK(_SecKeychainRemoveCallback) { c.ret(errSecSuccess); }
+
 // OSStatus SecKeychainCopyDefault(SecKeychainRef *keychain)
 B32_THUNK(_SecKeychainCopyDefault) {
     if (GuestAddr out = c.args.ptr()) c.mem.write<uint32_t>(out, 0);

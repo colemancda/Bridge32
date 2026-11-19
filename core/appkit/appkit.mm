@@ -108,20 +108,51 @@ B32_THUNK(_NSApplicationLoad) {
 
 B32_THUNK(_NSBeep) { NSBeep(); }
 
-// NSImage *_NSGetThemePartImages(int part, int state, int flags): AppKit's private artwork for a part of
-// the Aqua theme, which this AppKit no longer has. A plain light strip stands in, so the guest has an
-// image of some size to draw with (Xcode's status bars).
-B32_THUNK(__NSGetThemePartImages) {
-    c.args.i32();
-    c.args.i32();
-    c.args.i32();
+// AppKit's private artwork of the Aqua theme, which this AppKit no longer has: a plain light strip
+// stands in for any of it, so the guest has an image of some size to draw with (Xcode's status bars,
+// buttons and table headers).
+//   NSImage *_NSGetThemePartImages(int part, int state, int flags)
+//   NSImage *_NSGetThemeImage(int which)
+//   NSImage *_NSReadThemeImageFromRsrc(int resourceID)
+namespace {
+GuestAddr themeImage(Call &c) {
     static NSImage *image = [[NSImage imageWithSize:NSMakeSize(1, 22) flipped:NO drawingHandler:^BOOL(NSRect rect) {
         [[NSColor colorWithCalibratedWhite:0.88 alpha:1] setFill];
         NSRectFill(rect);
         return YES;
     }] retain];
-    c.ret(bridge(c).toGuest(image));
+    return bridge(c).toGuest(image);
 }
+}  // namespace
+B32_THUNK(__NSGetThemePartImages) { c.ret(themeImage(c)); }
+B32_THUNK(__NSGetThemeImage) { c.ret(themeImage(c)); }
+B32_THUNK(__NSReadThemeImageFromRsrc) { c.ret(themeImage(c)); }
+
+// void NSSetFocusRingStyle(NSFocusRingPlacement): the next drawing's focus ring, as today's AppKit
+// still has it.
+B32_THUNK(_NSSetFocusRingStyle) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    NSSetFocusRingStyle(NSFocusRingPlacement(c.args.u32()));
+#pragma clang diagnostic pop
+}
+// void NSShowSystemInfoPanel(NSDictionary *options): the About panel, as -orderFrontStandardAboutPanelWithOptions: shows it.
+B32_THUNK(_NSShowSystemInfoPanel) {
+    NSDictionary *options = bridge(c).toHost(c.args.ptr());
+    [NSApp orderFrontStandardAboutPanelWithOptions:options ?: @{}];
+}
+// NSDictionary *_NSDictionaryWithAdditionalKeyAndObject(NSDictionary *, id key, id object): a copy with
+// one more entry.
+B32_THUNK(__NSDictionaryWithAdditionalKeyAndObject) {
+    NSDictionary *dictionary = bridge(c).toHost(c.args.ptr());
+    id key = bridge(c).toHost(c.args.ptr()), object = bridge(c).toHost(c.args.ptr());
+    NSMutableDictionary *copy = dictionary ? [[dictionary mutableCopy] autorelease] : [NSMutableDictionary dictionary];
+    if (key && object) copy[key] = object;
+    c.ret(bridge(c).toGuest(copy));
+}
+
+// NSControlTint _NSDefaultControlTint(void): the tint controls draw in, blue as it was by default.
+B32_THUNK(__NSDefaultControlTint) { c.ret(uint32_t(NSBlueControlTint)); }
 
 // -[NSImage lockFocus] throws for an image it can't draw into (one of size zero), and a guest that
 // carries on then sends -unlockFocus, which pops a graphics context that was never pushed and stops
