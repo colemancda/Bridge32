@@ -23,6 +23,7 @@
 #include <mach/mach_time.h>
 #include <sys/sysctl.h>
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -105,6 +106,15 @@ B32_THUNK(_CGSetLocalEventsSuppressionInterval) {
     CGEventSourceSetLocalEventsSuppressionInterval(source, c.args.f64());
     if (source) CFRelease(source);
     c.ret(0);
+}
+// void CGGetLastMouseDelta(int32_t *dx, int32_t *dy): the host's, which is the last mouse event's
+// movement, as it was.
+B32_THUNK(_CGGetLastMouseDelta) {
+    GuestAddr dxOut = c.args.ptr(), dyOut = c.args.ptr();
+    int32_t dx = 0, dy = 0;
+    CGGetLastMouseDelta(&dx, &dy);
+    if (dxOut) c.mem.write<int32_t>(dxOut, dx);
+    if (dyOut) c.mem.write<int32_t>(dyOut, dy);
 }
 B32_THUNK(_CGDisplayMoveCursorToPoint) {
     uint32_t display = c.args.u32();
@@ -242,7 +252,6 @@ B32_SUCCEEDS(_CGDisplayFade)
 B32_SUCCEEDS(_CGReleaseDisplayFadeReservation)
 // CGDisplayErr: kCGErrorFailure, so no fade is attempted.
 B32_THUNK(_CGAcquireDisplayFadeReservation) { c.ret(1000); }
-B32_THUNK(_CGDisplayIOServicePort) { c.ret(0); }
 
 B32_THUNK(_HideMenuBar) { [NSMenu setMenuBarVisible:NO]; }
 B32_THUNK(_ShowMenuBar) { [NSMenu setMenuBarVisible:YES]; }
@@ -461,6 +470,38 @@ IONotificationPortRef hostPort(uint32_t handle) {
 }
 }  // namespace
 
+// io_service_t CGDisplayIOServicePort(display): an IOFramebuffer entry of the guest's own, since
+// Apple Silicon's displays have none with the properties games read (IOFBMemorySize), one per display.
+namespace {
+// The video memory a game is told of: the GL renderer's, at most 1 GB, which a 32-bit count of bytes
+// still holds.
+uint32_t framebufferMemory() {
+    static uint32_t bytes = [] {
+        GLint megabytes = 0, count = 0;
+        CGLRendererInfoObj info = nullptr;
+        if (CGLQueryRendererInfo(CGDisplayIDToOpenGLDisplayMask(CGMainDisplayID()), &info, &count) == kCGLNoError) {
+            for (GLint i = 0; i < count && !megabytes; i++) {
+                GLint accelerated = 0;
+                CGLDescribeRenderer(info, i, kCGLRPAccelerated, &accelerated);
+                if (accelerated) CGLDescribeRenderer(info, i, kCGLRPVideoMemoryMegabytes, &megabytes);
+            }
+            CGLDestroyRendererInfo(info);
+        }
+        return uint32_t(std::clamp<GLint>(megabytes, 64, 1024)) << 20;
+    }();
+    return bytes;
+}
+}  // namespace
+B32_THUNK(_CGDisplayIOServicePort) {
+    uint32_t display = c.args.u32();
+    static std::mutex lock;
+    static std::unordered_map<uint32_t, uint32_t> entries;
+    std::lock_guard guard(lock);
+    uint32_t &entry = entries[display];
+    if (!entry) entry = mintFake("IOFramebuffer", "", 0);
+    c.ret(entry);
+}
+
 // CFMutableDictionaryRef IOServiceMatching(const char *className): a real dictionary, which
 // IOServiceGetMatchingServices answers.
 B32_THUNK(_IOServiceMatching) {
@@ -645,7 +686,7 @@ B32_THUNK(_IOObjectConformsTo) {
     uint32_t object = c.args.u32();
     const char *name = c.mem.cstr(c.args.ptr());
     if (FakeEntry fake = fakeEntry(object); fake.cls) {
-        c.ret(!strcmp(fake.cls, name) || !strcmp(name, "IOMedia") ? 1 : 0);
+        c.ret(!strcmp(fake.cls, name) || (!strcmp(name, "IOMedia") && strstr(fake.cls, "Media")) ? 1 : 0);
         return;
     }
     c.ret(IOObjectConformsTo(object, name));
@@ -686,6 +727,11 @@ B32_THUNK(_IORegistryEntryCreateCFProperty) {
     uint32_t options = c.args.u32();
     if (FakeEntry fake = fakeEntry(entry); fake.cls) {
         id value = nil;
+        if (!strcmp(fake.cls, "IOFramebuffer")) {
+            if ([key isEqualToString:@"IOFBMemorySize"]) value = [[NSNumber alloc] initWithUnsignedInt:framebufferMemory()];
+            c.ret(value ? bridge(c).toGuest(value) : 0);
+            return;
+        }
         if ([key isEqualToString:@"BSD Name"]) value = [[NSString alloc] initWithUTF8String:fake.bsd.c_str()];
         else if ([key isEqualToString:@"Ejectable"] || [key isEqualToString:@"Removable"])
             value = [[NSNumber alloc] initWithBool:YES];
