@@ -37,6 +37,60 @@ namespace {
 
 uint32_t wordsFor(uint32_t bytes) { return (bytes + 3) / 4; }
 
+// A guest subclass of a host class can read its superclass's ivars directly, at their 32-bit offsets
+// in its own guest memory, where nothing keeps them. The ones known to be read are copied there from
+// the host object whenever the guest gets control of it: when the host calls one of its methods, and
+// after each message the guest sends it.
+//   NSTextStorage: _editedRange at 4, _editedDelta at 12, _flags at 16 { editedMask:8, :8,
+//   disabled:16 }, the nesting of -beginEditing, which Xcode 3's text storages test.
+// Whether `host` (the guest object `guest`) has host ivars to mirror. Asked while it's surely alive.
+bool mirrorsHostIvars([[maybe_unused]] Bridge &bridge, [[maybe_unused]] id host, [[maybe_unused]] GuestAddr guest) {
+#if defined(B32_GUEST_MAC)
+    static Class textStorage = objc_getClass("NSTextStorage");
+    if (!host || !guest || !textStorage || object_isClass(host) || ![host isKindOfClass:textStorage]) return false;
+    ClassInfo *cls = bridge.classOf(guest);
+    return cls && cls->isGuest && cls->instanceSize >= 20;
+#else
+    return false;
+#endif
+}
+void mirrorHostIvars([[maybe_unused]] Bridge &bridge, [[maybe_unused]] id host, [[maybe_unused]] GuestAddr guest) {
+#if defined(B32_GUEST_MAC)
+    // NSTextStorage's own accessors, not the guest's overrides of them (which would come back here).
+    static thread_local bool mirroring = false;
+    if (mirroring) return;
+    mirroring = true;
+    static Class textStorage = objc_getClass("NSTextStorage");
+    auto own = [](const char *name) { return method_getImplementation(class_getInstanceMethod(textStorage, sel_registerName(name))); };
+    static IMP editedRange = own("editedRange"), changeInLength = own("changeInLength"), editedMask = own("editedMask"),
+               isEditing = own("_isEditing");
+    NSRange edited = reinterpret_cast<NSRange (*)(id, SEL)>(editedRange)(host, sel_registerName("editedRange"));
+    NSInteger delta = reinterpret_cast<NSInteger (*)(id, SEL)>(changeInLength)(host, sel_registerName("changeInLength"));
+    NSUInteger mask = reinterpret_cast<NSUInteger (*)(id, SEL)>(editedMask)(host, sel_registerName("editedMask"));
+    bool editing = isEditing && reinterpret_cast<BOOL (*)(id, SEL)>(isEditing)(host, sel_registerName("_isEditing"));
+    GuestMemory &mem = bridge.runtime().mem();
+    mem.write<uint32_t>(guest + 4, edited.location == NSNotFound ? 0x7fffffff : uint32_t(edited.location));
+    mem.write<uint32_t>(guest + 8, uint32_t(edited.length));
+    mem.write<int32_t>(guest + 12, int32_t(delta));
+    mem.write<uint8_t>(guest + 16, uint8_t(mask));
+    mem.write<uint16_t>(guest + 18, editing ? 1 : 0);
+    mirroring = false;
+#endif
+}
+// Holds the object across a host call, then mirrors its ivars for the guest, if it has any to mirror.
+struct HostIvarMirror {
+    Bridge &bridge;
+    id host;
+    GuestAddr guest;
+    HostIvarMirror(Bridge &bridge, id object, GuestAddr guest)
+        : bridge(bridge), host(mirrorsHostIvars(bridge, object, guest) ? [object retain] : nil), guest(guest) {}
+    ~HostIvarMirror() {
+        if (!host) return;
+        mirrorHostIvars(bridge, host, guest);
+        [host release];
+    }
+};
+
 // '^{__CFString=}' and friends: opaque CF-style struct pointers are objects.
 bool isCFRef(const Type &t) {
     if (t.code != '^' || !t.pointee || !t.pointee->isStruct() || !t.pointee->fields.empty()) return false;
@@ -446,6 +500,7 @@ void Bridge::hostDispatch(Call &c, GuestAddr receiver, GuestAddr sel, ClassInfo 
         values[i] = storage[i].data();
     }
 
+    HostIvarMirror mirror(*this, recv, receiver);
     alignas(16) uint8_t result[256] = {};
     if (sig.ret.hostSize() > sizeof result) fatal("return type of %s is too large", name);
     // The guest can't catch a host exception (no unwinding into guest
@@ -701,6 +756,7 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
         }
         log("    imp 0x%08x, types %s, words%s", t->imp, t->guestTypes.c_str(), text.c_str());
     }
+    if (mirrorsHostIvars(bridge, *static_cast<id *>(args[0]), self)) mirrorHostIvars(bridge, *static_cast<id *>(args[0]), self);
     uint64_t r = cpu->call(t->imp, words);
     bounceOut(bridge, bounces);
 
