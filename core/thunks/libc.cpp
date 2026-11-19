@@ -750,6 +750,40 @@ B32_THUNK(_freopen) {
     c.ret(f);
 }
 B32_THUNK(_fileno) { c.ret(uint32_t(::fileno(hostFile(c, c.args.ptr())))); }
+// FILE *popen(const char *command, const char *mode) and int pclose(FILE *): the host's shell runs
+// the command, and Bridge32 the program it starts if that's a guest's (Xcode 3 asks its gcc this
+// way what it predefines).
+B32_THUNK(_popen) {
+    const char *command = c.mem.cstr(c.args.ptr());
+    const char *mode = c.mem.cstr(c.args.ptr());
+#if defined(B32_GUEST_MAC)
+    std::string run = hostShellCommand(command);
+#else
+    std::string run = command;
+#endif
+    FILE *f = ::popen(run.c_str(), mode);
+    if (!f) setGuestErrno(c, errno);
+    c.ret(wrapFile(c, f));
+}
+B32_THUNK(_pclose) {
+    GuestAddr f = c.args.ptr();
+    FILE *host = nullptr;
+    {
+        std::lock_guard guard(filesLock);
+        auto it = files.find(f);
+        if (it != files.end()) {
+            host = it->second;
+            files.erase(it);
+        }
+    }
+    if (!host) {
+        setGuestErrno(c, EBADF);
+        return c.ret(uint32_t(-1));
+    }
+    c.heap.free(f);
+    retErrno(c, ::pclose(host));
+}
+
 B32_THUNK(_fdopen) {
     int fd = c.args.i32();
     c.ret(wrapFile(c, ::fdopen(fd, c.mem.cstr(c.args.ptr()))));
