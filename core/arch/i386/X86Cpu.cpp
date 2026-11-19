@@ -272,6 +272,34 @@ void X86Cpu::longjmpTo(GuestAddr buf, uint32_t value) {
     jump(mem().read<uint32_t>(buf + 20));
 }
 
+// pid_t fork(void) and vfork(void): both as vfork (spawn.cpp). The child is this thread from here
+// to its exec or exit; then fork returns again, as the parent, as longjmp would.
+namespace {
+void forkHere(Call &c) {
+    if (forkChild) {  // a child's child
+        setGuestErrno(c, EAGAIN);
+        c.ret(uint32_t(-1));
+        return;
+    }
+    X86Cpu &cpu = x86(c);
+    uint32_t saved[6] = {cpu.reg(X86Cpu::EBX), cpu.reg(X86Cpu::ESI), cpu.reg(X86Cpu::EDI),
+                         cpu.reg(X86Cpu::EBP), cpu.reg(X86Cpu::ESP) + 4, cpu.returnAddress()};
+    beginForkChild(c, [saved](Call &c, uint32_t pid) {
+        X86Cpu &cpu = x86(c);
+        cpu.setReg(X86Cpu::EBX, saved[0]);
+        cpu.setReg(X86Cpu::ESI, saved[1]);
+        cpu.setReg(X86Cpu::EDI, saved[2]);
+        cpu.setReg(X86Cpu::EBP, saved[3]);
+        cpu.setReg(X86Cpu::ESP, saved[4]);
+        cpu.setReg(X86Cpu::EAX, pid);
+        cpu.jump(saved[5]);
+    });
+    c.ret(0);
+}
+}  // namespace
+B32_THUNK(_fork) { forkHere(c); }
+B32_THUNK(_vfork) { forkHere(c); }
+
 B32_THUNK(_setjmp) {
     saveContext(c, c.args.ptr());
     c.ret(0);
