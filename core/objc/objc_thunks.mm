@@ -202,6 +202,24 @@ B32_THUNK(_NSAllocateObject) {
     GuestAddr cls = c.args.ptr();
     c.ret(bridge(c).createInstance(cls, c.args.u32()));
 }
+// id NSCopyObject(id, NSUInteger extraBytes, NSZone *): another object of the class with the same
+// ivars, as bytes (nothing they point to is retained). A guest object's ivars are its guest memory.
+B32_THUNK(_NSCopyObject) {
+    GuestAddr object = c.args.ptr();
+    uint32_t extra = c.args.u32();
+    if (!object) return c.ret(0);
+    ClassInfo *cls = bridge(c).classOf(object);
+    if (cls && cls->isGuest) {
+        GuestAddr copy = bridge(c).createInstance(cls->addr, extra);
+        uint32_t size = cls->instanceSize + extra;
+        if (copy && size > 4) c.mem.copyIn(copy + 4, c.mem.ptr<uint8_t>(object + 4), size - 4);
+        return c.ret(copy);
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    c.ret(bridge(c).toGuest(NSCopyObject(bridge(c).toHost(object), extra, nullptr)));
+#pragma clang diagnostic pop
+}
 B32_THUNK(_object_dispose) {
     GuestAddr object = c.args.ptr();
     if (object) bridge(c).disposeObject(object);
