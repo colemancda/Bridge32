@@ -24,9 +24,11 @@
 #include <objc/objc.h>
 #include <objc/runtime.h>
 
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace b32 {
@@ -34,6 +36,30 @@ class Runtime;
 }
 
 namespace b32::objc {
+
+// A scalar in guest-layout bytes (guest memory, or an argument's words as the guest stores them),
+// in the guest's byte order.
+template <typename T> T gload(const uint8_t *p) {
+    T v;
+    std::memcpy(&v, p, sizeof v);
+    return GuestMemory::inGuestOrder(v);
+}
+template <typename T> void gstore(uint8_t *p, T v) {
+    v = GuestMemory::inGuestOrder(v);
+    std::memcpy(p, &v, sizeof v);
+}
+
+// An argument as its words (registers and stack slots, as Cpu::arg reads them) and as the
+// guest-layout bytes toHostValue and toGuestValue take. For a big-endian guest each word is in
+// the guest's order, and a scalar narrower than a word is at the word's low-order end.
+// argumentBytes turns the words into those bytes in place; argumentBuffer is where to write the
+// bytes of an argument into zeroed words, and argumentWords turns them back into words.
+const uint8_t *argumentBytes(const Type &type, std::vector<uint32_t> &words);
+uint8_t *argumentBuffer(const Type &type, std::vector<uint32_t> &words);
+void argumentWords(std::vector<uint32_t> &words);
+// A float or double argument (not one inside a struct): where the ABI has registers for them
+// (Cpu::floatArgsInRegisters), it goes in the next one.
+inline bool isFloatArgument(const Type &type) { return type.code == 'f' || type.code == 'd'; }
 
 constexpr uint32_t kObjectHeaderSize = 4;  // isa
 
@@ -69,7 +95,7 @@ struct ClassInfo {
     bool initialized = false;      // +initialize has run (guest classes)
 };
 
-#if defined(B32_GUEST_I386)
+#if defined(B32_GUEST_MAC)
 // A host exception reaching guest code, or a guest throw: Delivered means the
 // guest's innermost @try on this thread is resuming (a longjmp, already done
 // to the Cpu); OuterFrame that it's in guest code below host frames, so the
@@ -301,6 +327,9 @@ private:
     // __cfstring constants: guest address -> immortal host string.
     GuestAddr cfstringIsa_ = 0;
     std::vector<std::pair<GuestAddr, GuestAddr>> cfstringSections_;
+    // Constant strings of images without a __cfstring section (before Mac OS X 10.4's compilers),
+    // found in their data by their isa.
+    std::unordered_set<GuestAddr> looseCfstrings_;
     std::unordered_map<GuestAddr, id> cfstrings_;
 
     GuestAddr emptyCache_ = 0;
