@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 
 #if defined(B32_GUEST_ARM)
 #include "core/cpu/DynarmicCpu.h"
@@ -15,11 +16,16 @@
 #include "core/cpu/UnicornCpu.h"
 #endif
 
+// b32-run <guest executable> [args...] runs it with argv[0] its path; b32-run --b32-exec <guest
+// executable> <argv0> [args...], as a guest's exec of another program starts it, with its own argv[0].
 int main(int argc, char **argv) {
-    if (argc < 2) {
+    bool exec = argc >= 3 && std::strcmp(argv[1], "--b32-exec") == 0;
+    if (argc < 2 || (exec && argc < 4)) {
         std::fprintf(stderr, "usage: %s <guest executable> [args...]\n", argv[0]);
         return 2;
     }
+    const char *path = exec ? argv[2] : argv[1];
+    char **guestArgs = exec ? argv + 3 : argv + 1;
 #if defined(B32_GUEST_ARM)
     static auto monitor = b32::DynarmicCpu::makeMonitor();
     static std::atomic<size_t> nextProcessor{0};
@@ -42,9 +48,9 @@ int main(int argc, char **argv) {
 #endif
     // Guest builds of libraries like libstdc++ (see Runtime::addGuestLibraryDir).
     if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
-    rt.load(argv[1]);
+    rt.load(path);
 
-    std::vector<std::string> guestArgv(argv + 1, argv + argc);
+    std::vector<std::string> guestArgv(guestArgs, argv + argc);
     int status = rt.run(guestArgv, envp);
     std::fflush(stdout);
     return status;
