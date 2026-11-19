@@ -871,13 +871,21 @@ void Bridge::createShadowClass(ClassInfo *cls, GuestAddr ro) {
     if (Class view = NSClassFromString(@"NSView"); view && [shadow isSubclassOfClass:view] && cls->methods.count(guestSel("lockFocus")) &&
                                                    !cls->methods.count(guestSel("viewWillDraw")))
         class_addMethod(shadow, sel_registerName("viewWillDraw"), reinterpret_cast<IMP>(shadowViewWillDraw), "v@:");
+    // Old nibs name an outlet by its ivar ("_navigationBar"), which AppKit sets through a setter
+    // named for it as it is (set_navigationBar:) or the ivar itself, which a shadow class doesn't
+    // have; newer ones by the property (setNavigationBar:). Both setters store the guest's ivar.
     for (const GuestIvar &ivar : cls->ivars) {
-        if (ivar.type.empty() || ivar.type[0] != '@') continue;
+        if (ivar.type.empty() || ivar.type[0] != '@' || ivar.name.empty()) continue;
+        std::string asWritten = ivar.name;
+        asWritten[0] = char(std::toupper(asWritten[0]));
         std::string key = ivar.name[0] == '_' ? ivar.name.substr(1) : ivar.name;
-        if (key.empty()) continue;
-        key[0] = char(std::toupper(key[0]));
-        SEL setter = sel_registerName(("set" + key + ":").c_str());
-        if (!class_getInstanceMethod(shadow, setter)) class_addMethod(shadow, setter, reinterpret_cast<IMP>(shadowOutletSetter), "v@:@");
+        if (!key.empty()) key[0] = char(std::toupper(key[0]));
+        for (const std::string &name : {asWritten, key}) {
+            if (name.empty()) continue;
+            SEL setter = sel_registerName(("set" + name + ":").c_str());
+            if (!class_getInstanceMethod(shadow, setter))
+                class_addMethod(shadow, setter, reinterpret_cast<IMP>(shadowOutletSetter), "v@:@");
+        }
     }
 #endif
     // Subclasses of guest classes inherit this from their guest superclass.
@@ -1198,6 +1206,36 @@ bool Bridge::isConstantString(GuestAddr object) const {
     return false;
 }
 
+// The host side of one of the guest's constant strings (@"..."): an object of its own, never
+// shared with another constant or tagged, so the guest's pointer comparisons between constants
+// hold across the bridge (two images' @"" are different objects, as on the Mac, and the host's
+// own @"" is a third). -copy answers itself, as a constant's does.
+@interface B32ConstantString : NSString {
+    NSString *contents;
+}
+- (instancetype)initWithContents:(NSString *)string;
+@end
+@implementation B32ConstantString
+- (instancetype)initWithContents:(NSString *)string {
+    if ((self = [super init])) contents = [string copy];
+    return self;
+}
+- (NSUInteger)length { return contents.length; }
+- (unichar)characterAtIndex:(NSUInteger)index { return [contents characterAtIndex:index]; }
+- (void)getCharacters:(unichar *)buffer range:(NSRange)range { [contents getCharacters:buffer range:range]; }
+- (const char *)UTF8String { return contents.UTF8String; }
+- (BOOL)getCString:(char *)buffer maxLength:(NSUInteger)max encoding:(NSStringEncoding)encoding {
+    return [contents getCString:buffer maxLength:max encoding:encoding];
+}
+- (const char *)cStringUsingEncoding:(NSStringEncoding)encoding { return [contents cStringUsingEncoding:encoding]; }
+- (NSStringEncoding)fastestEncoding { return contents.fastestEncoding; }
+- (NSStringEncoding)smallestEncoding { return contents.smallestEncoding; }
+- (NSUInteger)hash { return contents.hash; }
+- (BOOL)isEqual:(id)other { return self == other || [contents isEqual:other]; }
+- (BOOL)isEqualToString:(NSString *)other { return self == other || [contents isEqualToString:other]; }
+- (id)copyWithZone:(NSZone *)zone { return [self retain]; }
+@end
+
 id Bridge::cfstringToHost(GuestAddr addr) {
     if (auto it = cfstrings_.find(addr); it != cfstrings_.end()) return it->second;
     GuestMemory &mem = rt_.mem();
@@ -1214,6 +1252,9 @@ id Bridge::cfstringToHost(GuestAddr addr) {
         if (!s) s = [[NSString alloc] initWithBytes:mem.ptr<char>(bytes) length:length encoding:NSMacOSRomanStringEncoding];
     }
     // Immortal, like the constant it stands for; maps back to the constant.
+    NSString *contents = s;
+    s = [[B32ConstantString alloc] initWithContents:contents];
+    [contents release];
     cfstrings_[addr] = s;
     guestByHost_[s] = addr;
     return s;
