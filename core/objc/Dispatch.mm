@@ -532,6 +532,10 @@ struct Trampoline {
     GuestAddr sel;
     HostCall *call;
     std::string guestTypes;
+    // How many argument words the guest's own encoding gives each argument (from _cmd on), where it can be
+    // read: the host's encoding of the selector can differ (Xcode 3's -imageForState: takes a struct, the
+    // host's an NSInteger), and the guest method owns the argument area its encoding declares.
+    std::vector<uint32_t> guestArgWords;
     bool fastEnumeration = false;  // -countByEnumeratingWithState:objects:count:
     IMP hostOriginal = nullptr;    // what host callers get instead (see hostCallersKeepHostMethod)
 };
@@ -680,6 +684,11 @@ void trampolineEntry(ffi_cif *cif, void *ret, void **args, void *user) {
         }
         std::vector<uint32_t> w(wordsFor(type.guestSize()));
         bridge.toGuestValue(type, static_cast<const uint8_t *>(args[i]), reinterpret_cast<uint8_t *>(w.data()));
+        // A guest argument bigger than the host's gets the rest as zeros, rather than reaching past the
+        // words pushed into its caller's frame.
+        if (i - 2 < t->guestArgWords.size() && sig.args.size() == t->guestArgWords.size() + 2 &&
+            t->guestArgWords[i - 2] > w.size())
+            w.resize(t->guestArgWords[i - 2], 0);
         words.insert(words.end(), w.begin(), w.end());
     }
 
@@ -764,6 +773,10 @@ void Bridge::installTrampoline(Class target, GuestAddr sel, const GuestMethod &m
     void *code = nullptr;
     auto *closure = static_cast<ffi_closure *>(ffi_closure_alloc(sizeof(ffi_closure), &code));
     auto *t = new Trampoline{this, method.imp, sel, &hc, method.types};
+    if (!method.types.empty()) {
+        Signature guest = parseSignature(method.types.c_str());
+        for (size_t i = 2; i < guest.args.size(); i++) t->guestArgWords.push_back(wordsFor(guest.args[i].guestSize()));
+    }
     t->fastEnumeration = std::strcmp(selName(sel), "countByEnumeratingWithState:objects:count:") == 0;
     if (!closure || ffi_prep_closure_loc(closure, &hc.cif, trampolineEntry, t, code) != FFI_OK)
         fatal("could not create a trampoline for %s", sel_getName(hsel));
