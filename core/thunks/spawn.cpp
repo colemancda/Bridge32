@@ -236,7 +236,40 @@ void spawn(Call &c, bool searchPath) {
     c.ret(0);
 }
 
+// `s` in single quotes, for the shell.
+std::string shellQuoted(const std::string &s) {
+    std::string out = "'";
+    for (char ch : s) out += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
+    return out + "'";
+}
+
 }  // namespace
+
+std::string b32::hostShellCommand(const std::string &command) {
+    // The first word, unquoted as the shell would: plain, or in single or double quotes.
+    size_t i = command.find_first_not_of(" \t");
+    if (i == std::string::npos) return command;
+    std::string word;
+    for (char quote = 0; i < command.size(); i++) {
+        char ch = command[i];
+        if (quote) {
+            if (ch == quote) quote = 0;
+            else if (quote == '"' && ch == '\\' && i + 1 < command.size()) word += command[++i];
+            else word += ch;
+        } else if (ch == '\'' || ch == '"') {
+            quote = ch;
+        } else if (ch == ' ' || ch == '\t' || ch == ';' || ch == '|' || ch == '&' || ch == '<' || ch == '>') {
+            break;
+        } else {
+            word += ch;
+        }
+    }
+    std::string path = findProgram(word);
+    if (path.empty() || !runsAsGuest(path)) return command;
+    if (traceSpawn) log("shell runs %s", path.c_str());
+    // The original word stays, as the program's argv[0].
+    return shellQuoted(launcher()) + " --b32-exec " + shellQuoted(path) + " " + command.substr(command.find_first_not_of(" \t"));
+}
 
 void b32::beginForkChild(Call &c, std::function<void(Call &, uint32_t pid)> resumeParent) {
     auto *child = new ForkChild;

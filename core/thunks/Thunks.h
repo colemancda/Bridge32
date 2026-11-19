@@ -213,6 +213,9 @@ struct ForkChild {
 };
 // The calling thread's fork child, if it is one now (libsystem.cpp).
 extern thread_local ForkChild *forkChild;
+// A shell command for the host's shell: as given, unless its first word names a program for the
+// guest's CPU, which then runs in a copy of the launcher (spawn.cpp, Mac guests).
+std::string hostShellCommand(const std::string &command);
 // Makes the calling thread a fork child; `resumeParent` returns from fork in the parent (spawn.cpp).
 void beginForkChild(Call &c, std::function<void(Call &, uint32_t pid)> resumeParent);
 
