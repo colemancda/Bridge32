@@ -10,6 +10,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <dirent.h>
+#include <fts.h>
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -330,6 +331,192 @@ B32_THUNK(_scandir) {
 B32_THUNK(_alphasort) {
     GuestAddr a = c.mem.read<uint32_t>(c.args.ptr()), b = c.mem.read<uint32_t>(c.args.ptr());
     c.ret(uint32_t(std::strcmp(c.mem.cstr(a + 8), c.mem.cstr(b + 8))));
+}
+
+// --- fts: walking a file hierarchy ------------------------------------------------------------
+//
+// The host's fts does the walk; each FTSENT it returns gets a guest copy in the guest's layout,
+// one per host entry (so a directory's preorder and postorder visits are the same guest entry,
+// as the guest expects), with its own copies of the paths and the stat. The guest's fts_number
+// and fts_pointer are carried over to the host entry before each step, so they survive for as
+// long as the host keeps the entry. The walk never changes directory (FTS_NOCHDIR), so an access
+// path is always one the guest can use as it is.
+//
+// The guest's FTSENT, 32-bit: cycle 0, parent 4, link 8, number 12, pointer 16, accpath 20,
+// path 24, errno 28, symfd 32, pathlen 36, namelen 38, then with a 32-bit inode (the plain
+// _fts_open on the i386 Mac) ino 40, dev 44, nlink 48, level 50, info 52, flags 54, instr 56,
+// statp 60, name 64; with a 64-bit one (iOS, _fts_open$INODE64) ino 40, dev 48, nlink 52,
+// level 54, info 56, flags 58, instr 60, statp 64, name 68.
+namespace {
+struct GuestFtsEntry {
+    GuestAddr entry = 0, path = 0, stat = 0;
+    uint32_t nameCapacity = 0, pathCapacity = 0;
+};
+struct GuestFts {
+    FTS *host = nullptr;
+    bool inode64 = false;
+    std::unordered_map<FTSENT *, GuestFtsEntry> entries;
+    std::unordered_map<GuestAddr, FTSENT *> hostOf;
+    FTSENT *current = nullptr;
+};
+std::mutex ftsLock;
+std::unordered_map<GuestAddr, GuestFts *> walks;
+
+struct FtsOffsets {
+    uint32_t ino, dev, nlink, level, info, flags, instr, statp, name;
+};
+constexpr FtsOffsets kFts32{40, 44, 48, 50, 52, 54, 56, 60, 64};
+constexpr FtsOffsets kFts64{40, 48, 52, 54, 56, 58, 60, 64, 68};
+
+// The guest copy of a host entry, made or brought up to date (and its parents').
+GuestAddr guestEntry(Call &c, GuestFts &w, FTSENT *e, int depth = 0) {
+    if (!e) return 0;
+    const FtsOffsets &o = w.inode64 ? kFts64 : kFts32;
+    GuestFtsEntry &g = w.entries[e];
+    if (!g.entry || g.nameCapacity < e->fts_namelen + 1u) {
+        if (g.entry) {
+            w.hostOf.erase(g.entry);
+            c.heap.free(g.entry);
+        }
+        g.nameCapacity = std::max<uint32_t>(e->fts_namelen + 1u, 32);
+        g.entry = c.heap.calloc(1, o.name + g.nameCapacity);
+    }
+    w.hostOf[g.entry] = e;
+    if (!g.path || g.pathCapacity < e->fts_pathlen + 1u) {
+        if (g.path) c.heap.free(g.path);
+        g.pathCapacity = std::max<uint32_t>(e->fts_pathlen + 1u, 64);
+        g.path = c.heap.alloc(g.pathCapacity);
+    }
+    c.mem.copyIn(g.path, e->fts_path, e->fts_pathlen);
+    c.mem.write<uint8_t>(g.path + e->fts_pathlen, 0);
+
+    GuestAddr a = g.entry;
+    // A parent is the one up the chain the walk is in; a deep one is filled in when it's current.
+    c.mem.write<uint32_t>(a + 4, depth < 64 && e->fts_level > 0 ? guestEntry(c, w, e->fts_parent, depth + 1) : 0);
+    c.mem.write<uint32_t>(a + 12, uint32_t(e->fts_number));
+    c.mem.write<uint32_t>(a + 16, uint32_t(reinterpret_cast<uintptr_t>(e->fts_pointer)));
+    c.mem.write<uint32_t>(a + 20, g.path);  // the access path is the path (FTS_NOCHDIR)
+    c.mem.write<uint32_t>(a + 24, g.path);
+    c.mem.write<int32_t>(a + 28, e->fts_errno);
+    c.mem.write<int32_t>(a + 32, -1);
+    c.mem.write<uint16_t>(a + 36, e->fts_pathlen);
+    c.mem.write<uint16_t>(a + 38, e->fts_namelen);
+    if (w.inode64) c.mem.write<uint64_t>(a + o.ino, e->fts_ino);
+    else c.mem.write<uint32_t>(a + o.ino, uint32_t(e->fts_ino));
+    c.mem.write<int32_t>(a + o.dev, int32_t(e->fts_dev));
+    c.mem.write<uint16_t>(a + o.nlink, uint16_t(e->fts_nlink));
+    c.mem.write<int16_t>(a + o.level, e->fts_level);
+    c.mem.write<uint16_t>(a + o.info, e->fts_info);
+    c.mem.write<uint16_t>(a + o.flags, 0);
+    c.mem.write<uint16_t>(a + o.instr, 0);
+    GuestAddr stat = 0;
+    if (e->fts_statp && e->fts_info != FTS_NS && e->fts_info != FTS_NSOK) {
+        if (!g.stat) g.stat = c.heap.calloc(1, 112);
+        (w.inode64 ? writeStat : writeStat32)(c.mem, g.stat, *e->fts_statp);
+        stat = g.stat;
+    }
+    c.mem.write<uint32_t>(a + o.statp, stat);
+    c.mem.copyIn(a + o.name, e->fts_name, e->fts_namelen);
+    c.mem.write<uint8_t>(a + o.name + e->fts_namelen, 0);
+    return a;
+}
+
+// The guest's own fields, fts_number and fts_pointer, back onto the host entries still alive.
+void keepUserFields(Call &c, GuestFts &w) {
+    for (FTSENT *e = w.current; e && e->fts_level >= 0; e = e->fts_parent) {
+        auto it = w.entries.find(e);
+        if (it == w.entries.end()) break;
+        e->fts_number = long(c.mem.read<int32_t>(it->second.entry + 12));
+        e->fts_pointer = reinterpret_cast<void *>(uintptr_t(c.mem.read<uint32_t>(it->second.entry + 16)));
+        if (e->fts_level == 0) break;
+    }
+}
+
+GuestFts *walkAt(GuestAddr handle) {
+    std::lock_guard guard(ftsLock);
+    auto it = walks.find(handle);
+    return it == walks.end() ? nullptr : it->second;
+}
+
+// FTS *fts_open(char * const *paths, int options, int (*compar)(const FTSENT **, const FTSENT **))
+void openWalk(Call &c, bool inode64) {
+    GuestAddr list = c.args.ptr();
+    int options = c.args.i32();
+    if (GuestAddr compar = c.args.ptr()) log("fts_open: ignoring the guest's sort function 0x%08x", compar);
+    std::vector<std::string> paths;
+    for (GuestAddr p; list && (p = c.mem.read<uint32_t>(list)); list += 4) paths.push_back(c.mem.cstr(p));
+    std::vector<char *> argv;
+    for (auto &p : paths) argv.push_back(p.data());
+    argv.push_back(nullptr);
+    FTS *host = ::fts_open(argv.data(), options | FTS_NOCHDIR, nullptr);
+    B32_FILE_LOG("fts_open(%s...) = %p", paths.empty() ? "" : paths[0].c_str(), (void *)host);
+    if (!host) {
+        setGuestErrno(c, errno);
+        c.ret(0);
+        return;
+    }
+    auto *w = new GuestFts;
+    w->host = host;
+    w->inode64 = inode64;
+    GuestAddr handle = c.heap.calloc(1, 48);
+    std::lock_guard guard(ftsLock);
+    walks[handle] = w;
+    c.ret(handle);
+}
+}  // namespace
+
+B32_THUNK(_fts_open) { openWalk(c, kPlainInode64); }
+#if defined(B32_GUEST_MAC)
+B32_THUNK(_fts_open$INODE64) { openWalk(c, true); }
+#endif
+
+B32_THUNK(_fts_read) {
+    GuestFts *w = walkAt(c.args.ptr());
+    if (!w) return c.ret(0);
+    keepUserFields(c, *w);
+    errno = 0;
+    FTSENT *e = ::fts_read(w->host);
+    if (!e) {
+        setGuestErrno(c, errno);
+        w->current = nullptr;
+        return c.ret(0);
+    }
+    w->current = e;
+    c.ret(guestEntry(c, *w, e));
+}
+
+// int fts_set(FTS *, FTSENT *, int instr): FTS_AGAIN, FTS_FOLLOW, FTS_SKIP.
+B32_THUNK(_fts_set) {
+    GuestFts *w = walkAt(c.args.ptr());
+    GuestAddr entry = c.args.ptr();
+    int instr = c.args.i32();
+    auto it = w ? w->hostOf.find(entry) : decltype(w->hostOf)::iterator{};
+    if (!w || it == w->hostOf.end()) {
+        setGuestErrno(c, EINVAL);
+        return c.ret(uint32_t(-1));
+    }
+    c.ret(uint32_t(::fts_set(w->host, it->second, instr)));
+}
+
+B32_THUNK(_fts_close) {
+    GuestAddr handle = c.args.ptr();
+    GuestFts *w;
+    {
+        std::lock_guard guard(ftsLock);
+        auto it = walks.find(handle);
+        if (it == walks.end()) return c.ret(uint32_t(-1));
+        w = it->second;
+        walks.erase(it);
+    }
+    int rc = ::fts_close(w->host);
+    for (auto &[e, g] : w->entries) {
+        c.heap.free(g.entry);
+        if (g.path) c.heap.free(g.path);
+        if (g.stat) c.heap.free(g.stat);
+    }
+    delete w;
+    c.heap.free(handle);
+    c.ret(uint32_t(rc));
 }
 
 B32_THUNK(_closedir) {
