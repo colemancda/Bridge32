@@ -697,7 +697,9 @@ B32_THUNK(_SetMovieBox) {
     c.args.ptr();
     c.args.ptr();
 }
-// Sound Manager channels exist but are silent so far.
+#if defined(B32_GUEST_BIG_ENDIAN)
+// Sound Manager channels exist but are silent for the PowerPC guest (core/audio/soundmanager.mm plays
+// them for i386).
 B32_THUNK(_SndNewChannel) {
     GuestAddr out = c.args.ptr();
     if (!c.mem.read<uint32_t>(out)) c.mem.write<uint32_t>(out, c.heap.calloc(1, 64));
@@ -720,6 +722,7 @@ B32_THUNK(_SndChannelStatus) {
 }
 B32_THUNK(_NewSndCallBackUPP) { c.ret(c.args.ptr()); }
 B32_THUNK(_DisposeSndCallBackUPP) {}
+#endif
 B32_THUNK(_ExitToShell) { c.rt.exit(0); }
 
 // What crt1 from before 10.5 looks at: hooks it calls when they're set.
