@@ -57,6 +57,13 @@ void b32::setGuestErrno(Call &c, int value) {
     if (GuestAddr variable = errnoVariable) c.mem.write<int32_t>(variable, value);
 }
 
+thread_local ForkChild *b32::forkChild = nullptr;
+
+void b32::retErrno(Call &c, long result) {
+    if (result < 0) setGuestErrno(c, errno);
+    c.ret(uint32_t(result));
+}
+
 B32_THUNK(___assert_rtn) {
     const char *function = c.mem.cstr(c.args.ptr());
     const char *file = c.mem.cstr(c.args.ptr());
@@ -306,17 +313,23 @@ B32_THUNK(_sigaction) {
 B32_THUNK(_write) {
     int fd = c.args.i32();
     GuestAddr buf = c.args.ptr();
-    c.ret(uint32_t(::write(fd, c.mem.ptr<void>(buf), c.args.u32())));
+    retErrno(c, ::write(fd, c.mem.ptr<void>(buf), c.args.u32()));
 }
 B32_THUNK(_read) {
     int fd = c.args.i32();
     GuestAddr buf = c.args.ptr();
     uint32_t size = c.args.u32();
     ssize_t n = ::read(fd, c.mem.ptr<void>(buf), size);
+    int error = errno;
     if (getenv("B32_TRACE_FILES")) log("read(%d, %u) = %zd", fd, size, n);
-    c.ret(uint32_t(n));
+    errno = error;
+    retErrno(c, n);
 }
-B32_THUNK(_close) { c.ret(uint32_t(::close(c.args.i32()))); }
+B32_THUNK(_close) {
+    int fd = c.args.i32();
+    if (ForkChild *child = forkChild) return c.ret(uint32_t(posix_spawn_file_actions_addclose(&child->actions, fd) ? -1 : 0));
+    retErrno(c, ::close(fd));
+}
 // int pipe(int fds[2]): host descriptors, like every other.
 B32_THUNK(_pipe) {
     GuestAddr out = c.args.ptr();
