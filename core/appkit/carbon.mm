@@ -596,9 +596,6 @@ B32_THUNK(_RunStandardAlert) {
     c.ret(0);
 }
 
-// WindowRef GetDialogWindow(DialogRef): a standard alert is the host's, with no Carbon window behind it.
-B32_THUNK(_GetDialogWindow) { c.ret(0); }
-
 B32_THUNK(_IntlScript) { c.ret(0); }  // smRoman
 // short IdenticalString(ConstStr255Param, ConstStr255Param, Handle): 0 if equal.
 B32_THUNK(_IdenticalString) {
