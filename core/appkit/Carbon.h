@@ -38,6 +38,9 @@ CGPoint gameScreenPoint(CGPoint point);
 // Runs the Cocoa event queue, tracking key and mouse state, until something
 // arrives or `seconds` pass.
 void pumpCarbonEvents(double seconds);
+// For a frame being presented: runs the queue for a guest that doesn't pull events itself, so its window
+// stays live. A guest that pulls its own (ReceiveNextEvent, WaitNextEvent) is left them, keys included.
+void pumpForPresent();
 
 }  // namespace b32::appkit
 
