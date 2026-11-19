@@ -19,6 +19,7 @@
 #include <cstring>
 
 #import <Foundation/Foundation.h>
+#include <objc/runtime.h>
 
 using namespace b32;
 using namespace b32::objc;
@@ -79,10 +80,52 @@ B32_THUNK(_objc_exception_match) {
 B32_THUNK(_objc_collectingEnabled) { c.ret(0); }
 B32_THUNK(_objc_collecting_enabled) { c.ret(0); }
 
+namespace {
+// Ivars of host classes that a guest's category on the class assigns directly, by their offset
+// in the 32-bit layout: the store has to reach the host object, not its guest stand-in. (Xcode's
+// -[NSNibConnector setDestination:] sets _destination itself, and nib connections it makes
+// otherwise lose their destination.) The store is the class's own setter as the host had it
+// before any guest category took its place, so the host's memory management of the ivar holds.
+struct HostIvar {
+    const char *cls;
+    uint32_t offset;
+    const char *setter;
+    IMP hostSetter;
+};
+HostIvar hostIvars[] = {
+    {"NSNibConnector", 4, "setSource:", nullptr},
+    {"NSNibConnector", 8, "setDestination:", nullptr},
+    {"NSNibConnector", 12, "setLabel:", nullptr},
+};
+// Taken as the process starts, before any guest image adds its categories.
+[[maybe_unused]] const bool hostSettersKept = [] {
+    for (HostIvar &known : hostIvars)
+        if (Class cls = objc_getClass(known.cls))
+            known.hostSetter = class_getMethodImplementation(cls, sel_registerName(known.setter));
+    return true;
+}();
+
+bool assignHostIvar(Call &c, GuestAddr dest, uint32_t offset, GuestAddr value) {
+    ClassInfo *info = bridge(c).classOf(dest);
+    if (!info || info->isGuest) return false;
+    for (const HostIvar &known : hostIvars) {
+        if (known.offset != offset || !known.hostSetter) continue;
+        id object = bridge(c).toHost(dest);
+        Class cls = objc_getClass(known.cls);
+        if (!cls || ![object isKindOfClass:cls]) continue;
+        reinterpret_cast<void (*)(id, SEL, id)>(known.hostSetter)(object, sel_registerName(known.setter),
+                                                                   bridge(c).toHost(value));
+        return true;
+    }
+    return false;
+}
+}  // namespace
+
 // id objc_assign_ivar(id value, id dest, ptrdiff_t offset)
 B32_THUNK(_objc_assign_ivar) {
     GuestAddr value = c.args.ptr(), dest = c.args.ptr();
-    c.mem.write<uint32_t>(dest + c.args.u32(), value);
+    uint32_t offset = c.args.u32();
+    if (!assignHostIvar(c, dest, offset, value)) c.mem.write<uint32_t>(dest + offset, value);
     c.ret(value);
 }
 
