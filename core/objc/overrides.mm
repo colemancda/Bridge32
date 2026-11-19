@@ -81,6 +81,48 @@ B32_OVERRIDE("initWithFormat:locale:", "stringWithFormat:locale:") {
                         : [static_cast<NSString *>(o.receiver) initWithString:text]);
 }
 
+// +[NSException raise:format:] and +raise:format:arguments: build the reason from the guest's
+// arguments, then throw it to the guest, as an exception from any host call is.
+namespace {
+bool isExceptionClass(id receiver) {
+    return object_isClass(receiver) && [static_cast<Class>(receiver) isSubclassOfClass:[NSException class]];
+}
+void raiseFormatted(OverrideCall &o, NSString *name, NSString *format, Args &args) {
+    std::string reason = format ? formatGuest(o.c, format.UTF8String, args, describeObject) : "";
+    NSException *e = [static_cast<Class>(o.receiver) exceptionWithName:name
+                                                              reason:[NSString stringWithUTF8String:reason.c_str()]
+                                                            userInfo:nil];
+#if defined(B32_GUEST_I386)
+    ExceptionDelivery delivery = deliverGuestException(o.c.cpu, o.bridge.toGuest(e));
+    if (delivery == ExceptionDelivery::Delivered) return;
+    if (delivery == ExceptionDelivery::OuterFrame) @throw e;
+#endif
+    log("+[%s %s] raised %s: %s; returning to the guest", class_getName(static_cast<Class>(o.receiver)), o.name,
+        name.UTF8String, reason.c_str());
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isExceptionClass, "raise:format:") {
+    NSString *name = o.bridge.toHost(o.args.ptr());
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    raiseFormatted(o, name, format, o.args);
+}
+B32_OVERRIDE_WHEN(isExceptionClass, "raise:format:arguments:") {
+    NSString *name = o.bridge.toHost(o.args.ptr());
+    NSString *format = o.bridge.toHost(o.args.ptr());
+    Args va = Args::fromVaList(o.c.cpu, o.args.ptr());
+    raiseFormatted(o, name, format, va);
+}
+
+// The host's call stack is the emulator's, which a guest can't symbolicate or make sense of
+// (frameworks' assertion handlers look its addresses up in the Symbolication framework), so a
+// guest sees an empty one.
+namespace {
+bool isThreadClass(id receiver) {
+    return object_isClass(receiver) && [static_cast<Class>(receiver) isSubclassOfClass:[NSThread class]];
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isThreadClass, "callStackReturnAddresses", "callStackSymbols") { returnObject(o, @[]); }
+
 B32_OVERRIDE("appendFormat:") {
     NSString *text = formatted(o);
     reinterpret_cast<void (*)(id, SEL, NSString *, ...)>(objc_msgSend)(o.receiver, o.sel, @"%@", text);
@@ -525,6 +567,36 @@ B32_OVERRIDE_WHEN(isMapTable, "initWithKeyPointerFunctions:valuePointerFunctions
     returnObject(o, table);
 }
 
+// - (instancetype)initWithKeyOptions:(NSPointerFunctionsOptions)keyOptions
+//       valueOptions:(NSPointerFunctionsOptions)valueOptions capacity:(NSUInteger)capacity
+// + (NSMapTable *)mapTableWithKeyOptions:(NSPointerFunctionsOptions)keyOptions valueOptions:(NSPointerFunctionsOptions)valueOptions
+// The same, from the options themselves.
+namespace {
+NSPointerFunctionsOptions hostOptions(NSUInteger options) {
+    return holdsObjects(options) ? options : NSPointerFunctionsOpaquePersonality | NSPointerFunctionsOpaqueMemory;
+}
+NSMapTable *rememberSides(NSMapTable *table, NSUInteger keyOptions, NSUInteger valueOptions) {
+    Side keySide{!holdsObjects(keyOptions), 0}, valueSide{!holdsObjects(valueOptions), 0};
+    if (table && (keySide.raw || valueSide.raw))
+        objc_setAssociatedObject(table, &kTableSidesKey, [NSValue valueWithPointer:new Sides{keySide, valueSide}],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return table;
+}
+}  // namespace
+B32_OVERRIDE_WHEN(isMapTable, "initWithKeyOptions:valueOptions:capacity:") {
+    NSUInteger keyOptions = o.args.u32(), valueOptions = o.args.u32(), capacity = o.args.u32();
+    NSMapTable *table = [static_cast<NSMapTable *>(o.receiver) initWithKeyOptions:hostOptions(keyOptions)
+                                                                     valueOptions:hostOptions(valueOptions)
+                                                                         capacity:capacity];
+    returnObject(o, rememberSides(table, keyOptions, valueOptions));
+}
+B32_OVERRIDE_WHEN(isMapTable, "mapTableWithKeyOptions:valueOptions:") {
+    NSUInteger keyOptions = o.args.u32(), valueOptions = o.args.u32();
+    NSMapTable *table = [static_cast<Class>(o.receiver) mapTableWithKeyOptions:hostOptions(keyOptions)
+                                                                  valueOptions:hostOptions(valueOptions)];
+    returnObject(o, rememberSides(table, keyOptions, valueOptions));
+}
+
 B32_OVERRIDE_WHEN(isRawMapTable, "setObject:forKey:") {
     const Sides *sides = sidesOf(o.receiver);
     const void *value = hostKeyOrValue(o, sides->value, o.args.ptr());
@@ -540,6 +612,55 @@ B32_OVERRIDE_WHEN(isRawMapTable, "removeObjectForKey:") {
     const Sides *sides = sidesOf(o.receiver);
     const void *key = hostKeyOrValue(o, Side{sides->key.raw, 0}, o.args.ptr());
     [static_cast<NSMapTable *>(o.receiver) removeObjectForKey:(id)key];
+}
+
+// --- NSHashTable with a non-object personality ---------------------------------------------------
+// The same for a hash table made with options for opaque pointers, integers or C strings: the host
+// holds the guest's values as they are, which the guest adds and looks up as if they were objects.
+
+namespace {
+char kRawHashTableKey;
+bool isHashTable(id receiver) {
+    return [receiver isKindOfClass:[NSHashTable class]] || receiver == (id)[NSHashTable class];
+}
+NSHashTable *rememberRawness(NSHashTable *table, NSUInteger options) {
+    if (table && !holdsObjects(options))
+        objc_setAssociatedObject(table, &kRawHashTableKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return table;
+}
+bool isRawHashTableReceiver(id receiver) { return isHashTable(receiver) && isRawHashTable(receiver); }
+}  // namespace
+
+bool b32::objc::isRawHashTable(id table) {
+    return [table isKindOfClass:[NSHashTable class]] && objc_getAssociatedObject(table, &kRawHashTableKey);
+}
+
+// + (NSHashTable *)hashTableWithOptions:(NSPointerFunctionsOptions)options
+// - (instancetype)initWithOptions:(NSPointerFunctionsOptions)options capacity:(NSUInteger)capacity
+B32_OVERRIDE_WHEN(isHashTable, "hashTableWithOptions:") {
+    NSUInteger options = o.args.u32();
+    returnObject(o, rememberRawness([static_cast<Class>(o.receiver) hashTableWithOptions:options], options));
+}
+B32_OVERRIDE_WHEN(isHashTable, "initWithOptions:capacity:") {
+    NSUInteger options = o.args.u32();
+    NSUInteger capacity = o.args.u32();
+    returnObject(o, rememberRawness([static_cast<NSHashTable *>(o.receiver) initWithOptions:options capacity:capacity],
+                                    options));
+}
+B32_OVERRIDE_WHEN(isRawHashTableReceiver, "addObject:") {
+    [static_cast<NSHashTable *>(o.receiver) addObject:(id)uintptr_t(o.args.ptr())];
+}
+B32_OVERRIDE_WHEN(isRawHashTableReceiver, "removeObject:") {
+    [static_cast<NSHashTable *>(o.receiver) removeObject:(id)uintptr_t(o.args.ptr())];
+}
+B32_OVERRIDE_WHEN(isRawHashTableReceiver, "member:") {
+    o.c.ret(GuestAddr(uintptr_t([static_cast<NSHashTable *>(o.receiver) member:(id)uintptr_t(o.args.ptr())])));
+}
+B32_OVERRIDE_WHEN(isRawHashTableReceiver, "containsObject:") {
+    o.c.ret([static_cast<NSHashTable *>(o.receiver) containsObject:(id)uintptr_t(o.args.ptr())]);
+}
+B32_OVERRIDE_WHEN(isRawHashTableReceiver, "anyObject") {
+    o.c.ret(GuestAddr(uintptr_t([static_cast<NSHashTable *>(o.receiver) anyObject])));
 }
 
 // --- NSPointerArray holding objects -------------------------------------------------------------
