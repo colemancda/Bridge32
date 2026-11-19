@@ -176,6 +176,16 @@ bool deviceProperty(Call &c, bool isInput, uint32_t property, std::vector<uint8_
     case kAudioDevicePropertyDeviceNameCFString:
         scalar(c.rt.bridge().toGuest((__bridge id)CFSTR("Default Output")));
         return true;
+    case kAudioDevicePropertyDeviceName: {  // the same name as a C string
+        static const char name[] = "Default Output";
+        out.insert(out.end(), name, name + sizeof name);
+        return true;
+    }
+    case kAudioDevicePropertyDeviceManufacturer: {
+        static const char maker[] = "Apple Inc.";
+        out.insert(out.end(), maker, maker + sizeof maker);
+        return true;
+    }
     case kAudioDevicePropertyNominalSampleRate:
         scalar(device.rate);
         return true;
@@ -188,6 +198,14 @@ bool deviceProperty(Call &c, bool isInput, uint32_t property, std::vector<uint8_
     case kAudioDevicePropertyBufferSizeRange:  // an AudioValueRange of doubles
         put(double(kMinFrames * kFrameBytes));
         put(double(kMaxFrames * kFrameBytes));
+        return true;
+    case kAudioDevicePropertyBufferFrameSizeRange:  // the same, in frames
+        put(double(kMinFrames));
+        put(double(kMaxFrames));
+        return true;
+    case kAudioDevicePropertyPreferredChannelsForStereo:  // left and right are the device's first two
+        if (isInput) return false;
+        words({1, 2});
         return true;
     case kAudioDevicePropertyLatency:
         scalar(uint32_t(0));
@@ -223,6 +241,8 @@ bool deviceProperty(Call &c, bool isInput, uint32_t property, std::vector<uint8_
 // --- the system object ---------------------------------------------------------------
 
 B32_THUNK(_AudioGetCurrentHostTime) { c.ret64(AudioGetCurrentHostTime()); }
+// OSStatus AudioHardwareUnload(void): the host's HAL stays loaded for the process.
+B32_THUNK(_AudioHardwareUnload) { c.ret(0); }
 B32_THUNK(_AudioGetHostClockFrequency) { c.retF64(AudioGetHostClockFrequency()); }
 
 // OSStatus AudioHardwareGetPropertyInfo(id, UInt32 *size, Boolean *writable)
