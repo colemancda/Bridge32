@@ -324,6 +324,32 @@ B32_THUNK(_CGLDestroyContext) {
     if (handle) CGLDestroyContext((CGLContextObj)hostPointer(handle));
     c.ret(0);
 }
+// CGLError CGLSetFullScreen(CGLContextObj) and CGLSetFullScreenOnDisplay(ctx, displayMask): a context
+// can no longer take over a display, so the context draws into the full-screen view instead, as an
+// AGL one does (aglSetFullScreen), at the size of the mode the game switched to.
+namespace {
+void setCGLFullScreen(Call &c) {
+    auto cgl = (CGLContextObj)hostPointer(c.args.u32());
+    if (!cgl) return c.ret(uint32_t(kCGLBadContext));
+    // An NSOpenGLContext over the same CGL context, kept as long as the guest runs, to hold the view.
+    static NSMutableDictionary<NSValue *, NSOpenGLContext *> *wrappers = [[NSMutableDictionary alloc] init];
+    NSValue *key = [NSValue valueWithPointer:cgl];
+    NSOpenGLContext *context = wrappers[key];
+    if (!context) wrappers[key] = context = [[NSOpenGLContext alloc] initWithCGLContextObj:cgl];
+    int width = 0, height = 0;
+    context.view = b32::appkit::carbonFullScreenView(width, height);
+    GLint size[2] = {width, height};
+    if (width > 0 && height > 0) {
+        CGLSetParameter(cgl, kCGLCPSurfaceBackingSize, size);
+        CGLEnable(cgl, kCGLCESurfaceBackingSize);
+    }
+    [context update];
+    log("CGLSetFullScreen %d x %d", width, height);
+    c.ret(uint32_t(kCGLNoError));
+}
+}  // namespace
+B32_THUNK(_CGLSetFullScreen) { setCGLFullScreen(c); }
+B32_THUNK(_CGLSetFullScreenOnDisplay) { setCGLFullScreen(c); }
 // CGLError CGLQueryRendererInfo(display mask, CGLRendererInfoObj *out, GLint *count)
 B32_THUNK(_CGLQueryRendererInfo) {
     uint32_t mask = c.args.u32();
