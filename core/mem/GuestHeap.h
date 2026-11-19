@@ -18,6 +18,9 @@ public:
 
     GuestAddr alloc(uint32_t size, uint32_t align = 16);
     GuestAddr calloc(uint32_t count, uint32_t size);
+    // The block at exactly `addr`, for a guest that maps memory at a fixed address; 0 if any of it
+    // is taken or outside the heap.
+    GuestAddr allocAt(GuestAddr addr, uint32_t size);
     GuestAddr realloc(GuestAddr addr, uint32_t size);
     void free(GuestAddr addr);
     // Usable size of a live allocation, 0 for anything else.
