@@ -1039,9 +1039,6 @@ GuestAddr Bridge::allocObject(id object, ClassInfo *isa, uint32_t size) {
     }
     GuestAddr addr = rt_.heap().calloc(1, size);
     rt_.mem().write<uint32_t>(addr, isa->addr);
-    // Kept, as a collector would keep what the guest refers to (an autorelease pool can't be retained;
-    // the guest's -drain pops it, and its -release does nothing, as under the collector).
-    if (collecting_ && ![object isKindOfClass:[NSAutoreleasePool class]]) [object retain];
     handleByGuest_[addr] = handle;
     handleObjects_[handle] = object;
     handleGuests_[handle] = addr;
@@ -1053,6 +1050,16 @@ GuestAddr Bridge::allocObject(id object, ClassInfo *isa, uint32_t size) {
         sentinel->handle = handle;
         objc_setAssociatedObject(object, &sentinelKey, sentinel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [sentinel release];
+    }
+    // Kept, as a collector would keep what the guest refers to (an autorelease pool can't be retained;
+    // the guest's -drain pops it, and its -release does nothing, as under the collector). Retained once
+    // the object is known, since a guest class may answer -retain itself, and by -retain rather than
+    // NSObject's own, which toll-free bridged objects such as NSFont don't count.
+    if (collecting_) {
+        static Class pool = [NSAutoreleasePool class];
+        bool isPool = false;
+        for (Class k = object_getClass(object); k && !isPool; k = class_getSuperclass(k)) isPool = k == pool;
+        if (!isPool) [object retain];
     }
     return addr;
 }
