@@ -193,7 +193,7 @@ if(B32_CATALYST)
         message(FATAL_ERROR "The Catalyst shell is the arm guest's and needs dynarmic in external/dynarmic")
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/uikit/GameControllerCompat.mm core/uikit/eventloop.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
-        core/audio/audio.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
+        core/audio/audio.mm core/audio/openal.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
     target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework CoreData" "-framework Security" "-framework GameController"
         "-framework CoreLocation")
 
@@ -218,9 +218,9 @@ if(B32_MAC)
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/objc/legacytables.mm core/appkit/appkit.mm core/appkit/compat.mm
         core/appkit/macsys.mm core/appkit/carbon.mm core/appkit/carbon_ui.mm core/appkit/carbon_files.mm core/appkit/quickdraw.mm core/appkit/ats.mm core/appkit/agl.mm core/appkit/controller.mm core/gl/opengl.mm core/audio/hal.mm)
-    # AudioQueue and AudioUnit aren't converted for the big-endian guest yet.
+    # AudioQueue, AudioUnit and OpenAL aren't converted for the big-endian guest yet.
     if(NOT B32_GUEST_ARCH STREQUAL "ppc")
-        target_sources(b32core PRIVATE core/audio/audiounit.mm core/audio/audioqueue.mm)
+        target_sources(b32core PRIVATE core/audio/audiounit.mm core/audio/audioqueue.mm core/audio/openal.mm)
     endif()
     target_link_libraries(b32core PUBLIC "-framework AppKit" "-framework CoreMedia" "-framework CoreLocation"
         "-framework QuartzCore" "-framework CoreData" "-framework OpenGL" "-framework ImageIO"
