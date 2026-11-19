@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -94,9 +95,16 @@ void X86Cpu::deliverFault(uint32_t addr, bool write) {
             std::snprintf(text, sizeof text, " %08x", ret);
             frames += text;
         }
-        fatal("guest %s of unmapped 0x%08x (eip=0x%08x esp=0x%08x; frames%s)", write ? "write" : "read", addr, reg(EIP),
-              reg(ESP), frames.c_str());
+        fatal("guest %s of unmapped 0x%08x (eip=0x%08x esp=0x%08x, word there 0x%08x; frames%s)", write ? "write" : "read",
+              addr, reg(EIP), reg(ESP), mem().isMapped(reg(ESP)) ? mem().read<uint32_t>(reg(ESP)) : 0, frames.c_str());
     }
+
+    // The first few go in the log: a guest whose handler resumes where it faulted can otherwise spin there
+    // unseen. For a call through a null pointer, the word at esp is the caller.
+    static std::atomic<int> logged{0};
+    if (logged.fetch_add(1) < 8)
+        log("guest %s fault at 0x%08x (eip=0x%08x, word at esp 0x%08x) goes to its signal handler",
+            write ? "write" : "read", addr, reg(EIP), mem().isMapped(reg(ESP)) ? mem().read<uint32_t>(reg(ESP)) : 0);
 
     constexpr uint32_t kUcontext = 32, kMcontext = 600, kSiginfo = 64;
     constexpr uint32_t kSs = 12, kFs = kSs + 64;
