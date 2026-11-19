@@ -17,6 +17,7 @@
 #include <objc/runtime.h>
 
 #include <cctype>
+#include <cstring>
 #include <unordered_set>
 
 using namespace b32;
@@ -992,9 +993,13 @@ std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const 
         if (sameShape(types, guestTypes)) return types;
 
     // A method only the guest knows: derive host types from the guest's,
-    // widening geometry structs to CGFloat = double.
+    // widening geometry structs to CGFloat = double, ranges to NSUInteger =
+    // 64 bits (an NSRange is two registers on the host, and the arguments
+    // after it follow those), and a float out-parameter to a CGFloat one
+    // (NSTypesetter's -willSetLineFragmentRect:...baselineOffset:).
     std::string out;
     std::vector<bool> geometry;  // per open struct: are its floats CGFloat?
+    std::vector<bool> range;     // ...and are its integers NSUInteger?
     for (size_t i = 0; i < guestTypes.size(); i++) {
         char ch = guestTypes[i];
         if (ch == '{') {
@@ -1004,10 +1009,16 @@ std::string Bridge::hostTypesFor(Class lookup, SEL sel, ClassInfo *owner, const 
                               sname == "CGAffineTransform" || sname == "UIEdgeInsets" || sname == "CGVector" ||
                               sname == "UIOffset" || sname == "_NSPoint" || sname == "_NSSize" || sname == "_NSRect";
             geometry.push_back(isGeometry || (!geometry.empty() && geometry.back()));
+            range.push_back(sname == "_NSRange" || sname == "NSRange" || sname == "CFRange");
         } else if (ch == '}') {
-            geometry.pop_back();
+            if (!geometry.empty()) geometry.pop_back();
+            if (!range.empty()) range.pop_back();
         } else if (ch == 'f' && !geometry.empty() && geometry.back()) {
             ch = 'd';
+        } else if (ch == 'f' && i > 0 && guestTypes[i - 1] == '^' && geometry.empty()) {
+            ch = 'd';
+        } else if (!range.empty() && range.back() && std::strchr("iIlL", ch)) {
+            ch = std::isupper(ch) ? 'Q' : 'q';
         }
         out += ch;
     }
