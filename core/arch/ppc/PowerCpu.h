@@ -53,10 +53,21 @@ public:
     std::vector<uint32_t> frameChain(int max) const override;
     bool threadState(int flavor, GuestAddr state, GuestAddr countOut) override;
 
-    void jump(GuestAddr addr) override { setReg(PC, addr); }
+    // An indirect call on Darwin has the target's address in r12 as well, and functions reached
+    // that way (methods, through objc_msgSend) take their PIC base from it.
+    void jump(GuestAddr addr) override {
+        setReg(R12, addr);
+        setReg(PC, addr);
+    }
     void enterAt(GuestAddr entry) override { setReg(PC, entry); }
     using Cpu::call;
-    uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args) override;
+    uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args) override { return call(fn, args, {}); }
+    uint64_t call(GuestAddr fn, const std::vector<uint32_t> &args, const std::vector<double> &floats) override;
+
+    // The guest's jmp_buf as setjmp (core/arch/ppc/setjmp.cpp) fills it: r1, LR, CR, r2, r13-r31,
+    // f14-f31 and v20-v31, the registers a call preserves.
+    void saveJmpBuf(GuestAddr buf);
+    void longjmpTo(GuestAddr buf, uint32_t value) override;
 
 protected:
     void deliverFault(uint32_t addr, bool write) override;
