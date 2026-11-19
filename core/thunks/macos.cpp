@@ -48,13 +48,6 @@ using namespace b32;
 
 extern char **environ;
 
-namespace {
-// A negative result of a libc call, with the guest's errno set, or the result.
-void retErrno(Call &c, int result) {
-    if (result < 0) setGuestErrno(c, errno);
-    c.ret(uint32_t(result));
-}
-}  // namespace
 
 // --- Mach: Mono's exception port. Guest faults reach it as signals instead, so
 // the port is real but nothing is ever sent to it, and its thread just waits. ----
@@ -119,8 +112,9 @@ B32_THUNK(_fegetround) { c.ret(0); }
 
 B32_THUNK(_dup) { retErrno(c, ::dup(c.args.i32())); }
 B32_THUNK(_dup2) {
-    int a = c.args.i32();
-    retErrno(c, ::dup2(a, c.args.i32()));
+    int a = c.args.i32(), b = c.args.i32();
+    if (ForkChild *child = forkChild) return c.ret(posix_spawn_file_actions_adddup2(&child->actions, a, b) ? uint32_t(-1) : uint32_t(b));
+    retErrno(c, ::dup2(a, b));
 }
 // struct rlimit is two 64-bit rlim_t in the 32-bit ABI too.
 B32_THUNK(_getrlimit) {
@@ -144,33 +138,7 @@ B32_THUNK(_kill) {
     pid_t pid = c.args.i32();
     retErrno(c, ::kill(pid, c.args.i32()));
 }
-// A guest can't start other programs, so there's never a child to wait for.
-B32_THUNK(_execve) {
-    setGuestErrno(c, ENOSYS);
-    c.ret(uint32_t(-1));
-}
-B32_THUNK(_waitpid) {
-    setGuestErrno(c, ECHILD);
-    c.ret(uint32_t(-1));
-}
-// posix_spawn and posix_spawnp: no program starts, as for execve; the file actions and attributes the
-// guest sets up for one are accepted and forgotten.
-B32_THUNK(_posix_spawn) { c.ret(ENOSYS); }
-B32_THUNK(_posix_spawnp) { c.ret(ENOSYS); }
-#define B32_SPAWN_SETUP(symbol) \
-    B32_THUNK(symbol) { c.ret(0); }
-B32_SPAWN_SETUP(_posix_spawn_file_actions_init)
-B32_SPAWN_SETUP(_posix_spawn_file_actions_destroy)
-B32_SPAWN_SETUP(_posix_spawn_file_actions_adddup2)
-B32_SPAWN_SETUP(_posix_spawn_file_actions_addclose)
-B32_SPAWN_SETUP(_posix_spawn_file_actions_addopen)
-B32_SPAWN_SETUP(_posix_spawnattr_init)
-B32_SPAWN_SETUP(_posix_spawnattr_destroy)
-B32_SPAWN_SETUP(_posix_spawnattr_setflags)
-B32_SPAWN_SETUP(_posix_spawnattr_setpgroup)
-B32_SPAWN_SETUP(_posix_spawnattr_setsigmask)
-B32_SPAWN_SETUP(_posix_spawnattr_setsigdefault)
-#undef B32_SPAWN_SETUP
+// exec, posix_spawn and wait are in spawn.cpp.
 
 // --- malloc zones: all of them the guest heap, as NSZones are ------------------------------------
 
