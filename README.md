@@ -141,6 +141,9 @@ audio) and Oceanhouse Media's Smithsonian Dinosaurs book with narration. The
 Dr. Seuss Collection runs, but its books are App Store on-demand resources,
 which can't be downloaded outside the App Store.
 
+The [compatibility database](https://colemancda.github.io/Bridge32/compatibility/)
+lists the apps tried so far and how far each one gets.
+
 ## License
 
 MIT; see [LICENSE](LICENSE). dynarmic is under its own license in
