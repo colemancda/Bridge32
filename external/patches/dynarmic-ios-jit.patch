@@ -41,3 +41,48 @@ index 2c7ae777..d48fc927 100644
          c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
  
          switch (type) {
+diff --git a/src/dynarmic/common/spin_lock_arm64.cpp b/src/dynarmic/common/spin_lock_arm64.cpp
+index ccf807e2..1c341430 100644
+--- a/src/dynarmic/common/spin_lock_arm64.cpp
++++ b/src/dynarmic/common/spin_lock_arm64.cpp
+@@ -5,6 +5,10 @@
+ 
+ #include <mutex>
+ 
++#if defined(__APPLE__)
++#    include <TargetConditionals.h>
++#endif
++
+ #include <oaknut/code_block.hpp>
+ #include <oaknut/oaknut.hpp>
+ 
+@@ -13,6 +17,22 @@
+ 
+ namespace Dynarmic {
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++
++// Plain atomics: the JIT-emitted lock below needs a code block made while the
++// image loads, before a debugger can have enabled JIT on an iOS device.
++void SpinLock::Lock() {
++    while (__atomic_exchange_n(&storage, 1, __ATOMIC_ACQUIRE)) {
++        __asm__ volatile("yield");
++    }
++}
++
++void SpinLock::Unlock() {
++    __atomic_store_n(&storage, 0, __ATOMIC_RELEASE);
++}
++
++#else
++
+ using Backend::Arm64::Wscratch0;
+ using Backend::Arm64::Wscratch1;
+ using namespace oaknut::util;
+@@ -83,4 +103,6 @@ void SpinLock::Unlock() {
+     impl.unlock(&storage);
+ }
+ 
++#endif
++
+ }  // namespace Dynarmic
