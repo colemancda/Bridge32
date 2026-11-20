@@ -35,7 +35,7 @@ Each app is at the level of its newest report. Reports come from the project's p
       <td class="nowrap">{% if guests.size > 0 %}{{ guests | join: ", " }}{% else %}–{% endif %}</td>
       <td><span class="level level-{{ newest.level }}"><span class="level-number">{{ newest.level }}</span> · {{ newest_level.name }}</span></td>
       <td class="nowrap">
-        {%- if newest.pr -%}
+        {%- if newest.source == "pr" -%}
         <a href="https://github.com/colemancda/Bridge32/pull/{{ newest.pr }}">{{ newest.date | date: "%Y-%m-%d" }}</a>
         {%- else -%}
         <a href="https://github.com/colemancda/Bridge32/commit/{{ newest.bridge32 }}">{{ newest.date | date: "%Y-%m-%d" }}</a>
