@@ -9,6 +9,7 @@
 
 #include "GLES.h"
 
+#include "core/HostPaths.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/thunks/CTable.h"
@@ -22,7 +23,7 @@ using namespace b32;
 
 namespace {
 
-constexpr const char *kOpenGLESPath = "/System/iOSSupport/System/Library/Frameworks/OpenGLES.framework/OpenGLES";
+constexpr const char *kOpenGLESPath = B32_IOS_SUPPORT "/System/Library/Frameworks/OpenGLES.framework/OpenGLES";
 constexpr uint32_t GL_ARRAY_BUFFER_BINDING = 0x8894;
 constexpr uint32_t GL_ELEMENT_ARRAY_BUFFER_BINDING = 0x8895;
 
