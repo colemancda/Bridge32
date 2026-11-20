@@ -273,6 +273,12 @@ DynarmicCpu::DynarmicCpu(GuestMemory &mem, SvcHandler handler, Arch arch, Dynarm
     config.processor_id = processorId;
     config.fastmem_exclusive_access = monitor != nullptr;
     config.enable_cycle_counting = false;
+#ifdef B32_IOS
+    // Every guest thread has its own JIT, and on a device they all share one
+    // executable region a debugger hands out once (oaknut's JitPool: 16 slots
+    // of this size). A game's code is far smaller than dynarmic's 128 MB default.
+    config.code_cache_size = 8 * 1024 * 1024;
+#endif
     // ARMv6 apps sometimes rely on unaligned word accesses, which the A5 and
     // later cores allow, so don't trap misalignment.
     config.detect_misaligned_access_via_page_table = 0;
