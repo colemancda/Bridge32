@@ -1,0 +1,207 @@
+diff --git a/include/oaknut/code_block.hpp b/include/oaknut/code_block.hpp
+index bfa87d9..3fe980e 100644
+--- a/include/oaknut/code_block.hpp
++++ b/include/oaknut/code_block.hpp
+@@ -14,6 +14,9 @@
+ #elif defined(__APPLE__)
+ #    include <TargetConditionals.h>
+ #    include <libkern/OSCacheControl.h>
++#    include <mach/mach.h>
++#    include <mach/vm_map.h>
++#    include <mutex>
+ #    include <pthread.h>
+ #    include <sys/mman.h>
+ #    include <unistd.h>
+@@ -23,6 +26,115 @@
+ 
+ namespace oaknut {
+ 
++// On an iOS device (not the simulator) nothing can map writable-executable
++// memory itself. A debugger (StikDebug, AltJIT, TrollStore) that set
++// CS_DEBUGGED on the process answers `brk #0xf00d` by mapping an executable
++// region for it, and the process builds a writable alias of that region with
++// vm_remap. Every request costs a debugger round trip and the region cannot
++// grow, so one region is requested for all code blocks and carved into
++// equal slots: dynarmic makes one per guest thread.
++#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
++#    ifndef OAKNUT_JIT_POOL_SLOTS
++#        define OAKNUT_JIT_POOL_SLOTS 16
++#    endif
++
++namespace detail {
++
++// x16 = 1: x0 = address hint (null), x1 = size; the debugger returns the
++// executable region in x0.
++__attribute__((noinline, optnone, naked)) static void* prepare_jit_region(void*, std::size_t)
++{
++    __asm__ volatile(
++        "mov x16, #1\n"
++        "brk #0xf00d\n"
++        "ret\n");
++}
++
++// x16 = 0: the debugger detaches; the mappings stay valid.
++__attribute__((noinline, optnone, naked)) static void detach_jit_server()
++{
++    __asm__ volatile(
++        "mov x16, #0\n"
++        "brk #0xf00d\n"
++        "ret\n");
++}
++
++class JitPool {
++public:
++    struct Slot {
++        std::uint32_t* xmem = nullptr;
++        std::uint32_t* wmem = nullptr;
++        int index = -1;
++    };
++
++    static JitPool& instance()
++    {
++        static JitPool pool;
++        return pool;
++    }
++
++    // An empty slot (xmem == nullptr) if the debugger refused, the size
++    // differs from the first request's, or every slot is taken.
++    Slot acquire(std::size_t size)
++    {
++        std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_xbase == nullptr) {
++            const std::size_t total = size * OAKNUT_JIT_POOL_SLOTS;
++            void* x = prepare_jit_region(nullptr, total);
++            if (x == nullptr || x == MAP_FAILED)
++                return {};
++
++            vm_address_t w = 0;
++            vm_prot_t cur_prot, max_prot;
++            if (vm_remap(mach_task_self(), &w, total, 0, VM_FLAGS_ANYWHERE | VM_FLAGS_RANDOM_ADDR, mach_task_self(), reinterpret_cast<mach_vm_address_t>(x), false, &cur_prot, &max_prot, VM_INHERIT_NONE) != KERN_SUCCESS)
++                return {};
++            if (vm_protect(mach_task_self(), w, total, false, VM_PROT_READ | VM_PROT_WRITE) != KERN_SUCCESS)
++                return {};
++
++            m_xbase = static_cast<std::uint8_t*>(x);
++            m_wbase = reinterpret_cast<std::uint8_t*>(w);
++            m_slot_size = size;
++            m_should_detach = true;
++        } else if (size != m_slot_size) {
++            return {};
++        }
++
++        for (int i = 0; i < OAKNUT_JIT_POOL_SLOTS; i++) {
++            if (!m_in_use[i]) {
++                m_in_use[i] = true;
++                return {reinterpret_cast<std::uint32_t*>(m_xbase + i * m_slot_size), reinterpret_cast<std::uint32_t*>(m_wbase + i * m_slot_size), i};
++            }
++        }
++        return {};
++    }
++
++    void release(int index)
++    {
++        std::lock_guard<std::mutex> lock(m_mutex);
++        m_in_use[index] = false;
++    }
++
++    // True once: the first block detaches the debugger after its prelude.
++    bool take_detach()
++    {
++        std::lock_guard<std::mutex> lock(m_mutex);
++        const bool detach = m_should_detach;
++        m_should_detach = false;
++        return detach;
++    }
++
++private:
++    std::mutex m_mutex;
++    std::uint8_t* m_xbase = nullptr;
++    std::uint8_t* m_wbase = nullptr;
++    std::size_t m_slot_size = 0;
++    bool m_in_use[OAKNUT_JIT_POOL_SLOTS] = {};
++    bool m_should_detach = false;
++};
++
++}  // namespace detail
++#endif
++
+ class CodeBlock {
+ public:
+     explicit CodeBlock(std::size_t size)
+@@ -31,7 +143,14 @@ public:
+ #if defined(_WIN32)
+         m_memory = (std::uint32_t*)VirtualAlloc(nullptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+ #elif defined(__APPLE__)
+-#    if TARGET_OS_IPHONE
++#    if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
++        {
++            const auto slot = detail::JitPool::instance().acquire(size);
++            m_memory = slot.xmem;
++            m_wmemory = slot.wmem;
++            m_slot = slot.index;
++        }
++#    elif TARGET_OS_IPHONE
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+ #    else
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+@@ -46,6 +165,10 @@ public:
+ 
+         if (m_memory == nullptr)
+             throw std::bad_alloc{};
++
++#if !(defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
++        m_wmemory = m_memory;
++#endif
+     }
+ 
+     ~CodeBlock()
+@@ -55,6 +178,8 @@ public:
+ 
+ #if defined(_WIN32)
+         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
++#elif defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
++        detail::JitPool::instance().release(m_slot);
+ #else
+         munmap(m_memory, m_size);
+ #endif
+@@ -70,6 +195,28 @@ public:
+         return m_memory;
+     }
+ 
++    /// Writable mirror of the memory. The same as ptr() except on an iOS device.
++    std::uint32_t* wptr() const
++    {
++        return m_wmemory;
++    }
++
++    /// Executable mirror of the memory.
++    std::uint32_t* xptr() const
++    {
++        return m_memory;
++    }
++
++    /// Lets go of the debugger once the first block's prelude is written; the
++    /// mappings stay valid. A no-op everywhere but an iOS device.
++    void detach_jit_server()
++    {
++#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
++        if (detail::JitPool::instance().take_detach())
++            detail::detach_jit_server();
++#endif
++    }
++
+     void protect()
+     {
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+@@ -137,7 +284,11 @@ public:
+ 
+ protected:
+     std::uint32_t* m_memory;
++    std::uint32_t* m_wmemory = nullptr;
+     std::size_t m_size = 0;
++#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
++    int m_slot = -1;
++#endif
+ };
+ 
+ }  // namespace oaknut
