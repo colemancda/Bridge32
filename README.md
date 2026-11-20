@@ -71,7 +71,27 @@ xcrun simctl install booted build/apps-ios/Game.app
 
 The simulator is a Mac process, so dynarmic's JIT works as it does on the
 Mac. Window sizing and title bar code is Catalyst-only; on iOS the guest's
-screen is hosted in the full-screen scene. Device builds are not done yet.
+screen is hosted in the full-screen scene.
+
+### iOS device (experimental, not yet run on hardware)
+
+```sh
+cmake -S . -B build/ios -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/ios-device.cmake
+cmake --build build/ios
+tools/make-app.sh --platform ios Game.ipa build/apps-ios-device/Game.app
+```
+
+This builds libffi from `external/libffi` (the device SDK has none) and
+applies `external/patches` to dynarmic and oaknut. The app then needs signing
+with a real identity and a profile that allows `get-task-allow`.
+
+An iOS device only lets a process have executable memory while a debugger is
+attached. The app starts with a screen that waits for JIT and has a button
+that asks [StikDebug](https://github.com/StephenDev0/StikDebug) to enable it
+(`stikdebug://enable-jit`); once the process has `CS_DEBUGGED`, the guest
+starts. oaknut asks the debugger for one executable region with `brk #0xf00d`
+and shares it between the guest's threads. `B32_JIT_GATE=<seconds>` forces the
+screen on a Mac or in the simulator and opens it after that long, for testing.
 
 ## Wrapping an app
 
@@ -131,6 +151,7 @@ when an app misbehaves:
 | `B32_HEAP_QUARANTINE=1` | Never reuse freed guest blocks, for use-after-free |
 | `B32_NO_FASTMEM=1` | Route guest memory through callbacks so a debugger sees host crashes directly (slow) |
 | `B32_NO_SDK_STUBS=1` | Don't replace methods of stubbed third-party SDKs |
+| `B32_JIT_GATE=n` | iOS: show the "waiting for JIT" screen, and open it after n seconds (for testing without a device) |
 
 ## Command-line tools
 
