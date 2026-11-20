@@ -16,6 +16,7 @@
 
 #include "GLES.h"
 
+#include "core/HostPaths.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
@@ -47,7 +48,7 @@ constexpr uint32_t GL_COLOR_ATTACHMENT0 = 0x8CE0;
 
 template <typename F> F glFunction(const char *name) {
     static void *library =
-        dlopen("/System/iOSSupport/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW | RTLD_GLOBAL);
+        dlopen(B32_IOS_SUPPORT "/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW | RTLD_GLOBAL);
     return reinterpret_cast<F>(dlsym(library, name));
 }
 
