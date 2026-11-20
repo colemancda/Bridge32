@@ -1,5 +1,6 @@
 #include "Runtime.h"
 
+#include "core/HostPaths.h"
 #include "core/Log.h"
 #include "core/mem/Layout.h"
 #include "core/objc/Bridge.h"
@@ -199,7 +200,7 @@ namespace {
 // Loads the host's copy of a framework the guest links, preferring the
 // iOSSupport (Mac Catalyst) variant, so its classes and constants exist.
 void loadHostLibrary(const std::string &path) {
-    for (std::string candidate : {"/System/iOSSupport" + path, path})
+    for (std::string candidate : {std::string(B32_IOS_SUPPORT) + path, path})
         if (dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL)) return;
     log("no host library for %s", path.c_str());
 }
