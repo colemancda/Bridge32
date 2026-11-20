@@ -73,23 +73,51 @@ target_link_libraries(b32-inspect PRIVATE b32core)
 
 # The Mac Catalyst shell (configure with -DCMAKE_TOOLCHAIN_FILE=cmake/catalyst.cmake).
 # Games are wrapped into copies of it by tools/make-app.sh.
-if(B32_CATALYST)
+if(B32_CATALYST OR B32_IOS)
     if(NOT B32_HAVE_DYNARMIC)
-        message(FATAL_ERROR "The Catalyst shell needs dynarmic in external/dynarmic")
+        message(FATAL_ERROR "The UIKit shell needs dynarmic in external/dynarmic")
+    endif()
+    if(B32_IOS)
+        # No ffi headers in the iOS SDKs; see cmake/ios-simulator.cmake.
+        # Only ffi/ is exposed (the macOS SDK's whole usr/include would shadow
+        # libc++'s headers), and its API_UNAVAILABLE(ios) is dropped: the iOS
+        # SDKs' libffi.tbd exports every symbol, only the header hides them.
+        file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/ffi-include")
+        file(COPY "${B32_FFI_HEADERS_DIR}" DESTINATION "${CMAKE_BINARY_DIR}/ffi-include")
+        file(READ "${CMAKE_BINARY_DIR}/ffi-include/ffi/ffi.h" B32_FFI_H)
+        string(REPLACE " API_UNAVAILABLE(ios, tvos, watchos)" "" B32_FFI_H "${B32_FFI_H}")
+        file(WRITE "${CMAKE_BINARY_DIR}/ffi-include/ffi/ffi.h" "${B32_FFI_H}")
+        target_include_directories(b32core PUBLIC "${CMAKE_BINARY_DIR}/ffi-include")
+        target_compile_definitions(b32core PUBLIC B32_IOS=1)
     endif()
     target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/uikit/GameControllerCompat.mm core/uikit/eventloop.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
         core/audio/audio.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
-    target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework CoreData" "-framework Security" "-framework GameController"
+    target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework CoreData" "-framework Security" "-framework GameController" "-framework CoreVideo"
         "-framework CoreLocation")
 
     add_executable(Bridge32 MACOSX_BUNDLE app/main.mm)
     target_link_libraries(Bridge32 PRIVATE b32core)
     target_compile_options(Bridge32 PRIVATE -fno-objc-arc)
+    if(B32_IOS)
+        set(B32_INFO_PLIST "${CMAKE_SOURCE_DIR}/app/Info-ios.plist")
+        set(B32_ENTITLEMENTS "${CMAKE_SOURCE_DIR}/app/Bridge32-ios.entitlements")
+    else()
+        set(B32_INFO_PLIST "${CMAKE_SOURCE_DIR}/app/Info.plist")
+        set(B32_ENTITLEMENTS "${CMAKE_SOURCE_DIR}/app/Bridge32.entitlements")
+    endif()
     set_target_properties(Bridge32 PROPERTIES
-        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/app/Info.plist"
+        MACOSX_BUNDLE_INFO_PLIST "${B32_INFO_PLIST}"
         OUTPUT_NAME Bridge32)
+    # The simulator refuses ad hoc binaries with get-task-allow ("Security
+    # policy issue") and doesn't need it: it runs as a Mac process, where
+    # JIT works. A device build needs it for the debugger that enables JIT.
+    if(B32_IOS_SIMULATOR)
+        set(B32_CODESIGN_ENTITLEMENTS "")
+    else()
+        set(B32_CODESIGN_ENTITLEMENTS --entitlements "${B32_ENTITLEMENTS}")
+    endif()
     add_custom_command(TARGET Bridge32 POST_BUILD
-        COMMAND codesign --force --sign - --entitlements "${CMAKE_SOURCE_DIR}/app/Bridge32.entitlements"
+        COMMAND codesign --force --sign - ${B32_CODESIGN_ENTITLEMENTS}
                 "$<TARGET_BUNDLE_DIR:Bridge32>"
         COMMENT "Signing Bridge32.app (ad hoc)")
 endif()
