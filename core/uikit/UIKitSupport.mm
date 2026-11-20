@@ -300,6 +300,7 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 // so the smallest window still shows the guest at full size.
 - (void)safeAreaInsetsDidChange {
     [super safeAreaInsetsDidChange];
+#if TARGET_OS_MACCATALYST
     UIEdgeInsets insets = self.safeAreaInsets;
     UIWindowScene *scene = self.window.windowScene;
     CGSize size = sceneSize();
@@ -323,6 +324,7 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
         [scene requestGeometryUpdateWithPreferences:[[[UIWindowSceneGeometryPreferencesMac alloc] initWithSystemFrame:frame] autorelease]
                                        errorHandler:nil];
     }
+#endif  // On iOS the scene fills the screen; there is no window to size.
     layoutGuestWindows();
 }
 
@@ -335,9 +337,16 @@ bool isMainBundle(id receiver) { return receiver == [NSBundle mainBundle]; }
 // The value of an Info.plist key for the guest's device (`key~iphone` or
 // `key~ipad`), else the plain key. Read from the plist itself: NSBundle
 // applies the Mac's own (iPad) suffix to the plain key.
+// Catalyst bundles keep their Info.plist in Contents/; iOS bundles are flat.
+#if TARGET_OS_MACCATALYST
+static NSString *const kBundleInfoPlist = @"Contents/Info.plist";
+#else
+static NSString *const kBundleInfoPlist = @"Info.plist";
+#endif
+
 static NSString *deviceInfoValue(NSString *key) {
     static NSDictionary *info = [[NSDictionary alloc]
-        initWithContentsOfURL:[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Contents/Info.plist"]];
+        initWithContentsOfURL:[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:kBundleInfoPlist]];
     NSString *suffix = std::strncmp(device::current().machine, "iPad", 4) == 0 ? @"~ipad" : @"~iphone";
     return info[[key stringByAppendingString:suffix]] ?: info[key];
 }
@@ -419,8 +428,10 @@ void forwardToAppDelegate(SEL selector) {
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     UIWindowScene *windowScene = (UIWindowScene *)scene;
     guestScene = windowScene;
+#if TARGET_OS_MACCATALYST
     windowScene.sizeRestrictions.minimumSize = sceneSize();
     windowScene.sizeRestrictions.maximumSize = CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX);
+#endif
     UIWindow *backdropWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
     backdropWindow.windowLevel = UIWindowLevelNormal - 1;
     backdropWindow.backgroundColor = UIColor.blackColor;
@@ -431,7 +442,9 @@ void forwardToAppDelegate(SEL selector) {
     NSBundle *bundle = [NSBundle mainBundle];
     windowScene.title = [bundle objectForInfoDictionaryKey:@"CFBundleDisplayName"]
                             ?: [bundle objectForInfoDictionaryKey:@"CFBundleName"];
+#if TARGET_OS_MACCATALYST
     guardSidebarDivider();
+#endif
 
     for (UIWindow *window in pendingWindows) {
         window.windowScene = windowScene;
@@ -486,7 +499,7 @@ NSString *namedDelegateClass;  // the class UIApplicationMain named, if any
 // (iPad) suffix to the plain key.
 + (NSString *)mainNibName {
     static NSDictionary *info = [[NSDictionary alloc]
-        initWithContentsOfURL:[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:@"Contents/Info.plist"]];
+        initWithContentsOfURL:[NSBundle.mainBundle.bundleURL URLByAppendingPathComponent:kBundleInfoPlist]];
     NSString *key = std::strncmp(device::current().machine, "iPad", 4) == 0 ? @"NSMainNibFile~ipad" : @"NSMainNibFile~iphone";
     return info[key] ?: info[@"NSMainNibFile"];
 }
