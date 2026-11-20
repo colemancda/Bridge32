@@ -18,7 +18,7 @@ developer: id Software   # only if the evidence states it or it is unambiguous
 reports:
   - date: 2026-11-19     # the PR's merge date, or the commit's date
     bridge32: "0a1b2c3d" # the merge commit or the commit, 8 characters, always quoted
-    pr: 19               # only when the evidence is a pull request
+    pr: 19               # the pull request it rests on, or that holds its screenshots
     guest: i386          # armv6 | armv7 | i386 | ppc
     app_version: "1.3.1" # only if stated, always quoted
     level: 3
@@ -65,7 +65,7 @@ Screenshots are never stored in this repository. Attach the image to a pull requ
 - `https://github.com/colemancda/Bridge32/assets/<id>/<uuid>`
 - `https://user-images.githubusercontent.com/<id>/<name>`
 
-A report with screenshots needs its `pr`. Don't attach an image that shows an email address, an account name, a street address, a phone number, a precise location, a device serial or message content.
+A report with screenshots needs its `pr`. For a report that rests on a commit or the README, `pr` is the pull request its screenshots are attached to, and the report still links its commit. Don't attach an image that shows an email address, an account name, a street address, a phone number, a precise location, a device serial or message content.
 
 ## Checking and building
 
