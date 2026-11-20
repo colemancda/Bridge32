@@ -38,9 +38,10 @@ layout: default
   <p class="report-meta">
     {%- if report.guest %}Guest: {{ report.guest }} · {% endif -%}
     {%- if report.app_version %}Version {{ report.app_version | escape }} · {% endif -%}
-    {%- if report.pr %}<a href="https://github.com/colemancda/Bridge32/pull/{{ report.pr }}">Pull request #{{ report.pr }}</a> · {% endif -%}
+    {%- if report.source == "pr" %}<a href="https://github.com/colemancda/Bridge32/pull/{{ report.pr }}">Pull request #{{ report.pr }}</a> · {% endif -%}
     Commit <a href="https://github.com/colemancda/Bridge32/commit/{{ report.bridge32 }}"><code>{{ report.bridge32 }}</code></a>
-    {%- unless report.pr %} ({{ report.source }}){% endunless -%}
+    {%- unless report.source == "pr" %} ({{ report.source }}){% endunless -%}
+    {%- if report.pr and report.source != "pr" %} · Screenshots from <a href="https://github.com/colemancda/Bridge32/pull/{{ report.pr }}">pull request #{{ report.pr }}</a>{% endif -%}
   </p>
   {%- if report.screenshots %}
   <div class="screenshots">
