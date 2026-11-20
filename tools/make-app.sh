@@ -4,10 +4,11 @@
 #
 #   tools/make-app.sh [--orientation landscape-right|landscape-left|portrait] [--guest-libs DIR]
 #                     [--controller tilt|swipe] [--fps] [--device iphone|ipad]
-#                     [--platform catalyst|ios-sim] Game.ipa [Out.app]
+#                     [--platform catalyst|ios-sim|ios] Game.ipa [Out.app]
 #
 # --platform picks the shell the game is wrapped into: the Mac Catalyst one
-# (default, build/catalyst) or the iOS Simulator one (build/ios-sim). iOS
+# (default, build/catalyst), the iOS Simulator one (build/ios-sim) or the iOS
+# device one (build/ios; sign it with a real identity before installing). iOS
 # bundles are flat, with the game's files beside the executable.
 #
 # --fps shows a frame rate counter and logs slow frames (or run with
@@ -55,7 +56,10 @@ catalyst)
 ios-sim)
     shell_app="${shell_app:-$root/build/ios-sim/Bridge32.app}"
     contents=""; resources_dir=""; base_plist="$root/app/Info-ios.plist" ;;
-*) echo "--platform is catalyst or ios-sim" >&2; exit 1 ;;
+ios)
+    shell_app="${shell_app:-$root/build/ios/Bridge32.app}"
+    contents=""; resources_dir=""; base_plist="$root/app/Info-ios.plist" ;;
+*) echo "--platform is catalyst, ios-sim or ios" >&2; exit 1 ;;
 esac
 [ -d "$shell_app" ] || { echo "build the shell first: cmake --build build/${shell_app%/Bridge32.app}" >&2; exit 1; }
 
@@ -105,6 +109,7 @@ if [ -n "$guest_libs" ]; then
 fi
 
 python3 -I "$here/merge-plist.py" "$guest/Info.plist" "$base_plist" "$info_plist" "$(basename "$guest")" $orientation
+[ "$platform" = ios ] && /usr/libexec/PlistBuddy -c "Set :CFBundleSupportedPlatforms:0 iPhoneOS" "$info_plist"
 
 # The device the guest sees, when its UIDeviceFamily says otherwise (iPad
 # builds relabelled for iPhone).
