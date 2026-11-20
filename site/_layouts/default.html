@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {%- if page.collection == "apps" -%}
+    {%- assign page_title = page.name -%}
+  {%- else -%}
+    {%- assign page_title = page.title -%}
+  {%- endif %}
+  <title>{% if page_title and page.url != "/" %}{{ page_title | escape }} · {% endif %}{{ site.title | escape }}</title>
+  <meta name="description" content="{{ site.description | escape }}">
+  <link rel="stylesheet" href="{{ '/assets/site.css' | relative_url }}">
+</head>
+<body>
+  <header class="site-header">
+    <nav aria-label="Site">
+      <a class="site-title" href="{{ '/' | relative_url }}">{{ site.title | escape }}</a>
+      <a href="{{ '/' | relative_url }}"{% if page.url == "/" %} aria-current="page"{% endif %}>Home</a>
+      <a href="{{ '/compatibility/' | relative_url }}"{% if page.url == "/compatibility/" or page.collection == "apps" %} aria-current="page"{% endif %}>Compatibility</a>
+      <a href="{{ '/contributing/' | relative_url }}"{% if page.url == "/contributing/" %} aria-current="page"{% endif %}>Contributing</a>
+      <a href="https://github.com/colemancda/Bridge32">GitHub</a>
+    </nav>
+  </header>
+  <main>
+    {{ content }}
+  </main>
+  <footer class="site-footer">
+    Built from the <a href="https://github.com/colemancda/Bridge32">{{ site.title | escape }}</a> repository's pull requests, commits and README.
+  </footer>
+</body>
+</html>
