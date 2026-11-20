@@ -57,6 +57,22 @@ This builds `build/catalyst/Bridge32.app`, the shell every app is wrapped
 into. A plain host build (`cmake -S . -B build/host -G Ninja`) gives only the
 command-line tools.
 
+### iOS Simulator (experimental)
+
+The same shell builds for the iOS Simulator, the first step toward running
+on a device:
+
+```sh
+cmake -S . -B build/ios-sim -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/ios-simulator.cmake
+cmake --build build/ios-sim
+tools/make-app.sh --platform ios-sim Game.ipa build/apps-ios/Game.app
+xcrun simctl install booted build/apps-ios/Game.app
+```
+
+The simulator is a Mac process, so dynarmic's JIT works as it does on the
+Mac. Window sizing and title bar code is Catalyst-only; on iOS the guest's
+screen is hosted in the full-screen scene. Device builds are not done yet.
+
 ## Wrapping an app
 
 ```sh
