@@ -5,9 +5,13 @@ kind: game
 reports:
   - date: 2026-10-31
     bridge32: "7b686cc0"
+    pr: 24
     level: 2
     source: commit
     notes: Reaches its title screen.
+    screenshots:
+      - url: https://github.com/user-attachments/assets/20e7e9dc-498c-4e04-80f9-c4295908d069
+        caption: Title screen, from a later run
   - date: 2026-10-31
     bridge32: "2e48fa13"
     app_version: "1.5.0"
