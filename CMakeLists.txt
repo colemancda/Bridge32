@@ -11,6 +11,28 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# iOS needs dynarmic and oaknut patched to take executable memory from a
+# debugger (see external/patches). Applied once to the submodule working
+# trees, which then show as modified; skipped if already applied.
+if(B32_IOS)
+    foreach(pair "external/dynarmic/externals/oaknut|oaknut-ios-jit.patch" "external/dynarmic|dynarmic-ios-jit.patch")
+        string(REPLACE "|" ";" pair "${pair}")
+        list(GET pair 0 patch_dir)
+        list(GET pair 1 patch_file)
+        if(EXISTS "${CMAKE_SOURCE_DIR}/${patch_dir}/CMakeLists.txt" OR EXISTS "${CMAKE_SOURCE_DIR}/${patch_dir}/include")
+            execute_process(COMMAND git apply --check --reverse "${CMAKE_SOURCE_DIR}/external/patches/${patch_file}"
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/${patch_dir}" RESULT_VARIABLE already_applied OUTPUT_QUIET ERROR_QUIET)
+            if(NOT already_applied EQUAL 0)
+                execute_process(COMMAND git apply "${CMAKE_SOURCE_DIR}/external/patches/${patch_file}"
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/${patch_dir}" RESULT_VARIABLE apply_result)
+                if(NOT apply_result EQUAL 0)
+                    message(FATAL_ERROR "Can't apply external/patches/${patch_file} in ${patch_dir}")
+                endif()
+            endif()
+        endif()
+    endforeach()
+endif()
+
 # dynarmic (A32 frontend, arm64 backend) runs the guest code. Without it only
 # the loader tools build.
 set(B32_DYNARMIC_DIR "${CMAKE_SOURCE_DIR}/external/dynarmic" CACHE PATH "dynarmic source tree")
@@ -78,15 +100,42 @@ if(B32_CATALYST OR B32_IOS)
         message(FATAL_ERROR "The UIKit shell needs dynarmic in external/dynarmic")
     endif()
     if(B32_IOS)
-        # No ffi headers in the iOS SDKs; see cmake/ios-simulator.cmake.
-        # Only ffi/ is exposed (the macOS SDK's whole usr/include would shadow
-        # libc++'s headers), and its API_UNAVAILABLE(ios) is dropped: the iOS
-        # SDKs' libffi.tbd exports every symbol, only the header hides them.
+        # <ffi/ffi.h> comes from the build tree. The simulator SDK ships
+        # libffi.tbd but no headers, and the macOS SDK's say API_UNAVAILABLE(ios)
+        # (dropped here: the library does export everything); the device SDK has
+        # no libffi at all, so it's built from external/libffi.
         file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/ffi-include")
-        file(COPY "${B32_FFI_HEADERS_DIR}" DESTINATION "${CMAKE_BINARY_DIR}/ffi-include")
-        file(READ "${CMAKE_BINARY_DIR}/ffi-include/ffi/ffi.h" B32_FFI_H)
-        string(REPLACE " API_UNAVAILABLE(ios, tvos, watchos)" "" B32_FFI_H "${B32_FFI_H}")
-        file(WRITE "${CMAKE_BINARY_DIR}/ffi-include/ffi/ffi.h" "${B32_FFI_H}")
+        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/ffi-include")
+        if(B32_IOS_SIMULATOR)
+            file(COPY "${B32_FFI_HEADERS_DIR}" DESTINATION "${CMAKE_BINARY_DIR}/ffi-include")
+            file(READ "${CMAKE_BINARY_DIR}/ffi-include/ffi/ffi.h" B32_FFI_H)
+            string(REPLACE " API_UNAVAILABLE(ios, tvos, watchos)" "" B32_FFI_H "${B32_FFI_H}")
+            file(WRITE "${CMAKE_BINARY_DIR}/ffi-include/ffi/ffi.h" "${B32_FFI_H}")
+        else()
+            include(ExternalProject)
+            execute_process(COMMAND xcrun --sdk iphoneos --show-sdk-path OUTPUT_VARIABLE B32_IPHONEOS_SDK OUTPUT_STRIP_TRAILING_WHITESPACE)
+            set(B32_FFI_PREFIX "${CMAKE_BINARY_DIR}/libffi-install")
+            # Built from a copy: autogen.sh would dirty the submodule. A
+            # different --build makes configure cross-compile, so it doesn't try
+            # to run its iOS test programs on the Mac.
+            ExternalProject_Add(libffi_ext
+                PREFIX "${CMAKE_BINARY_DIR}/libffi"
+                SOURCE_DIR "${CMAKE_BINARY_DIR}/libffi/src"
+                DOWNLOAD_COMMAND "${CMAKE_COMMAND}" -E copy_directory "${CMAKE_SOURCE_DIR}/external/libffi" "${CMAKE_BINARY_DIR}/libffi/src"
+                CONFIGURE_COMMAND sh -c "./autogen.sh && ./configure --build=x86_64-apple-darwin --host=aarch64-apple-darwin --prefix=${B32_FFI_PREFIX} --disable-shared --enable-static --disable-docs --disable-multi-os-directory CC=/usr/bin/clang 'CFLAGS=-arch arm64 -isysroot ${B32_IPHONEOS_SDK} -miphoneos-version-min=17.0 -O2 -g' 'LDFLAGS=-arch arm64 -isysroot ${B32_IPHONEOS_SDK}'"
+                BUILD_COMMAND make -j8
+                INSTALL_COMMAND make install
+                BUILD_IN_SOURCE TRUE
+                BUILD_BYPRODUCTS "${B32_FFI_PREFIX}/lib/libffi.a")
+            file(MAKE_DIRECTORY "${B32_FFI_PREFIX}/include")
+            file(CREATE_LINK "${B32_FFI_PREFIX}/include" "${CMAKE_BINARY_DIR}/ffi-include/ffi" SYMBOLIC)
+            add_library(ffi STATIC IMPORTED)
+            set_target_properties(ffi PROPERTIES IMPORTED_LOCATION "${B32_FFI_PREFIX}/lib/libffi.a")
+            add_dependencies(ffi libffi_ext)
+            add_dependencies(b32core libffi_ext)
+            # ffi.h includes <ffitarget.h> from its own directory.
+            target_include_directories(b32core PUBLIC "${B32_FFI_PREFIX}/include")
+        endif()
         target_include_directories(b32core PUBLIC "${CMAKE_BINARY_DIR}/ffi-include")
         target_compile_definitions(b32core PUBLIC B32_IOS=1)
     endif()
@@ -115,6 +164,11 @@ if(B32_CATALYST OR B32_IOS)
         set(B32_CODESIGN_ENTITLEMENTS "")
     else()
         set(B32_CODESIGN_ENTITLEMENTS --entitlements "${B32_ENTITLEMENTS}")
+    endif()
+    if(B32_IOS AND NOT B32_IOS_SIMULATOR)
+        # app/Info-ios.plist is the simulator's; a device build says iPhoneOS.
+        add_custom_command(TARGET Bridge32 POST_BUILD
+            COMMAND /usr/libexec/PlistBuddy -c "Set :CFBundleSupportedPlatforms:0 iPhoneOS" "$<TARGET_BUNDLE_DIR:Bridge32>/Info.plist")
     endif()
     add_custom_command(TARGET Bridge32 POST_BUILD
         COMMAND codesign --force --sign - ${B32_CODESIGN_ENTITLEMENTS}
