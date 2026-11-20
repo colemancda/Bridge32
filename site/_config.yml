@@ -1,0 +1,21 @@
+title: Bridge32
+description: Which 32-bit iOS and Mac apps run on Apple Silicon Macs under Bridge32, and how far they get.
+url: https://colemancda.github.io
+baseurl: /Bridge32
+markdown: kramdown
+
+collections:
+  apps:
+    output: true
+    permalink: /apps/:name/
+
+defaults:
+  - scope: { type: apps }
+    values: { layout: app }
+  - scope: { type: pages }
+    values: { layout: default }
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
