@@ -12,6 +12,7 @@
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/gl/GLES.h"
+#include "core/uikit/JitGate.h"
 #include "core/thunks/MainQueue.h"
 #include "core/objc/Dispatch.h"
 
@@ -446,6 +447,13 @@ void forwardToAppDelegate(SEL selector) {
     guardSidebarDivider();
 #endif
 
+    // Waiting for JIT: the guest isn't running yet. It starts when the gate
+    // opens, and its windows then attach to this scene as they're made.
+    if (uikit::jitGateStartedUIKit()) {
+        uikit::presentJitGate(windowScene);
+        return;
+    }
+
     for (UIWindow *window in pendingWindows) {
         window.windowScene = windowScene;
         orient(window);
@@ -636,6 +644,52 @@ B32_THUNK(_UIApplicationMain) {
     if ([B32NibAppDelegate mainNibName]) {
         namedDelegateClass = [hostName(delegate) copy];
         delegate = @"B32NibAppDelegate";
+    }
+    if (uikit::jitGateStartedUIKit()) {
+        // UIKit is already running, for the JIT gate, and the scene has
+        // connected: do what UIKit does after the scene's connection and the
+        // launch, in this order, then keep the app's run loop going.
+        if (principal && ![principal isEqualToString:@"UIApplication"])
+            log("principal class %s can't be used: UIKit was started before the guest", principal.UTF8String);
+        UIApplication *application = UIApplication.sharedApplication;
+        id delegateObject = nil;
+        if (NSString *name = hostName(delegate)) {
+            if ([B32NibAppDelegate mainNibName]) {
+                // Nib apps: the stand-in loads the nib, which sets the real delegate.
+                B32NibAppDelegate *stand = [[B32NibAppDelegate alloc] init];
+                application.delegate = stand;
+                [stand application:application willFinishLaunchingWithOptions:nil];
+            } else {
+                delegateObject = [[NSClassFromString(name) alloc] init];
+                application.delegate = delegateObject;
+                SEL will = @selector(application:willFinishLaunchingWithOptions:);
+                if ([delegateObject respondsToSelector:will])
+                    reinterpret_cast<BOOL (*)(id, SEL, id, id)>(objc_msgSend)(delegateObject, will, application, nil);
+            }
+        } else if ([B32NibAppDelegate mainNibName]) {
+            B32NibAppDelegate *stand = [[B32NibAppDelegate alloc] init];
+            application.delegate = stand;
+            [stand application:application willFinishLaunchingWithOptions:nil];
+        }
+        id launchedDelegate = application.delegate;
+        SEL did = @selector(application:didFinishLaunchingWithOptions:);
+        SEL didOld = @selector(applicationDidFinishLaunching:);
+        if ([launchedDelegate respondsToSelector:did])
+            reinterpret_cast<BOOL (*)(id, SEL, id, id)>(objc_msgSend)(launchedDelegate, did, application, nil);
+        else if ([launchedDelegate respondsToSelector:didOld])
+            reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(launchedDelegate, didOld, application);
+
+        // As at the end of the scene's connection.
+        bool hadWindows = guestWindows.count > 0;
+        for (UIWindow *window in guestWindows) [window layoutIfNeeded];
+        if (!hadWindows) loadMainStoryboard();
+        launching = false;
+        for (dispatch_block_t work in heldLaunchWork) dispatch_async(dispatch_get_main_queue(), work);
+        [heldLaunchWork removeAllObjects];
+        launched = true;
+        forwardToAppDelegate(@selector(applicationDidBecomeActive:));
+        log("guest launched inside the running app");
+        for (;;) CFRunLoopRun();
     }
     c.ret(uint32_t(UIApplicationMain(*_NSGetArgc(), *_NSGetArgv(), hostName(principal), hostName(delegate))));
 }
