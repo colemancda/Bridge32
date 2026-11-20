@@ -139,7 +139,7 @@ if(B32_CATALYST OR B32_IOS)
         target_include_directories(b32core PUBLIC "${CMAKE_BINARY_DIR}/ffi-include")
         target_compile_definitions(b32core PUBLIC B32_IOS=1)
     endif()
-    target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/uikit/GameControllerCompat.mm core/uikit/eventloop.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
+    target_sources(b32core PRIVATE core/objc/foundation.mm core/uikit/UIKitSupport.mm core/uikit/AlertView.mm core/uikit/MoviePlayer.mm core/uikit/JitGate.mm core/uikit/frameworks.mm core/uikit/images.mm core/uikit/Controller.mm core/uikit/GameControllerCompat.mm core/uikit/eventloop.mm core/games/CodZombies.mm core/gl/gles.mm core/gl/renderscale.mm
         core/audio/audio.mm core/audio/audioqueue.mm core/audio/audiounit.mm)
     target_link_libraries(b32core PUBLIC "-framework UIKit" "-framework AudioToolbox" "-framework MapKit" "-framework MediaPlayer" "-framework ImageIO" "-framework QuartzCore" "-framework CoreMedia" "-framework CoreData" "-framework Security" "-framework GameController" "-framework CoreVideo"
         "-framework CoreLocation")
