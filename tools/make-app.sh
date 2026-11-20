@@ -3,7 +3,12 @@
 # Catalyst app that runs it through Bridge32.
 #
 #   tools/make-app.sh [--orientation landscape-right|landscape-left|portrait] [--guest-libs DIR]
-#                     [--controller tilt|swipe] [--fps] [--device iphone|ipad] Game.ipa [Out.app]
+#                     [--controller tilt|swipe] [--fps] [--device iphone|ipad]
+#                     [--platform catalyst|ios-sim] Game.ipa [Out.app]
+#
+# --platform picks the shell the game is wrapped into: the Mac Catalyst one
+# (default, build/catalyst) or the iOS Simulator one (build/ios-sim). iOS
+# bundles are flat, with the game's files beside the executable.
 #
 # --fps shows a frame rate counter and logs slow frames (or run with
 # B32_SHOW_FPS=1).
@@ -23,7 +28,8 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
-shell_app="${B32_SHELL_APP:-$root/build/catalyst/Bridge32.app}"
+platform="catalyst"
+shell_app="${B32_SHELL_APP:-}"
 orientation=""
 guest_libs="${B32_GUEST_LIBS:-}"
 controller=""
@@ -36,12 +42,22 @@ while :; do
     --controller) controller=$2; shift 2 ;;
     --device) device=$2; shift 2 ;;
     --fps) fps=1; shift ;;
+    --platform) platform=$2; shift 2 ;;
     *) break ;;
     esac
 done
 input=$1
 
-[ -d "$shell_app" ] || { echo "build the Catalyst shell first: cmake --build build/catalyst" >&2; exit 1; }
+case "$platform" in
+catalyst)
+    shell_app="${shell_app:-$root/build/catalyst/Bridge32.app}"
+    contents="Contents"; resources_dir="Contents/Resources"; base_plist="$root/app/Info.plist" ;;
+ios-sim)
+    shell_app="${shell_app:-$root/build/ios-sim/Bridge32.app}"
+    contents=""; resources_dir=""; base_plist="$root/app/Info-ios.plist" ;;
+*) echo "--platform is catalyst or ios-sim" >&2; exit 1 ;;
+esac
+[ -d "$shell_app" ] || { echo "build the shell first: cmake --build build/${shell_app%/Bridge32.app}" >&2; exit 1; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -64,7 +80,8 @@ rm -rf "$out"
 cp -R "$shell_app" "$out"
 
 # Guest files, minus its iOS signature and FairPlay leftovers.
-resources="$out/Contents/Resources"
+resources="${out}${resources_dir:+/$resources_dir}"
+info_plist="${out}${contents:+/$contents}/Info.plist"
 mkdir -p "$resources"
 (cd "$guest" && tar cf - --exclude _CodeSignature --exclude SC_Info --exclude embedded.mobileprovision \
     --exclude CodeResources --exclude ResourceRules.plist .) | (cd "$resources" && tar xf -)
@@ -87,7 +104,7 @@ if [ -n "$guest_libs" ]; then
     done
 fi
 
-python3 -I "$here/merge-plist.py" "$guest/Info.plist" "$root/app/Info.plist" "$out/Contents/Info.plist" "$(basename "$guest")" $orientation
+python3 -I "$here/merge-plist.py" "$guest/Info.plist" "$base_plist" "$info_plist" "$(basename "$guest")" $orientation
 
 # The device the guest sees, when its UIDeviceFamily says otherwise (iPad
 # builds relabelled for iPhone).
@@ -99,11 +116,11 @@ ipad) family=2 ;;
 esac
 if [ -n "$family" ]; then
     /usr/libexec/PlistBuddy -c "Delete :B32GuestDeviceFamily" -c "Add :B32GuestDeviceFamily array" \
-        -c "Add :B32GuestDeviceFamily:0 integer $family" "$out/Contents/Info.plist"
+        -c "Add :B32GuestDeviceFamily:0 integer $family" "$info_plist"
 fi
 
-[ -n "$controller" ] && /usr/libexec/PlistBuddy -c "Add :B32Controller string $controller" "$out/Contents/Info.plist"
-[ -n "$fps" ] && /usr/libexec/PlistBuddy -c "Add :B32ShowFPS bool true" "$out/Contents/Info.plist"
+[ -n "$controller" ] && /usr/libexec/PlistBuddy -c "Add :B32Controller string $controller" "$info_plist"
+[ -n "$fps" ] && /usr/libexec/PlistBuddy -c "Add :B32ShowFPS bool true" "$info_plist"
 
 "$here/sign-app.sh" "$out"
 echo "$out"
