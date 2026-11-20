@@ -8,14 +8,23 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
 app=$1
-resources="$app/Contents/Resources"
+# A Catalyst app keeps its files in Contents/; an iOS one is flat.
+if [ -d "$app/Contents" ]; then
+    resources="$app/Contents/Resources"
+    info_plist="$info_plist"
+    base_entitlements="$root/app/Bridge32.entitlements"
+else
+    resources="$app"
+    info_plist="$app/Info.plist"
+    base_entitlements="$root/app/Bridge32-ios.entitlements"
+fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 entitlements="$work/entitlements.plist"
-cp "$root/app/Bridge32.entitlements" "$entitlements"
+cp "$base_entitlements" "$entitlements"
 
-executable=$(/usr/libexec/PlistBuddy -c "Print :B32GuestExecutable" "$app/Contents/Info.plist")
+executable=$(/usr/libexec/PlistBuddy -c "Print :B32GuestExecutable" "$info_plist")
 links_bluetooth=no
 for binary in "$resources/$executable" "$resources"/Frameworks/*.dylib "$resources"/Frameworks/*.framework/*; do
     [ -f "$binary" ] || continue
@@ -27,4 +36,9 @@ done
 [ "$links_bluetooth" = yes ] &&
     /usr/libexec/PlistBuddy -c "Add :com.apple.security.device.bluetooth bool true" "$entitlements"
 
-codesign --force --sign - --entitlements "$entitlements" "$app"
+# The simulator refuses ad hoc binaries with get-task-allow, and doesn't need it.
+if /usr/libexec/PlistBuddy -c "Print :CFBundleSupportedPlatforms" "$info_plist" | grep -q iPhoneSimulator; then
+    codesign --force --sign - "$app"
+else
+    codesign --force --sign - --entitlements "$entitlements" "$app"
+fi
