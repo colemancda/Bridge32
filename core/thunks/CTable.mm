@@ -1,5 +1,6 @@
 #include "CTable.h"
 
+#include "core/HostPaths.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
@@ -147,7 +148,7 @@ void cThunk(Call &c) {
     bool isGL = checkGL && std::strncmp(c.name, "_gl", 3) == 0 && std::strcmp(c.name, "_glGetError") != 0;
     static auto getError = [] {
         // OpenGL ES's, not macOS's own libGL (which RTLD_DEFAULT would find).
-        void *gles = dlopen("/System/iOSSupport/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW);
+        void *gles = dlopen(B32_IOS_SUPPORT "/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW);
         auto fn = reinterpret_cast<uint32_t (*)()>(dlsym(gles, "glGetError"));
         if (checkGL) log("checking GL errors (%s)", fn ? "on" : "glGetError not found");
         return fn;
