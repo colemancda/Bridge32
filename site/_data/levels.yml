@@ -1,0 +1,15 @@
+- level: 1
+  name: Loads
+  description: Starts, then stops or crashes.
+- level: 2
+  name: First screen
+  description: Reaches a splash or title screen, a launcher, a welcome window or the dialogs before a menu.
+- level: 3
+  name: Main content, major issues
+  description: Reaches a main menu, an editor window or a level, with problems stated or no claim of being usable.
+- level: 4
+  name: Usable
+  description: Plays, or does its main job, with only small issues named.
+- level: 5
+  name: Complete
+  description: Everything tested works.

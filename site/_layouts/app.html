@@ -1,0 +1,65 @@
+---
+layout: default
+---
+{%- assign current = page.reports | last -%}
+{%- assign current_level = site.data.levels | where: "level", current.level | first -%}
+{%- assign guests = page.reports | map: "guest" | compact | uniq -%}
+<h1>{{ page.name | escape }}</h1>
+
+<dl class="facts">
+  <dt>Platform</dt>
+  <dd>{% if page.platform == "ios" %}iOS{% else %}macOS{% endif %}</dd>
+  <dt>Kind</dt>
+  <dd>{{ page.kind | capitalize }}</dd>
+  {%- if page.developer %}
+  <dt>Developer</dt>
+  <dd>{{ page.developer | escape }}</dd>
+  {%- endif %}
+  {%- if guests.size > 0 %}
+  <dt>Guest</dt>
+  <dd>{{ guests | join: ", " }}</dd>
+  {%- endif %}
+  <dt>Level</dt>
+  <dd><span class="level level-{{ current.level }}"><span class="level-number">{{ current.level }}</span> · {{ current_level.name }}</span></dd>
+</dl>
+
+<p>{{ current_level.description }}</p>
+
+<h2>Reports</h2>
+{% assign newest_first = page.reports | reverse %}
+{%- for report in newest_first %}
+{%- assign report_level = site.data.levels | where: "level", report.level | first %}
+<section class="report">
+  <div class="report-head">
+    <time datetime="{{ report.date | date: '%Y-%m-%d' }}">{{ report.date | date: "%Y-%m-%d" }}</time>
+    <span class="level level-{{ report.level }}"><span class="level-number">{{ report.level }}</span> · {{ report_level.name }}</span>
+  </div>
+  <p class="notes">{{ report.notes | escape }}</p>
+  <p class="report-meta">
+    {%- if report.guest %}Guest: {{ report.guest }} · {% endif -%}
+    {%- if report.app_version %}Version {{ report.app_version | escape }} · {% endif -%}
+    {%- if report.source == "pr" %}<a href="https://github.com/colemancda/Bridge32/pull/{{ report.pr }}">Pull request #{{ report.pr }}</a> · {% endif -%}
+    Commit <a href="https://github.com/colemancda/Bridge32/commit/{{ report.bridge32 }}"><code>{{ report.bridge32 }}</code></a>
+    {%- unless report.source == "pr" %} ({{ report.source }}){% endunless -%}
+    {%- if report.pr and report.source != "pr" %} · Screenshots from <a href="https://github.com/colemancda/Bridge32/pull/{{ report.pr }}">pull request #{{ report.pr }}</a>{% endif -%}
+  </p>
+  {%- if report.screenshots %}
+  <div class="screenshots">
+    {%- for shot in report.screenshots %}
+    <figure>
+      <a href="{{ shot.url }}"><img src="{{ shot.url }}" alt="{{ shot.caption | escape }}" loading="lazy"></a>
+      <figcaption>{{ shot.caption | escape }}</figcaption>
+    </figure>
+    {%- endfor %}
+  </div>
+  {%- endif %}
+</section>
+{%- endfor %}
+
+{%- assign body = content | strip -%}
+{% if body != "" %}
+<h2>Notes</h2>
+{{ content }}
+{% endif %}
+
+<p class="edit-link"><a href="https://github.com/colemancda/Bridge32/edit/main/site/{{ page.path }}">Edit this page</a></p>
