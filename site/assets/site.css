@@ -1,0 +1,348 @@
+:root {
+  color-scheme: light dark;
+  --text: #1d1d1f;
+  --muted: #5f6368;
+  --background: #ffffff;
+  --surface: #f5f5f7;
+  --border: #d2d2d7;
+  --link: #0058b0;
+  --level-1: #a8323a;
+  --level-2: #a35400;
+  --level-3: #7a6400;
+  --level-4: #2f7d32;
+  --level-5: #1b5fa8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #f2f2f4;
+    --muted: #a8a8ae;
+    --background: #161618;
+    --surface: #222226;
+    --border: #3a3a40;
+    --link: #6cb2ff;
+    --level-1: #ff8a8f;
+    --level-2: #ffaa5c;
+    --level-3: #e8cc52;
+    --level-4: #7fd483;
+    --level-5: #82b9ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+a {
+  color: var(--link);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--surface);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+}
+
+/* Long inline code, such as a URL, breaks rather than widening the page. */
+p code,
+li code {
+  overflow-wrap: anywhere;
+}
+
+pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.site-header nav,
+main,
+.site-footer {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 1.25rem;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.site-header .site-title {
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--text);
+  text-decoration: none;
+  margin-right: auto;
+}
+
+.site-header nav a:not(.site-title) {
+  text-decoration: none;
+}
+
+.site-header nav a[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+}
+
+main {
+  padding-top: 1rem;
+  padding-bottom: 2rem;
+}
+
+h1 {
+  font-size: 1.9rem;
+  line-height: 1.2;
+  margin: 0.5rem 0 1rem;
+}
+
+h2 {
+  font-size: 1.35rem;
+  margin-top: 2rem;
+}
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding-top: 1rem;
+  padding-bottom: 2rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+/* Tables written in Markdown have no wrapper, so they scroll on their own when they're too wide. */
+main > table {
+  display: block;
+  overflow-x: auto;
+  margin: 1rem 0;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  font-size: 0.875rem;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+td.nowrap {
+  white-space: nowrap;
+}
+
+td img {
+  display: block;
+  height: auto;
+  max-width: 160px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* A level's badge always shows its number and name; the border style tells levels apart without color. */
+.level {
+  display: inline-block;
+  white-space: nowrap;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.3;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  border-width: 2px;
+  color: var(--text);
+}
+
+.level-number {
+  font-variant-numeric: tabular-nums;
+}
+
+.level-1 {
+  border-style: dotted;
+  border-color: var(--level-1);
+}
+
+.level-2 {
+  border-style: dashed;
+  border-color: var(--level-2);
+}
+
+.level-3 {
+  border-style: solid;
+  border-color: var(--level-3);
+}
+
+.level-4 {
+  border-style: double;
+  border-width: 4px;
+  border-color: var(--level-4);
+}
+
+.level-5 {
+  border-style: solid;
+  border-color: var(--level-5);
+  background: var(--level-5);
+  color: var(--background);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 0 0 1.5rem;
+}
+
+.facts dt {
+  color: var(--muted);
+}
+
+.facts dd {
+  margin: 0;
+}
+
+.report {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+}
+
+.report-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.75rem;
+}
+
+.report-head time {
+  font-weight: 600;
+}
+
+.report-meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin: 0.4rem 0 0;
+}
+
+.report p.notes {
+  margin: 0.5rem 0 0;
+}
+
+.screenshots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+.screenshots figure {
+  margin: 0;
+  max-width: 100%;
+  width: 22rem;
+}
+
+.screenshots img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.screenshots figcaption {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin-top: 0.3rem;
+}
+
+.levels {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.6rem 1rem;
+  align-items: baseline;
+  margin: 1rem 0 1.5rem;
+}
+
+.levels dd {
+  margin: 0;
+}
+
+@media (max-width: 40rem) {
+  .levels {
+    grid-template-columns: 1fr;
+    gap: 0.2rem;
+  }
+
+  .levels dd {
+    margin-bottom: 0.6rem;
+  }
+}
+
+.counts {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.edit-link {
+  margin-top: 2rem;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 40rem) {
+  h1 {
+    font-size: 1.6rem;
+  }
+
+  th,
+  td {
+    padding: 0.4rem 0.4rem;
+  }
+}
