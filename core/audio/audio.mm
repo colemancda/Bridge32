@@ -2,6 +2,7 @@
 // AudioServices system sounds on the host's AudioToolbox, and the iOS-only
 // AudioSession API, which has nothing to configure on a Mac.
 
+#include "core/HostPaths.h"
 #include "core/Log.h"
 #include "core/Runtime.h"
 #include "core/objc/Bridge.h"
@@ -16,7 +17,7 @@ namespace {
 
 void *openAL() {
     static void *handle = [] {
-        const char *path = "/System/iOSSupport/System/Library/Frameworks/OpenAL.framework/OpenAL";
+        const char *path = B32_IOS_SUPPORT "/System/Library/Frameworks/OpenAL.framework/OpenAL";
         void *h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
         if (!h) fatal("can't load the host's OpenAL (%s): %s", path, dlerror());
         return h;
