@@ -7,6 +7,7 @@
 #include "core/Runtime.h"
 #include "core/cpu/DynarmicCpu.h"
 #include "core/gl/GLES.h"
+#include "core/uikit/JitGate.h"
 #include "core/uikit/UIKitSupport.h"
 
 #include <dynarmic/interface/exclusive_monitor.h>
@@ -77,27 +78,38 @@ int main(int argc, char **argv) {
             setenv("SDL_GAMECONTROLLERCONFIG", mappings.c_str(), 0);
         }
         b32::uikit::configureHost();
-        b32::gl::loadHostOpenGLES();
 
-        static auto *monitor = new decltype(b32::DynarmicCpu::makeMonitor())(b32::DynarmicCpu::makeMonitor());
-        static std::atomic<size_t> nextProcessor{0};
-        // Never destroyed: quitting runs exit()'s static destructors while the
-        // guest's threads are still running, and they'd use it after it's gone.
-        static b32::Runtime &rt = *new b32::Runtime([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
-            return std::make_unique<b32::DynarmicCpu>(mem, std::move(handler), b32::DynarmicCpu::Arch::V7,
-                                                      monitor->get(), nextProcessor++);
-        });
-        // make-app.sh copies guest libraries (--guest-libs) into the bundle.
-        rt.addGuestLibraryDir([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"B32GuestLibraries"]
-                                  .fileSystemRepresentation);
-        if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
-        rt.load(path.fileSystemRepresentation);
-        b32::log("loaded %s", path.fileSystemRepresentation);
+        // Runs the guest; returns only if the guest's main does.
+        int (^runGuest)(void) = ^int {
+            b32::gl::loadHostOpenGLES();
 
-        std::vector<std::string> guestArgv = {path.fileSystemRepresentation};
-        std::vector<std::string> envp = {std::string("HOME=") + NSHomeDirectory().fileSystemRepresentation,
-                                         std::string("TMPDIR=") + NSTemporaryDirectory().fileSystemRepresentation};
-        // Returns only if the guest's main does (UIApplicationMain never does).
-        return rt.run(guestArgv, envp);
+            static auto *monitor = new decltype(b32::DynarmicCpu::makeMonitor())(b32::DynarmicCpu::makeMonitor());
+            static std::atomic<size_t> nextProcessor{0};
+            // Never destroyed: quitting runs exit()'s static destructors while the
+            // guest's threads are still running, and they'd use it after it's gone.
+            static b32::Runtime &rt = *new b32::Runtime([](b32::GuestMemory &mem, b32::Cpu::SvcHandler handler) -> std::unique_ptr<b32::Cpu> {
+                return std::make_unique<b32::DynarmicCpu>(mem, std::move(handler), b32::DynarmicCpu::Arch::V7,
+                                                          monitor->get(), nextProcessor++);
+            });
+            // make-app.sh copies guest libraries (--guest-libs) into the bundle.
+            rt.addGuestLibraryDir([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"B32GuestLibraries"]
+                                      .fileSystemRepresentation);
+            if (const char *dir = getenv("B32_GUEST_LIBS")) rt.addGuestLibraryDir(dir);
+            rt.load(path.fileSystemRepresentation);
+            b32::log("loaded %s", path.fileSystemRepresentation);
+
+            std::vector<std::string> guestArgv = {path.fileSystemRepresentation};
+            std::vector<std::string> envp = {std::string("HOME=") + NSHomeDirectory().fileSystemRepresentation,
+                                             std::string("TMPDIR=") + NSTemporaryDirectory().fileSystemRepresentation};
+            // Returns only if the guest's main does (UIApplicationMain never does).
+            return rt.run(guestArgv, envp);
+        };
+
+        // Dynarmic needs JIT, which on a device a debugger turns on while the
+        // app runs: show a screen that waits for it, then run the guest from there.
+        if (!b32::uikit::jitAvailable()) {
+            b32::uikit::runUnderJitGate(argc, argv, ^{ exit(runGuest()); });
+        }
+        return runGuest();
     }
 }
