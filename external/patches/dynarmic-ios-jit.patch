@@ -1,0 +1,43 @@
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+index bbdf925f..848359a0 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -159,6 +159,7 @@ A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
+         : AddressSpace(conf.code_cache_size)
+         , conf(conf) {
+     EmitPrelude();
++    mem.detach_jit_server();
+ }
+ 
+ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae777..d48fc927 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -23,7 +23,7 @@ namespace Dynarmic::Backend::Arm64 {
+ AddressSpace::AddressSpace(size_t code_cache_size)
+         : code_cache_size(code_cache_size)
+         , mem(code_cache_size)
+-        , code(mem.ptr(), mem.ptr())
++        , code(mem.wptr(), mem.xptr())
+         , fastmem_manager(exception_handler) {
+     ASSERT_MSG(code_cache_size <= 128 * 1024 * 1024, "code_cache_size > 128 MiB not currently supported");
+ 
+@@ -136,7 +136,7 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, target] : block_info.relocations) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.wptr(), mem.xptr()};
+         c.set_xptr(reinterpret_cast<u32*>(block_info.entry_point + ptr_offset));
+ 
+         switch (target) {
+@@ -276,7 +276,7 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, type] : block_relocations_list) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.wptr(), mem.xptr()};
+         c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
+ 
+         switch (type) {
