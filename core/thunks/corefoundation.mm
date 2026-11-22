@@ -100,6 +100,20 @@ constexpr CFunction kCoreFoundation[] = {
     {"CFStringHasPrefix", "B:oo"}, {"CFStringHasSuffix", "B:oo"}, {"CFStringLowercase", "v:oo"},
     {"CFStringUppercase", "v:oo"}, {"CFStringCreateArrayBySeparatingStrings", "o:ooo"},
     {"CFStringFind", "z:oou"}, {"CFStringAppend", "v:oo"},
+    // Mutable string edits and lookups Xcode 3's plug-ins make (a CFRange is its two words).
+    {"CFStringReplace", "v:ozzo"}, {"CFStringInsert", "v:ozo"}, {"CFStringTrimWhitespace", "v:o"},
+    {"CFStringCompareWithOptions", "z:oozzz"}, {"CFStringCreateWithFileSystemRepresentation", "o:op"},
+    {"CFUUIDCreateFromString", "o:oo"}, {"CFUUIDGetTypeID", "z:"},
+    // Mutable sets always hold objects here (CFSetCreateMutable takes the CFType callbacks).
+    {"CFSetRemoveValue", "v:oo"}, {"CFSetSetValue", "v:oo"}, {"CFSetGetValue", "o:oo"},
+    {"CFDictionaryRemoveAllValues", "v:o"}, {"CFDataDeleteBytes", "v:ozz"},
+    {"CFURLCopyAbsoluteURL", "o:o"}, {"CFURLCreateWithFileSystemPathRelativeToBase", "o:oozuo"},
+    {"CFBundleCopyExecutableURL", "o:o"}, {"CFBundleCopyResourceURLsOfType", "o:ooo"},
+    {"CFBundleCopyResourceURLForLocalization", "o:ooooo"},
+    {"CFBundleCopyResourceURLsOfTypeForLocalization", "o:oooo"},
+    {"CFPreferencesCopyValue", "o:oooo"}, {"CFTimeZoneCreateWithName", "o:oou"},
+    {"CFRunLoopAddCommonMode", "v:oo"}, {"CFPropertyListCreateXMLData", "o:oo"}, {"CFShow", "v:o"},
+    {"CFWriteStreamGetStatus", "z:o"}, {"CFTreeGetChildCount", "z:o"}, {"CFTreeGetChildAtIndex", "o:oz"},
     {"CFCopyDescription", "o:o"}, {"CFDateCompare", "z:oop"},
     {"CFArrayAppendArray", "v:oozz"}, {"CFArrayRemoveValueAtIndex", "v:oz"},
     
@@ -354,6 +368,23 @@ B32_THUNK(_CFArrayGetFirstIndexOfValue) {
     c.ret(uint32_t(CFArrayGetFirstIndexOfValue((CFArrayRef)array, r, hostValue(c, rawFlags(array) & kRawValues, c.args.ptr()))));
 }
 
+// CFIndex CFArrayGetCountOfValue(CFArrayRef, CFRange, const void *value)
+B32_THUNK(_CFArrayGetCountOfValue) {
+    id array = bridge(c).toHost(c.args.ptr());
+    CFRange r = range(c);
+    c.ret(uint32_t(CFArrayGetCountOfValue((CFArrayRef)array, r, hostValue(c, rawFlags(array) & kRawValues, c.args.ptr()))));
+}
+
+// CFArrayRef CFArrayCreateCopy(CFAllocatorRef, CFArrayRef): the copy keeps the original's callbacks,
+// so it holds raw values if the original did.
+B32_THUNK(_CFArrayCreateCopy) {
+    c.args.ptr();
+    id array = bridge(c).toHost(c.args.ptr());
+    id copy = (id)CFArrayCreateCopy(nullptr, (CFArrayRef)array);
+    markRaw(copy, rawFlags(array));
+    c.ret(bridge(c).toGuest(copy));
+}
+
 // void CFArrayGetValues(CFArrayRef, CFRange, const void **values)
 B32_THUNK(_CFArrayGetValues) {
     id array = bridge(c).toHost(c.args.ptr());
@@ -417,6 +448,18 @@ B32_THUNK(_CFDictionaryGetValueIfPresent) {
 B32_THUNK(_CFDictionaryContainsKey) {
     id dict = bridge(c).toHost(c.args.ptr());
     c.ret(CFDictionaryContainsKey((CFDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawKeys, c.args.ptr())));
+}
+B32_THUNK(_CFDictionaryContainsValue) {
+    id dict = bridge(c).toHost(c.args.ptr());
+    c.ret(CFDictionaryContainsValue((CFDictionaryRef)dict, hostValue(c, rawFlags(dict) & kRawValues, c.args.ptr())));
+}
+// CFDictionaryRef CFDictionaryCreateCopy(CFAllocatorRef, CFDictionaryRef): keeps raw keys and values raw.
+B32_THUNK(_CFDictionaryCreateCopy) {
+    c.args.ptr();
+    id dict = bridge(c).toHost(c.args.ptr());
+    id copy = (id)CFDictionaryCreateCopy(nullptr, (CFDictionaryRef)dict);
+    markRaw(copy, rawFlags(dict));
+    c.ret(bridge(c).toGuest(copy));
 }
 
 // CFDataRef CFDataCreateWithBytesNoCopy(CFAllocatorRef, const UInt8 *, CFIndex, CFAllocatorRef deallocator)
